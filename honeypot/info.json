@@ -4,7 +4,6 @@
     "description": "Automatically punish (ban, kick, or role) users who send messages in a configured honeypot channel.",
     "author": ["itsneufox"],
     "min_bot_version": "3.5.0",
-    "max_bot_version": "0.0.0",
     "install_msg": "Honeypot cog loaded! Use `[p]honeypot set #channel` to set the trap.",
     "requirements": [],
     "tags": ["moderation", "automation", "security"],

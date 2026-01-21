@@ -4,7 +4,6 @@
     "description": "A Red bot cog for searching open.mp documentation using Algolia search",
     "author": ["itsneufox"],
     "min_bot_version": "3.5.0",
-    "max_bot_version": "0.0.0",
     "install_msg": "Wiki cog loaded! Use `[p]wiki <search term>` to search the open.mp documentation.",
     "requirements": [
         "aiohttp>=3.8.0",
