@@ -825,7 +825,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         self,
         ctx: commands.Context,
         profile: typing.Optional[str],
-        reason: str = None,
+        reason: typing.Optional[str] = None,
         member: typing.Optional[discord.Member] = None,
     ):
         lang = await self.get_lang(ctx.guild)
@@ -969,7 +969,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         ctx: commands.Context,
         profile: typing.Optional[ProfileConverter] = None,
         *,
-        reason: str = None,
+        reason: typing.Optional[str] = None,
     ) -> None:
         """Create a Ticket.
 
@@ -985,7 +985,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         profile: typing.Optional[ProfileConverter],
         member: discord.Member,
         *,
-        reason: str = None,
+        reason: typing.Optional[str] = None,
     ):
         """Create a Ticket for a member.
 
