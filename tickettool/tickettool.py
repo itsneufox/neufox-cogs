@@ -88,69 +88,84 @@ class TicketTool(settings, DashboardIntegration, Cog):
         _settings: typing.Dict[
             str, typing.Dict[str, typing.Union[typing.List[str], typing.Any, str]]
         ] = {
-            "enable": {"converter": bool, "description": "Enable the system."},
+            "enable": {"converter": bool, "description": "Enable the system.", "no_slash": True},
             "logschannel": {
                 "converter": typing.Union[
                     discord.TextChannel, discord.VoiceChannel, discord.Thread
                 ],
                 "description": "Set the channel where the logs will be sent/saved.",
+                "no_slash": True,
             },
             "forum_channel": {
                 "converter": typing.Union[discord.ForumChannel, discord.TextChannel],
                 "description": "Set the forum channel where the opened tickets will be, or a text channel to use private threads. If it's set, `category_open` and `category_close` will be ignored (except for existing tickets).",
+                "no_slash": True,
             },
             "category_open": {
                 "converter": discord.CategoryChannel,
                 "description": "Set the category where the opened tickets will be.",
+                "no_slash": True,
             },
             "category_close": {
                 "converter": discord.CategoryChannel,
                 "description": "Set the category where the closed tickets will be.",
+                "no_slash": True,
             },
             "admin_roles": {
                 "converter": commands.Greedy[discord.Role],
                 "description": "Users with this role will have full permissions for tickets, but will not be able to set up the cog.",
+                "no_slash": True,
             },
             "support_roles": {
                 "converter": commands.Greedy[discord.Role],
                 "description": "Users with this role will be able to participate and claim the ticket.",
+                "no_slash": True,
             },
             "view_roles": {
                 "converter": commands.Greedy[discord.Role],
                 "description": "Users with this role will only be able to read messages from the ticket, but not send them.",
+                "no_slash": True,
             },
             "ping_roles": {
                 "converter": commands.Greedy[discord.Role],
                 "description": "This role will be pinged automatically when the ticket is created, but does not give any additional permissions.",
+                "no_slash": True,
             },
             "ticket_role": {
                 "converter": discord.Role,
                 "description": "This role will be added automatically to open tickets owners.",
+                "no_slash": True,
             },
             "dynamic_channel_name": {
                 "converter": str,
                 "description": "Set the template that will be used to name the channel when creating a ticket.\n\n`{ticket_id}` - Ticket number\n`{owner_display_name}` - user's nick or name\n`{owner_name}` - user's name\n`{owner_id}` - user's id\n`{guild_name}` - guild's name\n`{guild_id}` - guild's id\n`{bot_display_name}` - bot's nick or name\n`{bot_name}` - bot's name\n`{bot_id}` - bot's id\n`{shortdate}` - mm-dd\n`{longdate}` - mm-dd-yyyy\n`{time}` - hh-mm AM/PM according to bot host system time\n`{emoji}` - The open/closed emoji.",
+                "no_slash": True,
             },
             "nb_max": {
                 "converter": commands.Range[int, 1, None],
                 "description": "Sets the maximum number of open tickets a user can have on the system at any one time (for a profile only).",
+                "no_slash": True,
             },
             "custom_message": {
                 "converter": str,
                 "description": "This message will be sent in the ticket channel when the ticket is opened.\n\n`{ticket_id}` - Ticket number\n`{owner_display_name}` - user's nick or name\n`{owner_name}` - user's name\n`{owner_id}` - user's id\n`{guild_name}` - guild's name\n`{guild_id}` - guild's id\n`{bot_display_name}` - bot's nick or name\n`{bot_name}` - bot's name\n`{bot_id}` - bot's id\n`{shortdate}` - mm-dd\n`{longdate}` - mm-dd-yyyy\n`{time}` - hh-mm AM/PM according to bot host system time\n`{emoji}` - The open/closed emoji.",
                 "style": discord.ButtonStyle(2),
+                "no_slash": True,
             },
             "user_can_close": {
                 "converter": bool,
                 "description": "Can the author of the ticket, if he/she does not have a role set up for the system, close the ticket himself?",
+                "no_slash": True,
             },
             "close_confirmation": {
                 "converter": bool,
                 "description": "Should the bot ask for confirmation before closing the ticket (deletion will necessarily have a confirmation)?",
+                "no_slash": True,
             },
             "custom_modal": {
                 "converter": CustomModalConverter,
                 "description": "Ask a maximum of 5 questions to the user who opens a ticket, with a Discord Modal.\n\n**Example:**\n```\n[p]settickettool customodal <profile>\n- label: What is the problem?\n  style: 2 #  short = 1, paragraph = 2\n  required: True\n  default: None\n  placeholder: None\n  min_length: None\n  max_length: None\n```",
+                "no_slash": True,
             },
             "close_on_leave": {
                 "converter": bool,
