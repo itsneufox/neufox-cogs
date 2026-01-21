@@ -86,7 +86,7 @@ class Ticket:
     def instance(
         ctx: commands.Context,
         profile: str,
-        reason: str = "No reason provided.",
+        reason: str = None,
     ) -> typing.Any:
         ticket: Ticket = Ticket(
             bot=ctx.bot,
@@ -372,7 +372,7 @@ class Ticket:
             if config["custom_message"] is not None:
                 try:
                     embed: discord.Embed = discord.Embed()
-                    embed.title = "Custom Message"
+                    embed.title = get_text(lang, "custom_message_title")
                     to_replace = {
                         "ticket_id": str(self.id),
                         "owner_display_name": self.owner.display_name,
@@ -730,9 +730,9 @@ class Ticket:
                 file=file,
             )
             embed = discord.Embed(
-                title="Transcript Link",
+                title=get_text(lang, "modal_transcript"),
                 description=(
-                    f"[Click here to view the transcript.](https://mahto.id/chat-exporter?url={message.attachments[0].url})"
+                    f"[{get_text(lang, 'transcript_click')}](https://mahto.id/chat-exporter?url={message.attachments[0].url})"
                 ),
                 color=discord.Color.red(),
             )

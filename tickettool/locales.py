@@ -143,6 +143,28 @@ STRINGS = {
         "language_set": "Language has been set to **English**.",
         "language_current": "Current language: **{lang}**",
         "language_invalid": "Invalid language. Choose `en` for English or `pt-br` for Portuguese (Brazil).",
+
+        # Modal titles
+        "modal_create_ticket": "Create Ticket",
+        "modal_close_ticket": "Close Ticket",
+        "modal_custom": "Custom Modal",
+        "modal_transcript": "Transcript Link",
+
+        # Modal labels
+        "modal_why_create": "Why are you creating this ticket?",
+        "modal_why_close": "Why are you closing this ticket?",
+
+        # Placeholders and defaults
+        "no_reason_provided": "No reason provided.",
+
+        # Transcript
+        "transcript_click": "Click here to view the transcript.",
+
+        # Ticket list
+        "tickets_list_title": "Tickets in this guild - Profile {profile}",
+
+        # Custom message
+        "custom_message_title": "Custom Message",
     },
 
     "pt-br": {
@@ -286,6 +308,28 @@ STRINGS = {
         "language_set": "O idioma foi definido para **Português (Brasil)**.",
         "language_current": "Idioma atual: **{lang}**",
         "language_invalid": "Idioma inválido. Escolha `en` para Inglês ou `pt-br` para Português (Brasil).",
+
+        # Modal titles
+        "modal_create_ticket": "Criar Bilhete",
+        "modal_close_ticket": "Fechar Bilhete",
+        "modal_custom": "Modal Personalizado",
+        "modal_transcript": "Link da Transcrição",
+
+        # Modal labels
+        "modal_why_create": "Por que você está criando este bilhete?",
+        "modal_why_close": "Por que você está fechando este bilhete?",
+
+        # Placeholders and defaults
+        "no_reason_provided": "Nenhum motivo fornecido.",
+
+        # Transcript
+        "transcript_click": "Clique aqui para ver a transcrição.",
+
+        # Ticket list
+        "tickets_list_title": "Bilhetes neste servidor - Perfil {profile}",
+
+        # Custom message
+        "custom_message_title": "Mensagem Personalizada",
     }
 }
 

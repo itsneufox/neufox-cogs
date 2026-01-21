@@ -69,7 +69,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
                 "custom_message": None,
                 "embed_button": {
                     "title": "Create Ticket",
-                    "description": _(
+                    "description": (
                         "To get help on this server or to make an order for example, you can create a ticket.\n"
                         "Just use the command `{prefix}ticket create` or click on the button below.\n"
                         "You can then use the `{prefix}ticket` subcommands to manage your ticket."
@@ -825,10 +825,12 @@ class TicketTool(settings, DashboardIntegration, Cog):
         self,
         ctx: commands.Context,
         profile: typing.Optional[str],
-        reason: str = "No reason provided.",
+        reason: str = None,
         member: typing.Optional[discord.Member] = None,
     ):
         lang = await self.get_lang(ctx.guild)
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         if profile is None:
             profiles = await self.config.guild(ctx.guild).profiles()
             if profiles:
@@ -876,7 +878,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         if config["custom_modal"] is not None:
             if getattr(ctx, "_tickettool_modal_answers", None) is None:
                 modal = discord.ui.Modal(
-                    title="Create Ticket", custom_id="create_ticket_custom_modal"
+                    title=get_text(lang, "modal_create_ticket"), custom_id="create_ticket_custom_modal"
                 )
                 modal.on_submit = lambda interaction: interaction.response.defer(ephemeral=True)
                 inputs = []
@@ -902,7 +904,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
 
                 view.interaction_check = interaction_check
                 button: discord.ui.Button = discord.ui.Button(
-                    label="Create Ticket", emoji="🎟️", style=discord.ButtonStyle.secondary
+                    label=get_text(lang, "modal_create_ticket"), emoji="🎟️", style=discord.ButtonStyle.secondary
                 )
 
                 async def send_modal(_interaction: discord.Interaction) -> None:
@@ -914,7 +916,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
                 button.callback = send_modal
                 view.add_item(button)
                 message = await ctx.send(
-                    _("Please provide the required informations by clicking on the button below."),
+                    get_text(lang, "provide_info"),
                     view=view,
                 )
                 timeout = await view.wait()
@@ -934,7 +936,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         await ticket.create()
         if config["custom_modal"] is not None:
             embed: discord.Embed = discord.Embed()
-            embed.title = "Custom Modal"
+            embed.title = get_text(lang, "modal_custom")
             embed.set_author(
                 name=(
                     ctx.author.display_name
@@ -967,7 +969,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         ctx: commands.Context,
         profile: typing.Optional[ProfileConverter] = None,
         *,
-        reason: str = "No reason provided.",
+        reason: str = None,
     ) -> None:
         """Create a Ticket.
 
@@ -983,7 +985,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         profile: typing.Optional[ProfileConverter],
         member: discord.Member,
         *,
-        reason: str = "No reason provided.",
+        reason: str = None,
     ):
         """Create a Ticket for a member.
 
@@ -1030,16 +1032,15 @@ class TicketTool(settings, DashboardIntegration, Cog):
                 io.BytesIO(transcript.encode()),
                 filename=f"transcript-ticket-{ticket.profile}-{ticket.id}.html",
             )
+        lang = await self.get_lang(ctx.guild)
         message = await ctx.send(
-            _(
-                "Here is the html file of the transcript of all the messages in this ticket.\nPlease note: all attachments and user avatars are saved with the Discord link in this file."
-            ),
+            get_text(lang, "export_message"),
             file=file,
         )
         embed = discord.Embed(
-            title="Transcript Link",
+            title=get_text(lang, "modal_transcript"),
             description=(
-                f"[Click here to view the transcript.](https://mahto.id/chat-exporter?url={message.attachments[0].url})"
+                f"[{get_text(lang, 'transcript_click')}](https://mahto.id/chat-exporter?url={message.attachments[0].url})"
             ),
             color=await ctx.embed_color(),
         )
@@ -1061,16 +1062,18 @@ class TicketTool(settings, DashboardIntegration, Cog):
     )
     @ticket.command(name="open", aliases=["reopen"])
     async def command_open(
-        self, ctx: commands.Context, *, reason: typing.Optional[str] = "No reason provided."
+        self, ctx: commands.Context, *, reason: typing.Optional[str] = None
     ) -> None:
         """Open an existing Ticket."""
         ticket: Ticket = await self.get_ticket(ctx.channel)
         config = await ctx.bot.get_cog("TicketTool").get_config(ticket.guild, ticket.profile)
+        lang = await self.get_lang(ctx.guild)
         if not config["enable"]:
-            lang = await self.get_lang(ctx.guild)
             raise commands.UserFeedbackCheckFailure(
                 get_text(lang, "system_not_enabled_short")
             )
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.open(ctx.author, reason=reason)
 
     @decorator(
@@ -1093,7 +1096,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         ctx: commands.Context,
         confirmation: typing.Optional[bool] = None,
         *,
-        reason: typing.Optional[str] = "No reason provided.",
+        reason: typing.Optional[str] = None,
     ) -> None:
         """Close an existing Ticket."""
         ticket: Ticket = await self.get_ticket(ctx.channel)
@@ -1117,6 +1120,8 @@ class TicketTool(settings, DashboardIntegration, Cog):
             response = await CogsUtils.ConfirmationAsk(ctx, embed=embed)
             if not response:
                 return
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.close(ctx.author, reason=reason)
 
     @decorator(
@@ -1139,7 +1144,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         ctx: commands.Context,
         confirmation: typing.Optional[bool] = None,
         *,
-        reason: typing.Optional[str] = "No reason provided.",
+        reason: typing.Optional[str] = None,
     ) -> None:
         """Lock an existing Ticket."""
         ticket: Ticket = await self.get_ticket(ctx.channel)
@@ -1159,6 +1164,8 @@ class TicketTool(settings, DashboardIntegration, Cog):
             response = await CogsUtils.ConfirmationAsk(ctx, embed=embed)
             if not response:
                 return
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.lock(ctx.author, reason=reason)
 
     @decorator(
@@ -1180,13 +1187,15 @@ class TicketTool(settings, DashboardIntegration, Cog):
         self,
         ctx: commands.Context,
         *,
-        reason: typing.Optional[str] = "No reason provided.",
+        reason: typing.Optional[str] = None,
     ) -> None:
         """Unlock an existing locked Ticket."""
         ticket: Ticket = await self.get_ticket(ctx.channel)
         lang = await self.get_lang(ctx.guild)
         if isinstance(ticket.channel, discord.TextChannel):
             raise commands.UserFeedbackCheckFailure(get_text(lang, "cannot_execute_text"))
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.unlock(ctx.author, reason=reason)
 
     @decorator(
@@ -1209,10 +1218,13 @@ class TicketTool(settings, DashboardIntegration, Cog):
         ctx: commands.Context,
         new_name: str,
         *,
-        reason: typing.Optional[str] = "No reason provided.",
+        reason: typing.Optional[str] = None,
     ) -> None:
         """Rename an existing Ticket."""
         ticket: Ticket = await self.get_ticket(ctx.channel)
+        lang = await self.get_lang(ctx.guild)
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.rename(new_name, ctx.author, reason=reason)
 
     @decorator(
@@ -1235,7 +1247,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         ctx: commands.Context,
         confirmation: typing.Optional[bool] = False,
         *,
-        reason: typing.Optional[str] = "No reason provided.",
+        reason: typing.Optional[str] = None,
     ) -> None:
         """Delete an existing Ticket.
 
@@ -1259,6 +1271,8 @@ class TicketTool(settings, DashboardIntegration, Cog):
             response = await CogsUtils.ConfirmationAsk(ctx, embed=embed)
             if not response:
                 return
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.delete(ctx.author, reason=reason)
 
     @decorator(
@@ -1281,12 +1295,15 @@ class TicketTool(settings, DashboardIntegration, Cog):
         ctx: commands.Context,
         member: typing.Optional[discord.Member] = None,
         *,
-        reason: typing.Optional[str] = "No reason provided.",
+        reason: typing.Optional[str] = None,
     ) -> None:
         """Claim an existing Ticket."""
         ticket: Ticket = await self.get_ticket(ctx.channel)
         if member is None:
             member = ctx.author
+        lang = await self.get_lang(ctx.guild)
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.claim_ticket(member, ctx.author, reason=reason)
 
     @decorator(
@@ -1305,10 +1322,13 @@ class TicketTool(settings, DashboardIntegration, Cog):
     )
     @ticket.command(name="unclaim")
     async def command_unclaim(
-        self, ctx: commands.Context, *, reason: typing.Optional[str] = "No reason provided."
+        self, ctx: commands.Context, *, reason: typing.Optional[str] = None
     ) -> None:
         """Unclaim an existing Ticket."""
         ticket: Ticket = await self.get_ticket(ctx.channel)
+        lang = await self.get_lang(ctx.guild)
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.unclaim_ticket(ticket.claim, ctx.author, reason=reason)
 
     @decorator(
@@ -1331,12 +1351,15 @@ class TicketTool(settings, DashboardIntegration, Cog):
         ctx: commands.Context,
         new_owner: discord.Member,
         *,
-        reason: typing.Optional[str] = "No reason provided.",
+        reason: typing.Optional[str] = None,
     ) -> None:
         """Change the owner of an existing Ticket."""
         ticket: Ticket = await self.get_ticket(ctx.channel)
         if new_owner is None:
             new_owner = ctx.author
+        lang = await self.get_lang(ctx.guild)
+        if reason is None:
+            reason = get_text(lang, "no_reason_provided")
         await ticket.change_owner(new_owner, ctx.author, reason=reason)
 
     @decorator(
@@ -1429,10 +1452,11 @@ class TicketTool(settings, DashboardIntegration, Cog):
             ]
         )
         pages = list(pagify(description, page_length=6000))
+        lang = await self.get_lang(ctx.guild)
         embeds = []
         for page in pages:
             embed: discord.Embed = discord.Embed(
-                title=f"Tickets in this guild - Profile {profile}"
+                title=get_text(lang, "tickets_list_title", profile=profile)
             )
             embed.description = page
             embeds.append(embed)
@@ -1468,7 +1492,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
                 return
             config = await self.get_config(guild=interaction.guild, profile=profile)
             if config["custom_modal"] is None:
-                modal = discord.ui.Modal(title="Create Ticket", custom_id="create_ticket_modal")
+                modal = discord.ui.Modal(title=get_text(lang, "modal_create_ticket"), custom_id="create_ticket_modal")
                 modal.on_submit = lambda interaction: interaction.response.defer(ephemeral=True)
                 # profile_input = discord.ui.TextInput(
                 #     label="Profile",
@@ -1479,11 +1503,11 @@ class TicketTool(settings, DashboardIntegration, Cog):
                 # )
                 # modal.add_item(profile_input)
                 reason_input = discord.ui.TextInput(
-                    label="Why are you creating this ticket?",
+                    label=get_text(lang, "modal_why_create"),
                     style=discord.TextStyle.long,
                     max_length=1000,
                     required=False,
-                    placeholder="No reason provided.",
+                    placeholder=get_text(lang, "no_reason_provided"),
                 )
                 modal.add_item(reason_input)
                 await interaction.response.send_modal(modal)
@@ -1495,7 +1519,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
             else:
                 reason = ""
                 modal = discord.ui.Modal(
-                    title="Create Ticket", custom_id="create_ticket_custom_modal"
+                    title=get_text(lang, "modal_create_ticket"), custom_id="create_ticket_custom_modal"
                 )
                 modal.on_submit = lambda interaction: interaction.response.defer(ephemeral=True)
                 inputs = []
@@ -1512,7 +1536,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
                     return  # timeout
                 kwargs = {
                     "_tickettool_modal_answers": {
-                        _input.label: _input.value.strip() or "Not provided." for _input in inputs
+                        _input.label: _input.value.strip() or get_text(lang, "no_reason_provided") for _input in inputs
                     }
                 }
             ctx = await CogsUtils.invoke_command(
@@ -1541,16 +1565,17 @@ class TicketTool(settings, DashboardIntegration, Cog):
                         get_text(lang, "chosen_create"), ephemeral=True
                     )
         elif interaction.data["custom_id"] == "close_ticket_button":
+            lang = await self.get_lang(interaction.guild)
             modal = discord.ui.Modal(
-                title="Close Ticket", timeout=180, custom_id="close_ticket_modal"
+                title=get_text(lang, "modal_close_ticket"), timeout=180, custom_id="close_ticket_modal"
             )
             modal.on_submit = lambda interaction: interaction.response.defer(ephemeral=True)
             reason_input = discord.ui.TextInput(
-                label="Why are you closing this ticket?",
+                label=get_text(lang, "modal_why_close"),
                 style=discord.TextStyle.long,
                 max_length=1000,
                 required=False,
-                placeholder="No reason provided.",
+                placeholder=get_text(lang, "no_reason_provided"),
             )
             modal.add_item(reason_input)
             await interaction.response.send_modal(modal)
@@ -1672,7 +1697,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
         reason = f"{option.emoji} - {option.label}"
         config = await self.get_config(guild=interaction.guild, profile=profile)
         if config["custom_modal"] is not None:
-            modal = discord.ui.Modal(title="Create Ticket", custom_id="create_ticket_custom_modal")
+            modal = discord.ui.Modal(title=get_text(lang, "modal_create_ticket"), custom_id="create_ticket_custom_modal")
             modal.on_submit = lambda interaction: interaction.response.defer(ephemeral=True)
             inputs = []
             for _input in config["custom_modal"]:
@@ -1688,7 +1713,7 @@ class TicketTool(settings, DashboardIntegration, Cog):
                 return  # timeout
             kwargs = {
                 "_tickettool_modal_answers": {
-                    _input.label: _input.value.strip() or "Not provided." for _input in inputs
+                    _input.label: _input.value.strip() or get_text(lang, "no_reason_provided") for _input in inputs
                 }
             }
         else:
