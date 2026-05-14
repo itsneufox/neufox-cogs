@@ -23,6 +23,7 @@ class MusicBoard(commands.Cog):
             posted_message_ids=[],
         )
         self._processing: set[int] = set()
+        self._music_channels: dict[int, int] = {}  # guild_id -> channel_id
 
     @commands.group(name="musicboard", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
@@ -35,6 +36,7 @@ class MusicBoard(commands.Cog):
     async def musicboard_channel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel where music links get posted."""
         await self.config.guild(ctx.guild).music_channel_id.set(channel.id)
+        self._music_channels[ctx.guild.id] = channel.id
         embed = discord.Embed(
             title="MusicBoard",
             description=f"Music channel set to {channel.mention}.\nReact with 🔗 on any YouTube link to nominate it.",
@@ -78,8 +80,7 @@ class MusicBoard(commands.Cog):
             return
         if not message.guild:
             return
-        music_channel_id = await self.config.guild(message.guild).music_channel_id()
-        if not music_channel_id:
+        if not await self._get_music_channel_id(message.guild):
             return
         if self._extract_youtube_url(message.content):
             existing = {str(r.emoji) for r in message.reactions if r.me}
@@ -120,7 +121,7 @@ class MusicBoard(commands.Cog):
         if not guild:
             return
 
-        music_channel_id = await self.config.guild(guild).music_channel_id()
+        music_channel_id = await self._get_music_channel_id(guild)
         if not music_channel_id:
             return
 
@@ -176,6 +177,13 @@ class MusicBoard(commands.Cog):
                 pass
         finally:
             self._processing.discard(payload.message_id)
+
+    async def _get_music_channel_id(self, guild: discord.Guild) -> int | None:
+        if guild.id not in self._music_channels:
+            channel_id = await self.config.guild(guild).music_channel_id()
+            if channel_id:
+                self._music_channels[guild.id] = channel_id
+        return self._music_channels.get(guild.id)
 
     def _extract_youtube_url(self, content: str) -> str | None:
         match = YT_PATTERN.search(content)
