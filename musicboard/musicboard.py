@@ -115,13 +115,18 @@ class MusicBoard(commands.Cog):
 
         emoji = _norm(str(payload.emoji))
 
-        if emoji == _norm(BROKEN_EMOJI):
+        if "⛓" in emoji and "\U0001f4a5" in emoji:
             channel = self.bot.get_channel(payload.channel_id)
             if channel and isinstance(channel, discord.TextChannel):
                 try:
                     msg = await channel.fetch_message(payload.message_id)
-                    await msg.clear_reaction(LINK_EMOJI)
-                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    for emoji_to_clear in (LINK_EMOJI, BROKEN_EMOJI):
+                        try:
+                            await msg.clear_reaction(emoji_to_clear)
+                        except (discord.Forbidden, discord.HTTPException):
+                            pass
+                    await msg.add_reaction("❌")
+                except (discord.NotFound,):
                     pass
             return
 
@@ -181,10 +186,11 @@ class MusicBoard(commands.Cog):
             async with self.config.guild(guild).posted_message_ids() as id_list:
                 id_list.append(payload.message_id)
 
-            try:
-                await message.clear_reaction(LINK_EMOJI)
-            except (discord.Forbidden, discord.HTTPException):
-                pass
+            for emoji_to_clear in (LINK_EMOJI, BROKEN_EMOJI):
+                try:
+                    await message.clear_reaction(emoji_to_clear)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
             try:
                 await message.add_reaction(CHECK_EMOJI)
             except (discord.Forbidden, discord.HTTPException):
