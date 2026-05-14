@@ -1,0 +1,11 @@
+{
+    "name": "MusicBoard",
+    "short": "MusicBoard",
+    "description": "Let users nominate YouTube links to a dedicated music channel by reacting with 🔗. Posts a rich embed with title, thumbnail, and who nominated it.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.0",
+    "install_msg": "MusicBoard loaded! Use `[p]musicboard channel #your-channel` to set the music channel, then react with 🔗 on any YouTube link to nominate it.",
+    "requirements": [],
+    "tags": ["music", "youtube", "utility"],
+    "end_user_data_statement": "This cog stores the designated music channel ID and a list of nominated message IDs per guild."
+}
