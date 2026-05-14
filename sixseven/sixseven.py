@@ -36,22 +36,22 @@ DEFAULT_RESPONSES = [
 ]
 
 PORTUGUESE_RESPONSES = [
-    "Se {term} tem piada para ti, tu provavelmente bates palmas quando o avião aterra.",
-    'Eu sei que te riste antes de enviar isso.',
-    'Tu definitivamente encostaste-te na cadeira todo orgulhoso dessa.',
-    'Mano escreveu isso e ficou à espera que a sala explodisse a rir.',
-    'Enviaste isso como se fosse a coisa mais engraçada já dita.',
-    'Dá para ver que ensaiaste essa piada na cabeça primeiro.',
-    'Carregaste em enviar e achaste que tinhas cozinhado.',
-    'Tu provavelmente releste essa mensagem a sorrir.',
-    'Soou bem mais engraçado na tua cabeça, não foi?',
-    'Estavas demasiado entusiasmado para enviar isso.',
-    'Escreveste isso com confiança total também.',
-    'Tu achaste mesmo que isso ia bater.',
-    'Disseste isso como se toda a gente fosse perder a cabeça a rir.',
-    'Nem conseguiste esperar para enviar essa.',
-    'Essa mensagem deixou-te a sorrir para o ecrã.',
-    'Tu definitivamente esperavas uma reação maior do que essa.',
+    "Se {term} tem graça pra você, você provavelmente bate palma quando o avião pousa.",
+    'Eu sei que você deu uma risadinha antes de mandar isso.',
+    'Você com certeza se recostou na cadeira todo orgulhoso dessa.',
+    'O cara digitou isso e ficou esperando a sala explodir de rir.',
+    'Você mandou isso como se fosse a coisa mais engraçada já dita.',
+    'Dá pra ver que você ensaiou essa piada na cabeça primeiro.',
+    'Você apertou enviar e achou que tinha cozinhado.',
+    'Você provavelmente releu essa mensagem sorrindo.',
+    'Soou bem mais engraçado na sua cabeça, né?',
+    'Você estava empolgado demais pra mandar isso.',
+    'Você escreveu isso com confiança total também.',
+    'Você achou mesmo que isso ia pegar.',
+    'Você falou isso como se todo mundo fosse morrer de rir.',
+    'Nem conseguiu esperar pra mandar essa.',
+    'Essa mensagem te deixou sorrindo pra tela.',
+    'Você com certeza esperava uma reação maior do que essa.',
 ]
 
 RESPONSES_BY_LANGUAGE = {
@@ -61,7 +61,7 @@ RESPONSES_BY_LANGUAGE = {
 
 LANGUAGE_NAMES = {
     "en": "English",
-    "pt": "Portuguese",
+    "pt": "Brazilian Portuguese",
 }
 
 LANGUAGE_ALIASES = {
@@ -69,6 +69,8 @@ LANGUAGE_ALIASES = {
     "eng": "en",
     "english": "en",
     "pt": "pt",
+    "pt-br": "pt",
+    "br": "pt",
     "pt-pt": "pt",
     "portuguese": "pt",
     "portugues": "pt",
