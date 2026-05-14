@@ -84,21 +84,24 @@ class Ticket:
 
     @staticmethod
     def instance(
-        ctx: commands.Context,
+        bot,
+        cog,
+        guild: discord.Guild,
+        author: discord.Member,
         profile: str,
         reason: typing.Optional[str] = None,
     ) -> typing.Any:
         ticket: Ticket = Ticket(
-            bot=ctx.bot,
-            cog=ctx.cog,
+            bot=bot,
+            cog=cog,
             profile=profile,
             id=None,
-            owner=ctx.author,
-            guild=ctx.guild,
+            owner=author,
+            guild=guild,
             channel=None,
             claim=None,
-            created_by=ctx.author,
-            opened_by=ctx.author,
+            created_by=author,
+            opened_by=author,
             closed_by=None,
             deleted_by=None,
             renamed_by=None,
