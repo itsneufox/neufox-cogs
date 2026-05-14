@@ -16,9 +16,20 @@ Through this guide, ``[p]`` will always represent your prefix. Replace ``[p]`` w
 About this cog:
 ---------------
 
-Let users nominate YouTube links to a dedicated music channel by reacting with 🔗.
-When a user reacts to any message containing a YouTube link with the 🔗 emoji, the bot automatically posts a rich embed to the configured music channel with the video title, thumbnail, who nominated it, and a jump link to the original message.
-Each link can only be nominated once — duplicate nominations are silently ignored. A ✅ reaction is added to the original message to confirm the nomination was posted.
+Let users nominate music links to a dedicated channel by reacting with 🔗.
+When a message containing a supported music link is posted, the bot automatically adds a 🔗 and ⛓️‍💥 reaction to it. Reacting with 🔗 nominates the link to the configured music channel. Reacting with ⛓️‍💥 blocks it from being nominated.
+Each link can only be nominated once, the 🔗 reaction is replaced with ✅ after a successful nomination.
+
+**Supported platforms:**
+
+- YouTube & YouTube Music
+- Spotify
+- SoundCloud
+- Apple Music
+- Tidal
+- Deezer
+- Bandcamp
+- Amazon Music
 
 ---------
 Commands:
@@ -44,4 +55,4 @@ Setup
 
 1. Load the cog: ``[p]cog load musicboard``
 2. Set a music channel: ``[p]musicboard channel #music``
-3. Done — members can now react with 🔗 on any message containing a YouTube link to nominate it.
+3. Done, the bot will automatically react to any music link posted in the server.

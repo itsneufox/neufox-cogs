@@ -3,8 +3,19 @@ import re
 import discord
 from redbot.core import commands, Config
 
-YT_PATTERN = re.compile(
-    r'https?://(?:www\.)?(?:youtube\.com/watch\?(?:[^&\s]*&)*v=|youtu\.be/)[\w-]+'
+MUSIC_PATTERN = re.compile(
+    r'https?://'
+    r'(?:'
+    r'(?:www\.)?(?:youtube\.com/watch\?(?:[^&\s]*&)*v=|youtu\.be/)[\w-]+'          # YouTube
+    r'|music\.youtube\.com/watch\?(?:[^&\s]*&)*v=[\w-]+'                            # YouTube Music
+    r'|open\.spotify\.com/(?:track|album|playlist|episode)/[\w]+'                   # Spotify
+    r'|(?:www\.)?soundcloud\.com/[\w-]+/[\w-]+'                                     # SoundCloud
+    r'|music\.apple\.com/\S+'                                                        # Apple Music
+    r'|(?:www\.)?tidal\.com/browse/(?:track|album|playlist)/\d+'                    # Tidal
+    r'|(?:www\.)?deezer\.com/(?:\w+/)?(?:track|album|playlist)/\d+'                 # Deezer
+    r'|[\w-]+\.bandcamp\.com/track/[\w-]+'                                           # Bandcamp
+    r'|music\.amazon\.com/\S+'                                                       # Amazon Music
+    r')'
 )
 
 LINK_EMOJI    = "\U0001f517"                        # 🔗
@@ -17,7 +28,7 @@ def _norm(emoji: str) -> str:
 
 
 class MusicBoard(commands.Cog):
-    """Post YouTube links to a dedicated music channel via 🔗 reaction."""
+    """Post music links to a dedicated channel via 🔗 reaction."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -43,7 +54,7 @@ class MusicBoard(commands.Cog):
         self._music_channels[ctx.guild.id] = channel.id
         embed = discord.Embed(
             title="MusicBoard",
-            description=f"Music channel set to {channel.mention}.\nReact with 🔗 on any YouTube link to nominate it.",
+            description=f"Music channel set to {channel.mention}.\nReact with 🔗 on any music link to nominate it.",
             color=discord.Color.red(),
         )
         await ctx.send(embed=embed)
@@ -63,7 +74,7 @@ class MusicBoard(commands.Cog):
             inline=True,
         )
         embed.add_field(name="Tracks Posted", value=str(posted_count), inline=True)
-        embed.set_footer(text="React with 🔗 on any YouTube link to nominate it.")
+        embed.set_footer(text="React with 🔗 on any music link to nominate it.")
         await ctx.send(embed=embed)
 
     @musicboard.command(name="clear")
@@ -86,7 +97,7 @@ class MusicBoard(commands.Cog):
             return
         if not await self._get_music_channel_id(message.guild):
             return
-        if self._extract_youtube_url(message.content):
+        if self._extract_music_url(message.content):
             existing = {_norm(str(r.emoji)) for r in message.reactions if r.me}
             for emoji in (LINK_EMOJI, BROKEN_EMOJI):
                 if _norm(emoji) not in existing:
@@ -150,7 +161,7 @@ class MusicBoard(commands.Cog):
             if not any(_norm(str(r.emoji)) == _norm(LINK_EMOJI) and r.me for r in message.reactions):
                 return
 
-            url = self._extract_youtube_url(message.content)
+            url = self._extract_music_url(message.content)
             if not url:
                 return
 
@@ -188,6 +199,6 @@ class MusicBoard(commands.Cog):
                 self._music_channels[guild.id] = channel_id
         return self._music_channels.get(guild.id)
 
-    def _extract_youtube_url(self, content: str) -> str | None:
-        match = YT_PATTERN.search(content)
+    def _extract_music_url(self, content: str) -> str | None:
+        match = MUSIC_PATTERN.search(content)
         return match.group(0) if match else None
