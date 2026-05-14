@@ -82,12 +82,13 @@ class MusicBoard(commands.Cog):
         if not music_channel_id:
             return
         if self._extract_youtube_url(message.content):
-            already_reacted = any(str(r.emoji) == LINK_EMOJI and r.me for r in message.reactions)
-            if not already_reacted:
-                try:
-                    await message.add_reaction(LINK_EMOJI)
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
+            existing = {str(r.emoji) for r in message.reactions if r.me}
+            for emoji in (LINK_EMOJI, BROKEN_EMOJI):
+                if emoji not in existing:
+                    try:
+                        await message.add_reaction(emoji)
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
