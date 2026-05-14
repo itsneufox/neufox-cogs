@@ -7,9 +7,13 @@ YT_PATTERN = re.compile(
     r'https?://(?:www\.)?(?:youtube\.com/watch\?(?:[^&\s]*&)*v=|youtu\.be/)[\w-]+'
 )
 
-LINK_EMOJI    = "\U0001f517"          # 🔗
-CHECK_EMOJI   = "✅"              # ✅
-BROKEN_EMOJI  = "⛓️‍\U0001f4a5"  # ⛓️‍💥
+LINK_EMOJI    = "\U0001f517"                        # 🔗
+CHECK_EMOJI   = "✅"                            # ✅
+BROKEN_EMOJI  = "⛓️‍\U0001f4a5"     # ⛓️‍💥
+
+
+def _norm(emoji: str) -> str:
+    return emoji.replace("️", "")
 
 
 class MusicBoard(commands.Cog):
@@ -83,9 +87,9 @@ class MusicBoard(commands.Cog):
         if not await self._get_music_channel_id(message.guild):
             return
         if self._extract_youtube_url(message.content):
-            existing = {str(r.emoji) for r in message.reactions if r.me}
+            existing = {_norm(str(r.emoji)) for r in message.reactions if r.me}
             for emoji in (LINK_EMOJI, BROKEN_EMOJI):
-                if emoji not in existing:
+                if _norm(emoji) not in existing:
                     try:
                         await message.add_reaction(emoji)
                     except (discord.Forbidden, discord.HTTPException):
@@ -98,10 +102,9 @@ class MusicBoard(commands.Cog):
         if payload.user_id == self.bot.user.id:
             return
 
-        emoji = str(payload.emoji)
+        emoji = _norm(str(payload.emoji))
 
-        # Broken link — remove the 🔗 so the message can't be nominated
-        if emoji == BROKEN_EMOJI:
+        if emoji == _norm(BROKEN_EMOJI):
             channel = self.bot.get_channel(payload.channel_id)
             if channel and isinstance(channel, discord.TextChannel):
                 try:
@@ -111,7 +114,7 @@ class MusicBoard(commands.Cog):
                     pass
             return
 
-        if emoji != LINK_EMOJI:
+        if emoji != _norm(LINK_EMOJI):
             return
 
         if payload.message_id in self._processing:
@@ -144,7 +147,7 @@ class MusicBoard(commands.Cog):
             except (discord.NotFound, discord.Forbidden):
                 return
 
-            if not any(str(r.emoji) == LINK_EMOJI and r.me for r in message.reactions):
+            if not any(_norm(str(r.emoji)) == _norm(LINK_EMOJI) and r.me for r in message.reactions):
                 return
 
             url = self._extract_youtube_url(message.content)
@@ -188,5 +191,3 @@ class MusicBoard(commands.Cog):
     def _extract_youtube_url(self, content: str) -> str | None:
         match = YT_PATTERN.search(content)
         return match.group(0) if match else None
-
-
