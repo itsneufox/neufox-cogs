@@ -72,6 +72,23 @@ class MusicBoard(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot:
+            return
+        if not message.guild:
+            return
+        music_channel_id = await self.config.guild(message.guild).music_channel_id()
+        if not music_channel_id:
+            return
+        if self._extract_youtube_url(message.content):
+            already_reacted = any(str(r.emoji) == LINK_EMOJI and r.me for r in message.reactions)
+            if not already_reacted:
+                try:
+                    await message.add_reaction(LINK_EMOJI)
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+    @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
         if str(payload.emoji) != LINK_EMOJI:
             return
@@ -97,6 +114,15 @@ class MusicBoard(commands.Cog):
 
         posted = await self.config.guild(guild).posted_message_ids()
         if payload.message_id in posted:
+            channel = guild.get_channel(payload.channel_id)
+            if channel and isinstance(channel, discord.TextChannel):
+                member = guild.get_member(payload.user_id)
+                if member:
+                    try:
+                        msg = await channel.fetch_message(payload.message_id)
+                        await msg.remove_reaction(LINK_EMOJI, member)
+                    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                        pass
             return
 
         self._processing.add(payload.message_id)
@@ -121,8 +147,11 @@ class MusicBoard(commands.Cog):
                 except (discord.NotFound, discord.HTTPException):
                     return
 
-            embed = self._build_embed(nominator, message)
-            await music_channel.send(content=url, embed=embed)
+            content = (
+                f"\U0001f3b5 Nominated by **{nominator.display_name}**"
+                f" • [Jump to message]({message.jump_url})\n{url}"
+            )
+            await music_channel.send(content=content)
 
             async with self.config.guild(guild).posted_message_ids() as id_list:
                 id_list.append(payload.message_id)
@@ -138,17 +167,4 @@ class MusicBoard(commands.Cog):
         match = YT_PATTERN.search(content)
         return match.group(0) if match else None
 
-    def _build_embed(self, nominator: discord.Member, source_message: discord.Message) -> discord.Embed:
-        embed = discord.Embed(color=discord.Color.red())
-        embed.set_author(
-            name=f"Nominated by {nominator.display_name}",
-            icon_url=nominator.display_avatar.url,
-        )
-        embed.add_field(
-            name="",
-            value=f"[Jump to original message]({source_message.jump_url})",
-            inline=False,
-        )
-        embed.timestamp = discord.utils.utcnow()
-        return embed
 
