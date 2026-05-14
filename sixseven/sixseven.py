@@ -8,12 +8,12 @@ from redbot.core.utils.chat_formatting import pagify
 
 
 SIX_SEVEN_PATTERN = re.compile(
-    r"(?<!\w)(?:six\s+seven|6\s*[-/ ]\s*7)(?!\w)",
+    r"(?<!\w)(?:s+\s*i+\s*x+\W*s+\s*e+\s*v+\s*e+\s*n+|six\W*seven|6\W*7|67)(?!\w)",
     re.IGNORECASE,
 )
 
 DEFAULT_RESPONSE = (
-    'If "six seven" is funny to you, you probably clap when the plane lands.'
+    "If {term} is funny to you, you probably clap when the plane lands."
 )
 
 DEFAULT_RESPONSES = [
@@ -36,7 +36,7 @@ DEFAULT_RESPONSES = [
 ]
 
 PORTUGUESE_RESPONSES = [
-    'Se "six seven" tem piada para ti, tu provavelmente bates palmas quando o avião aterra.',
+    "Se {term} tem piada para ti, tu provavelmente bates palmas quando o avião aterra.",
     'Eu sei que te riste antes de enviar isso.',
     'Tu definitivamente encostaste-te na cadeira todo orgulhoso dessa.',
     'Mano escreveu isso e ficou à espera que a sala explodisse a rir.',
@@ -275,7 +275,8 @@ class SixSeven(commands.Cog):
     async def on_message_without_command(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-        if not SIX_SEVEN_PATTERN.search(message.content):
+        match = SIX_SEVEN_PATTERN.search(message.content)
+        if not match:
             return
 
         guild_config = self.config.guild(message.guild)
@@ -293,6 +294,7 @@ class SixSeven(commands.Cog):
             data = await guild_config.all()
             language = self._resolve_language(message, data)
             response = random.choice(RESPONSES_BY_LANGUAGE[language])
+            response = response.format(term=self._clean_term(match.group(0)))
 
         try:
             await message.reply(
@@ -310,6 +312,9 @@ class SixSeven(commands.Cog):
 
     def _language_name(self, language: str) -> str:
         return LANGUAGE_NAMES.get(language, language)
+
+    def _clean_term(self, term: str) -> str:
+        return " ".join(term.split())
 
     def _resolve_language(self, message: discord.Message, data: dict) -> str:
         channel_id = str(message.channel.id)

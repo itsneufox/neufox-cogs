@@ -1,6 +1,6 @@
 # SixSeven
 
-Replies with a random annoyed comeback when someone says `six seven`, `6 7`, `6-7`, or `6/7`.
+Replies with a random annoyed comeback when someone says variants like `six seven`, `six-seven`, `sixseven`, `6 7`, `6-7`, `6.7`, or `67`.
 Supports English and Portuguese response pools, with channel and category language overrides.
 
 ## Commands
