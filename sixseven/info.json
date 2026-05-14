@@ -1,0 +1,11 @@
+{
+    "name": "SixSeven",
+    "short": "Annoyed 6 7 joke responder",
+    "description": "Replies with random annoyed English or Portuguese comebacks when someone makes a six seven joke.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.0",
+    "install_msg": "SixSeven loaded! Use `[p]sixseven toggle` to enable or disable replies.",
+    "requirements": [],
+    "tags": ["fun", "meme", "utility"],
+    "end_user_data_statement": "This cog stores per-guild settings for whether responses are enabled, the cooldown, optional configured response text, and language overrides for channels and categories."
+}
