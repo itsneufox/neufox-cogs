@@ -1,7 +1,5 @@
 import re
-from typing import Optional
 
-import aiohttp
 import discord
 from redbot.core import commands, Config
 
@@ -123,10 +121,8 @@ class MusicBoard(commands.Cog):
                 except (discord.NotFound, discord.HTTPException):
                     return
 
-            title, thumbnail = await self._fetch_oembed(url)
-
-            embed = self._build_embed(url, title, thumbnail, nominator, message)
-            await music_channel.send(embed=embed)
+            embed = self._build_embed(nominator, message)
+            await music_channel.send(content=url, embed=embed)
 
             async with self.config.guild(guild).posted_message_ids() as id_list:
                 id_list.append(payload.message_id)
@@ -138,48 +134,21 @@ class MusicBoard(commands.Cog):
         finally:
             self._processing.discard(payload.message_id)
 
-    def _extract_youtube_url(self, content: str) -> Optional[str]:
+    def _extract_youtube_url(self, content: str) -> str | None:
         match = YT_PATTERN.search(content)
         return match.group(0) if match else None
 
-    async def _fetch_oembed(self, url: str) -> tuple[str, Optional[str]]:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    "https://www.youtube.com/oembed",
-                    params={"url": url, "format": "json"},
-                    timeout=aiohttp.ClientTimeout(total=8),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("title", "Unknown Title"), data.get("thumbnail_url")
-        except Exception:
-            pass
-        return "Unknown Title", None
-
-    def _build_embed(
-        self,
-        url: str,
-        title: str,
-        thumbnail: Optional[str],
-        nominator: discord.Member,
-        source_message: discord.Message,
-    ) -> discord.Embed:
-        embed = discord.Embed(
-            title=f"\U0001f3b5  {title}",
-            url=url,
-            color=discord.Color.red(),
-        )
+    def _build_embed(self, nominator: discord.Member, source_message: discord.Message) -> discord.Embed:
+        embed = discord.Embed(color=discord.Color.red())
         embed.set_author(
             name=f"Nominated by {nominator.display_name}",
             icon_url=nominator.display_avatar.url,
         )
-        if thumbnail:
-            embed.set_image(url=thumbnail)
         embed.add_field(
-            name="Source",
-            value=f"[Jump to message]({source_message.jump_url})",
+            name="",
+            value=f"[Jump to original message]({source_message.jump_url})",
             inline=False,
         )
         embed.timestamp = discord.utils.utcnow()
         return embed
+
