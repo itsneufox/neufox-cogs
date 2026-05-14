@@ -7,8 +7,9 @@ YT_PATTERN = re.compile(
     r'https?://(?:www\.)?(?:youtube\.com/watch\?(?:[^&\s]*&)*v=|youtu\.be/)[\w-]+'
 )
 
-LINK_EMOJI = "\U0001f517"  # 🔗
-CHECK_EMOJI = "✅"     # ✅
+LINK_EMOJI    = "\U0001f517"          # 🔗
+CHECK_EMOJI   = "✅"              # ✅
+BROKEN_EMOJI  = "⛓️‍\U0001f4a5"  # ⛓️‍💥
 
 
 class MusicBoard(commands.Cog):
@@ -90,11 +91,25 @@ class MusicBoard(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
-        if str(payload.emoji) != LINK_EMOJI:
-            return
         if payload.guild_id is None:
             return
         if payload.user_id == self.bot.user.id:
+            return
+
+        emoji = str(payload.emoji)
+
+        # Broken link — remove the 🔗 so the message can't be nominated
+        if emoji == BROKEN_EMOJI:
+            channel = self.bot.get_channel(payload.channel_id)
+            if channel and isinstance(channel, discord.TextChannel):
+                try:
+                    msg = await channel.fetch_message(payload.message_id)
+                    await msg.clear_reaction(LINK_EMOJI)
+                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    pass
+            return
+
+        if emoji != LINK_EMOJI:
             return
 
         if payload.message_id in self._processing:
@@ -114,15 +129,6 @@ class MusicBoard(commands.Cog):
 
         posted = await self.config.guild(guild).posted_message_ids()
         if payload.message_id in posted:
-            channel = guild.get_channel(payload.channel_id)
-            if channel and isinstance(channel, discord.TextChannel):
-                member = guild.get_member(payload.user_id)
-                if member:
-                    try:
-                        msg = await channel.fetch_message(payload.message_id)
-                        await msg.remove_reaction(LINK_EMOJI, member)
-                    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-                        pass
             return
 
         self._processing.add(payload.message_id)
@@ -134,6 +140,9 @@ class MusicBoard(commands.Cog):
             try:
                 message = await channel.fetch_message(payload.message_id)
             except (discord.NotFound, discord.Forbidden):
+                return
+
+            if not any(str(r.emoji) == LINK_EMOJI and r.me for r in message.reactions):
                 return
 
             url = self._extract_youtube_url(message.content)
@@ -156,6 +165,10 @@ class MusicBoard(commands.Cog):
             async with self.config.guild(guild).posted_message_ids() as id_list:
                 id_list.append(payload.message_id)
 
+            try:
+                await message.clear_reaction(LINK_EMOJI)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
             try:
                 await message.add_reaction(CHECK_EMOJI)
             except (discord.Forbidden, discord.HTTPException):
