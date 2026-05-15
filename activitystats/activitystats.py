@@ -10,6 +10,13 @@ from redbot.core import Config, commands
 
 DEFAULT_COLOR = discord.Color.blue()
 MAX_LIMIT = 25
+ROLE_SYNC_INTERVAL = 300
+TOP_MESSAGE_ROLE_TIERS = ("first", "second", "third")
+RANK_PREFIXES = {
+    1: "🥇",
+    2: "🥈",
+    3: "🥉",
+}
 
 
 class ActivityStats(commands.Cog):
@@ -26,9 +33,11 @@ class ActivityStats(commands.Cog):
             message_authors={},
             received_reactions={},
             message_reactions={},
+            top_message_roles={tier: None for tier in TOP_MESSAGE_ROLE_TIERS},
         )
+        self._last_role_sync: dict[int, float] = {}
 
-    @commands.group(name="activitystats", aliases=["astats"], invoke_without_command=True)
+    @commands.group(name="activitystats", invoke_without_command=True)
     async def activitystats(self, ctx: commands.Context):
         """View message and reaction activity statistics."""
         await ctx.invoke(self.activitystats_server)
@@ -51,6 +60,52 @@ class ActivityStats(commands.Cog):
         embed.add_field(name="Received Reactions", value=str(reactions), inline=True)
         embed.add_field(name="Users Tracked", value=str(users_tracked), inline=True)
         embed.add_field(name="Known Messages", value=str(messages_tracked), inline=True)
+        await ctx.send(embed=embed)
+
+    @activitystats.command(name="help")
+    async def activitystats_help(self, ctx: commands.Context):
+        """Show ActivityStats commands."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="ActivityStats Help",
+            description="Tracks message counts and received reactions without storing message content.",
+            color=DEFAULT_COLOR,
+        )
+        embed.add_field(
+            name="Slash Commands",
+            value=(
+                "`/messages [member]` - show your message count and rank\n"
+                "`/reactions [member]` - show received reaction counts\n"
+                "`/topmessages` - show the message leaderboard\n"
+                "`/topreacts [emoji]` - show the received reaction leaderboard"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Prefix Commands",
+            value=(
+                f"`{prefix}activitystats server` - show tracked totals\n"
+                f"`{prefix}activitystats messages` - show the message leaderboard\n"
+                f"`{prefix}activitystats me [member]` - show a member's message rank\n"
+                f"`{prefix}activitystats reactions [member]` - show a member's received reactions\n"
+                f"`{prefix}activitystats reactiontop [emoji]` - show reaction rankings"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Admin Commands",
+            value=(
+                f"`{prefix}activitystats backfill [limit] [channel]` - import channel history\n"
+                f"`{prefix}activitystats backfillall [limit_per_channel]` - import readable channels\n"
+                f"`{prefix}activitystats toggle` - toggle tracking\n"
+                f"`{prefix}activitystats reset` - clear tracked stats\n"
+                f"`{prefix}activitystats roles` - show top-message role config\n"
+                f"`{prefix}activitystats roles set <first|second|third> <role>` - configure rank roles\n"
+                f"`{prefix}activitystats roles clear [first|second|third]` - clear rank role config\n"
+                f"`{prefix}activitystats roles sync` - apply rank roles now"
+            ),
+            inline=False,
+        )
         await ctx.send(embed=embed)
 
     @activitystats.command(name="backfill")
@@ -76,6 +131,9 @@ class ActivityStats(commands.Cog):
             f"Backfilled {channel.mention}: scanned {scanned} messages, "
             f"added {added} new message records, updated {reaction_updates} reaction counters."
         )
+        result = await self._sync_top_message_roles(ctx.guild)
+        if result["configured"]:
+            await ctx.send(self._format_role_sync_result(result))
 
     @activitystats.command(name="backfillall")
     @commands.admin_or_permissions(manage_guild=True)
@@ -103,16 +161,20 @@ class ActivityStats(commands.Cog):
             f"Backfill complete: scanned {totals[0]} messages, "
             f"added {totals[1]} new message records, updated {totals[2]} reaction counters."
         )
+        result = await self._sync_top_message_roles(ctx.guild)
+        if result["configured"]:
+            await ctx.send(self._format_role_sync_result(result))
 
-    @activitystats.command(name="messages", aliases=["messageleaderboard"])
-    async def activitystats_messages(self, ctx: commands.Context, limit: int = 10):
+    @activitystats.command(name="messages")
+    async def activitystats_messages(self, ctx: commands.Context):
         """Show users with the most tracked messages."""
-        await self._send_message_leaderboard(ctx, limit)
+        await self._send_message_leaderboard(ctx)
 
-    @commands.command(name="messagetop", aliases=["messageleaderboard"])
-    async def messagetop(self, ctx: commands.Context, limit: int = 10):
+    @commands.guild_only()
+    @commands.hybrid_command(name="topmessages")
+    async def topmessages(self, ctx: commands.Context):
         """Show users with the most tracked messages."""
-        await self._send_message_leaderboard(ctx, limit)
+        await self._send_message_leaderboard(ctx)
 
     async def _send_message_leaderboard(self, ctx: commands.Context, limit: int = 10):
         limit = self._clean_limit(limit)
@@ -130,13 +192,14 @@ class ActivityStats(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @activitystats.command(name="me", aliases=["member"])
+    @activitystats.command(name="me")
     async def activitystats_me(self, ctx: commands.Context, member: discord.Member | None = None):
         """Show your message rank and count, or another member's."""
         await self._send_message_rank(ctx, member)
 
-    @commands.command(name="mymessages", aliases=["messagerank"])
-    async def mymessages(self, ctx: commands.Context, member: discord.Member | None = None):
+    @commands.guild_only()
+    @commands.hybrid_command(name="messages")
+    async def messages(self, ctx: commands.Context, member: discord.Member | None = None):
         """Show your message rank and count, or another member's."""
         await self._send_message_rank(ctx, member)
 
@@ -152,12 +215,13 @@ class ActivityStats(commands.Cog):
         embed.add_field(name="Messages", value=str(count), inline=True)
         await ctx.send(embed=embed)
 
-    @activitystats.command(name="reactions", aliases=["memberreactions"])
+    @activitystats.command(name="reactions")
     async def activitystats_reactions(self, ctx: commands.Context, member: discord.Member | None = None):
         """Show received reaction counts for a member."""
         await self._send_reaction_summary(ctx, member)
 
-    @commands.command(name="reactions", aliases=["reactionstats"])
+    @commands.guild_only()
+    @commands.hybrid_command(name="reactions")
     async def reactions(self, ctx: commands.Context, member: discord.Member | None = None):
         """Show received reaction counts for a member."""
         await self._send_reaction_summary(ctx, member)
@@ -182,25 +246,24 @@ class ActivityStats(commands.Cog):
                 embed.add_field(name=f"{emoji}\u200b", value=f"{count}x", inline=True)
         await ctx.send(embed=embed)
 
-    @activitystats.command(name="reactiontop", aliases=["reactionleaderboard"])
+    @activitystats.command(name="reactiontop")
     async def activitystats_reactiontop(
         self,
         ctx: commands.Context,
         emoji: str | None = None,
-        limit: int = 10,
     ):
         """Show users with the most received reactions, optionally for one emoji."""
-        await self._send_reaction_leaderboard(ctx, emoji, limit)
+        await self._send_reaction_leaderboard(ctx, emoji)
 
-    @commands.command(name="reactiontop", aliases=["reactionleaderboard"])
-    async def reactiontop(
+    @commands.guild_only()
+    @commands.hybrid_command(name="topreacts")
+    async def topreacts(
         self,
         ctx: commands.Context,
         emoji: str | None = None,
-        limit: int = 10,
     ):
         """Show users with the most received reactions, optionally for one emoji."""
-        await self._send_reaction_leaderboard(ctx, emoji, limit)
+        await self._send_reaction_leaderboard(ctx, emoji)
 
     async def _send_reaction_leaderboard(
         self,
@@ -208,9 +271,6 @@ class ActivityStats(commands.Cog):
         emoji: str | None = None,
         limit: int = 10,
     ):
-        if emoji and emoji.isdecimal():
-            limit = int(emoji)
-            emoji = None
         limit = self._clean_limit(limit)
 
         all_reactions = await self.config.guild(ctx.guild).received_reactions()
@@ -245,8 +305,98 @@ class ActivityStats(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def activitystats_reset(self, ctx: commands.Context):
         """Clear all tracked stats for this server."""
-        await self.config.guild(ctx.guild).clear()
+        guild_conf = self.config.guild(ctx.guild)
+        await guild_conf.total_messages.set(0)
+        await guild_conf.user_messages.set({})
+        await guild_conf.channel_messages.set({})
+        await guild_conf.message_authors.set({})
+        await guild_conf.received_reactions.set({})
+        await guild_conf.message_reactions.set({})
+        result = await self._sync_top_message_roles(ctx.guild)
         await ctx.send("ActivityStats data has been reset for this server.")
+        if result["configured"]:
+            await ctx.send(self._format_role_sync_result(result))
+
+    @activitystats.group(name="roles", invoke_without_command=True)
+    @commands.admin_or_permissions(manage_roles=True)
+    async def activitystats_roles(self, ctx: commands.Context):
+        """Manage top-message rank roles."""
+        await ctx.invoke(self.activitystats_roles_show)
+
+    @activitystats_roles.command(name="set")
+    @commands.admin_or_permissions(manage_roles=True)
+    @commands.bot_has_permissions(manage_roles=True)
+    async def activitystats_roles_set(self, ctx: commands.Context, tier: str, role: discord.Role):
+        """Set the role for first, second, or third place."""
+        tier = tier.lower()
+        if tier not in TOP_MESSAGE_ROLE_TIERS:
+            await ctx.send("Tier must be one of: first, second, third.")
+            return
+        if not self._can_manage_role(ctx.guild, role):
+            await ctx.send(f"I cannot manage {role.mention}. Move my highest role above it first.")
+            return
+
+        role_id = str(role.id)
+        configured_roles = await self.config.guild(ctx.guild).top_message_roles()
+        for configured_tier, configured_role_id in configured_roles.items():
+            if configured_tier != tier and configured_role_id == role_id:
+                await ctx.send(f"{role.mention} is already configured for {configured_tier} place.")
+                return
+
+        configured_roles[tier] = role_id
+        await self.config.guild(ctx.guild).top_message_roles.set(configured_roles)
+        result = await self._sync_top_message_roles(ctx.guild)
+        await ctx.send(f"{tier.title()} place role set to {role.mention}. {self._format_role_sync_result(result)}")
+
+    @activitystats_roles.command(name="clear")
+    @commands.admin_or_permissions(manage_roles=True)
+    @commands.bot_has_permissions(manage_roles=True)
+    async def activitystats_roles_clear(self, ctx: commands.Context, tier: str | None = None):
+        """Clear one top-message role, or all of them."""
+        configured_roles = await self.config.guild(ctx.guild).top_message_roles()
+        if tier is None:
+            result = await self._remove_configured_top_message_roles(ctx.guild, configured_roles)
+            configured_roles = {configured_tier: None for configured_tier in TOP_MESSAGE_ROLE_TIERS}
+            cleared = "all top-message roles"
+        else:
+            tier = tier.lower()
+            if tier not in TOP_MESSAGE_ROLE_TIERS:
+                await ctx.send("Tier must be one of: first, second, third.")
+                return
+            result = await self._remove_configured_top_message_roles(
+                ctx.guild,
+                {tier: configured_roles.get(tier)},
+            )
+            configured_roles[tier] = None
+            cleared = f"{tier} place role"
+
+        await self.config.guild(ctx.guild).top_message_roles.set(configured_roles)
+        await ctx.send(f"Cleared {cleared}. {self._format_role_sync_result(result)}")
+
+    @activitystats_roles.command(name="show")
+    @commands.admin_or_permissions(manage_roles=True)
+    async def activitystats_roles_show(self, ctx: commands.Context):
+        """Show configured top-message roles."""
+        configured_roles = await self.config.guild(ctx.guild).top_message_roles()
+        lines = []
+        for tier in TOP_MESSAGE_ROLE_TIERS:
+            role = self._configured_role(ctx.guild, configured_roles.get(tier))
+            lines.append(f"**{tier.title()}**: {role.mention if role else 'Not set'}")
+
+        embed = discord.Embed(
+            title="Top Message Roles",
+            description="\n".join(lines),
+            color=DEFAULT_COLOR,
+        )
+        await ctx.send(embed=embed)
+
+    @activitystats_roles.command(name="sync")
+    @commands.admin_or_permissions(manage_roles=True)
+    @commands.bot_has_permissions(manage_roles=True)
+    async def activitystats_roles_sync(self, ctx: commands.Context):
+        """Apply top-message roles to the current rankings."""
+        result = await self._sync_top_message_roles(ctx.guild)
+        await ctx.send(self._format_role_sync_result(result))
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -271,6 +421,7 @@ class ActivityStats(commands.Cog):
                 "channel_id": channel_id,
                 "created_at": int(time.time()),
             }
+        await self._maybe_sync_top_message_roles(message.guild)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -406,6 +557,138 @@ class ActivityStats(commands.Cog):
                     counts[emoji] += count
         return dict(counts)
 
+    async def _maybe_sync_top_message_roles(self, guild: discord.Guild):
+        configured_roles = await self.config.guild(guild).top_message_roles()
+        if not any(configured_roles.values()):
+            return
+
+        now = time.monotonic()
+        last_sync = self._last_role_sync.get(guild.id, 0)
+        if now - last_sync < ROLE_SYNC_INTERVAL:
+            return
+
+        self._last_role_sync[guild.id] = now
+        await self._sync_top_message_roles(guild)
+
+    async def _sync_top_message_roles(self, guild: discord.Guild) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "configured": 0,
+            "added": 0,
+            "removed": 0,
+            "skipped": [],
+        }
+        configured_roles = await self.config.guild(guild).top_message_roles()
+        manageable_roles: dict[str, discord.Role] = {}
+        for tier in TOP_MESSAGE_ROLE_TIERS:
+            role = self._configured_role(guild, configured_roles.get(tier))
+            if role is None:
+                continue
+            result["configured"] += 1
+            if not self._can_manage_role(guild, role):
+                result["skipped"].append(f"{tier}: cannot manage {role.name}")
+                continue
+            manageable_roles[tier] = role
+
+        if not manageable_roles:
+            return result
+
+        top_user_ids = await self._top_message_user_ids(guild, len(TOP_MESSAGE_ROLE_TIERS))
+        desired_by_role: dict[int, int] = {}
+        for index, tier in enumerate(TOP_MESSAGE_ROLE_TIERS):
+            role = manageable_roles.get(tier)
+            if role is not None and index < len(top_user_ids):
+                desired_by_role[role.id] = top_user_ids[index]
+
+        for tier, role in manageable_roles.items():
+            desired_user_id = desired_by_role.get(role.id)
+            for member in list(role.members):
+                if member.id == desired_user_id:
+                    continue
+                try:
+                    await member.remove_roles(role, reason="ActivityStats top-message role sync")
+                    result["removed"] += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    result["skipped"].append(f"{tier}: could not remove {role.name} from {member.display_name}")
+
+        for tier, role in manageable_roles.items():
+            desired_user_id = desired_by_role.get(role.id)
+            if desired_user_id is None:
+                continue
+            member = guild.get_member(desired_user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(desired_user_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    result["skipped"].append(f"{tier}: could not find member {desired_user_id}")
+                    continue
+            if role in member.roles:
+                continue
+            try:
+                await member.add_roles(role, reason="ActivityStats top-message role sync")
+                result["added"] += 1
+            except (discord.Forbidden, discord.HTTPException):
+                result["skipped"].append(f"{tier}: could not add {role.name} to {member.display_name}")
+
+        return result
+
+    async def _remove_configured_top_message_roles(
+        self,
+        guild: discord.Guild,
+        configured_roles: dict[str, str | int | None],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "configured": 0,
+            "added": 0,
+            "removed": 0,
+            "skipped": [],
+        }
+        for tier, role_id in configured_roles.items():
+            role = self._configured_role(guild, role_id)
+            if role is None:
+                continue
+            result["configured"] += 1
+            if not self._can_manage_role(guild, role):
+                result["skipped"].append(f"{tier}: cannot manage {role.name}")
+                continue
+            for member in list(role.members):
+                try:
+                    await member.remove_roles(role, reason="ActivityStats top-message role config cleared")
+                    result["removed"] += 1
+                except (discord.Forbidden, discord.HTTPException):
+                    result["skipped"].append(f"{tier}: could not remove {role.name} from {member.display_name}")
+        return result
+
+    async def _top_message_user_ids(self, guild: discord.Guild, limit: int) -> list[int]:
+        user_messages = await self.config.guild(guild).user_messages()
+        entries = sorted(
+            ((int(user_id), int(count)) for user_id, count in user_messages.items()),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return [user_id for user_id, count in entries[:limit] if count > 0]
+
+    def _configured_role(self, guild: discord.Guild, role_id: str | int | None) -> discord.Role | None:
+        if not role_id:
+            return None
+        return guild.get_role(int(role_id))
+
+    def _can_manage_role(self, guild: discord.Guild, role: discord.Role) -> bool:
+        if role.managed:
+            return False
+        me = guild.me
+        return me is not None and me.guild_permissions.manage_roles and role < me.top_role
+
+    @staticmethod
+    def _format_role_sync_result(result: dict[str, Any]) -> str:
+        message = f"Synced top-message roles: added {result['added']}, removed {result['removed']}."
+        skipped = result.get("skipped") or []
+        if skipped:
+            message += f" Skipped {len(skipped)} update(s): " + "; ".join(skipped[:3])
+            if len(skipped) > 3:
+                message += f"; and {len(skipped) - 3} more"
+            message += "."
+        return message
+
     @staticmethod
     def _apply_reaction_delta(
         received_reactions: dict[str, dict[str, int]],
@@ -433,7 +716,8 @@ class ActivityStats(commands.Cog):
 
         lines = []
         for index, (user_id, count) in enumerate(entries, start=1):
-            lines.append(f"{index}. **{await self._display_user(guild, user_id)}** - {count} {label}")
+            rank = RANK_PREFIXES.get(index, f"{index}.")
+            lines.append(f"{rank} **{await self._display_user(guild, user_id)}** - {count} {label}")
         return "\n".join(lines)
 
     async def _format_reaction_lines(
@@ -449,7 +733,8 @@ class ActivityStats(commands.Cog):
         lines = []
         for index, (user_id, count, reaction) in enumerate(entries, start=1):
             user = await self._display_user(guild, user_id)
-            lines.append(f"{index}. **{user}** - {reaction} x {count}")
+            rank = RANK_PREFIXES.get(index, f"{index}.")
+            lines.append(f"{rank} **{user}** - {reaction} x {count}")
         return "\n".join(lines)
 
     async def _display_user(self, guild: discord.Guild, user_id: int) -> str:
