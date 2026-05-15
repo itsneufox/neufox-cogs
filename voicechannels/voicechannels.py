@@ -614,13 +614,34 @@ class VoiceChannels(commands.Cog):
         channel = await self._validated_owned_channel(interaction, channel_id)
         if channel is None:
             return
+        record = await self._channel_record(interaction.guild, channel_id)
+        if record is not None:
+            await self._delete_voice_channel_dashboard_message(channel, record)
         if await self._send_voice_channel_dashboard_message(channel, interaction.user.id):
             await interaction.response.send_message("Posted a fresh control panel in the voice channel chat.", ephemeral=True)
+            if record is not None:
+                await self._record_channel_event(
+                    interaction.guild,
+                    channel,
+                    "panel_refresh",
+                    actor_id=interaction.user.id,
+                    detail="Posted a fresh control panel.",
+                    record=record,
+                )
         else:
             await interaction.response.send_message(
                 "I could not post in that voice channel chat. Check my Send Messages permissions.",
                 ephemeral=True,
             )
+            if record is not None:
+                await self._record_channel_event(
+                    interaction.guild,
+                    channel,
+                    "panel_refresh_failed",
+                    actor_id=interaction.user.id,
+                    detail="Could not post a fresh control panel.",
+                    record=record,
+                )
 
     async def update_owned_channel_settings(
         self,
@@ -650,11 +671,22 @@ class VoiceChannels(commands.Cog):
         if limit < 0 or limit > 99:
             await interaction.response.send_message("Limit must be between 0 and 99.", ephemeral=True)
             return
+        old_name = channel.name
         try:
             await channel.edit(name=name, user_limit=limit, reason=f"VoiceChannels settings by {interaction.user}")
         except (discord.Forbidden, discord.HTTPException):
             await interaction.response.send_message("I could not update that channel.", ephemeral=True)
             return
+        detail = f"Name: {old_name} -> {name}; Limit: {'none' if limit == 0 else limit}"
+        if name_rejected:
+            detail += f"; Rejected name: {original_name[:80]}"
+        await self._record_channel_event(
+            interaction.guild,
+            channel,
+            "settings_updated_rejected_name" if name_rejected else "settings_updated",
+            actor_id=interaction.user.id,
+            detail=detail,
+        )
         warning = "\nThe channel name you chose is not allowed, so I used your default channel name." if name_rejected else ""
         await interaction.response.send_message(
             f"Updated your channel settings: **{name}**, limit {'none' if limit == 0 else limit}.{warning}",
@@ -771,6 +803,7 @@ class VoiceChannels(commands.Cog):
         )
         if action == "transfer":
             await self._clear_previous_owner_permissions(interaction.guild, channel, old_owner_id)
+            await self._announce_owner_transfer(channel, member)
         if action in {"kick", "block"} and member.voice and member.voice.channel == channel:
             try:
                 await member.move_to(None, reason=f"VoiceChannels {action} by {interaction.user}")
@@ -800,6 +833,15 @@ class VoiceChannels(commands.Cog):
         channel = await self._validated_owned_channel(interaction, channel_id)
         if channel is None:
             return
+        record = await self._channel_record(interaction.guild, channel_id)
+        if record is not None:
+            await self._record_channel_event(
+                interaction.guild,
+                channel,
+                "deleted_by_owner",
+                actor_id=interaction.user.id,
+                record=record,
+            )
         try:
             await channel.delete(reason=f"VoiceChannels deleted by owner {interaction.user}")
         except (discord.Forbidden, discord.HTTPException):
@@ -846,12 +888,28 @@ class VoiceChannels(commands.Cog):
 
         clean_name = self._clean_channel_name(after.name, fallback="Temporary Channel")[:CHANNEL_NAME_MAX_LENGTH]
         if clean_name == after.name:
+            await self._record_channel_event(
+                after.guild,
+                after,
+                "renamed",
+                actor_id=int(record["owner_id"]),
+                detail=f"Name: {before.name} -> {after.name}",
+                record=record,
+            )
             return
 
         try:
             await after.edit(name=clean_name, reason="VoiceChannels filtered temporary channel name")
         except (discord.Forbidden, discord.HTTPException):
             pass
+        await self._record_channel_event(
+            after.guild,
+            after,
+            "blocked_name_corrected",
+            actor_id=int(record["owner_id"]),
+            detail=f"Rejected name: {after.name[:80]}; corrected to: {clean_name}",
+            record=record,
+        )
 
     async def cleanup_guild_channels(self, guild: discord.Guild) -> tuple[int, int]:
         deleted = 0
@@ -867,6 +925,19 @@ class VoiceChannels(commands.Cog):
                     continue
                 if channel.members:
                     continue
+                record = self._normalize_record(created_channels[channel_id])
+                self._append_history_event(
+                    record,
+                    "deleted_by_cleanup",
+                    actor_id=int(record["owner_id"]),
+                )
+                await self._send_audit_log(
+                    guild,
+                    channel,
+                    record,
+                    "Deleted By Cleanup",
+                    actor_id=int(record["owner_id"]),
+                )
                 try:
                     await channel.delete(reason="VoiceChannels cleanup")
                     deleted += 1
@@ -886,6 +957,15 @@ class VoiceChannels(commands.Cog):
         created_channels = await self.config.guild(guild).created_channels()
         if str(channel.id) not in created_channels:
             return
+        record = self._normalize_record(created_channels[str(channel.id)])
+        await self._record_channel_event(
+            guild,
+            channel,
+            "deleted_empty",
+            actor_id=int(record["owner_id"]),
+            detail="Temporary channel stayed empty for 2 minutes.",
+            record=record,
+        )
         try:
             await channel.delete(reason="VoiceChannels temporary channel remained empty")
         except (discord.Forbidden, discord.HTTPException):
@@ -910,6 +990,21 @@ class VoiceChannels(commands.Cog):
             await self._set_panel_message_id(channel.guild, channel.id, message.id)
             return True
         except (AttributeError, discord.Forbidden, discord.HTTPException):
+            return False
+
+    async def _delete_voice_channel_dashboard_message(
+        self,
+        channel: discord.VoiceChannel,
+        record: dict,
+    ) -> bool:
+        message_id = record.get("panel_message_id")
+        if not message_id:
+            return False
+        try:
+            message = await channel.fetch_message(int(message_id))
+            await message.delete()
+            return True
+        except (AttributeError, discord.Forbidden, discord.NotFound, discord.HTTPException):
             return False
 
     async def _refresh_voice_channel_dashboard_message(
@@ -971,6 +1066,48 @@ class VoiceChannels(commands.Cog):
         try:
             await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException:
+            pass
+
+    async def _record_channel_event(
+        self,
+        guild: discord.Guild,
+        channel: discord.VoiceChannel,
+        action: str,
+        *,
+        actor_id: int,
+        target_id: int | None = None,
+        detail: str = "",
+        record: dict | None = None,
+    ):
+        if record is None:
+            record = await self._channel_record(guild, channel.id)
+            if record is None:
+                return
+        self._append_history_event(record, action, actor_id=actor_id, target_id=target_id, detail=detail)
+        async with self.config.guild(guild).created_channels() as created_channels:
+            if str(channel.id) in created_channels:
+                created_channels[str(channel.id)] = record
+        await self._send_audit_log(
+            guild,
+            channel,
+            record,
+            action.replace("_", " ").title(),
+            actor_id=actor_id,
+            target_id=target_id,
+            detail=detail,
+        )
+
+    async def _announce_owner_transfer(
+        self,
+        channel: discord.VoiceChannel,
+        new_owner: discord.Member,
+    ):
+        try:
+            await channel.send(
+                f"This temporary voice channel now belongs to {new_owner.mention}.",
+                allowed_mentions=discord.AllowedMentions(users=True),
+            )
+        except (AttributeError, discord.Forbidden, discord.HTTPException):
             pass
 
     @staticmethod
