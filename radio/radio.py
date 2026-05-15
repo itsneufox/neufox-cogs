@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import shutil
 from urllib.parse import urlparse
 
 import aiohttp
 import discord
+from discord.http import Route
 from redbot.core import Config, commands
 
 
+log = logging.getLogger("red.neufox.radio")
 DEFAULT_COLOR = discord.Color.blurple()
 FFMPEG_OPTIONS = {
     "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
@@ -29,6 +33,7 @@ class Radio(commands.Cog):
             status_channel_id=None,
             status_message_id=None,
             status_api_url=None,
+            voice_status_enabled=True,
         )
         self._manual_stop: set[int] = set()
         self._reconnect_tasks: dict[int, asyncio.Task] = {}
@@ -67,14 +72,22 @@ class Radio(commands.Cog):
     @commands.bot_has_permissions(connect=True, speak=True)
     async def radio_play(self, ctx: commands.Context, channel: discord.VoiceChannel | None = None):
         """Join voice and start the configured radio stream."""
-        await self._play(ctx, channel)
+        try:
+            await self._play(ctx, channel)
+        except Exception:
+            log.exception("Unhandled error in radio play for guild %s", ctx.guild.id if ctx.guild else None)
+            await ctx.send("Radio failed before playback could start. Check the bot logs for the exact traceback.")
 
     @radio.command(name="join")
     @commands.guild_only()
     @commands.bot_has_permissions(connect=True, speak=True)
     async def radio_join(self, ctx: commands.Context, channel: discord.VoiceChannel | None = None):
         """Join voice and start the configured radio stream."""
-        await self._play(ctx, channel)
+        try:
+            await self._play(ctx, channel)
+        except Exception:
+            log.exception("Unhandled error in radio join for guild %s", ctx.guild.id if ctx.guild else None)
+            await ctx.send("Radio failed before playback could start. Check the bot logs for the exact traceback.")
 
     @radio.command(name="stop")
     @commands.guild_only()
@@ -86,6 +99,7 @@ class Radio(commands.Cog):
             return
         self._manual_stop.add(ctx.guild.id)
         self._cancel_reconnect(ctx.guild.id)
+        await self._clear_configured_voice_status(ctx.guild)
         voice_client.stop()
         await ctx.send("Radio playback stopped.")
 
@@ -99,6 +113,7 @@ class Radio(commands.Cog):
             return
         self._manual_stop.add(ctx.guild.id)
         self._cancel_reconnect(ctx.guild.id)
+        await self._clear_configured_voice_status(ctx.guild)
         await voice_client.disconnect(force=True)
         await ctx.send("Left voice.")
 
@@ -133,6 +148,11 @@ class Radio(commands.Cog):
             inline=True,
         )
         embed.add_field(name="Reconnect", value="Enabled" if data["reconnect"] else "Disabled", inline=True)
+        embed.add_field(
+            name="Voice Status",
+            value="Enabled" if data["voice_status_enabled"] else "Disabled",
+            inline=True,
+        )
         await ctx.send(embed=embed)
 
     @radio.command(name="reconnect")
@@ -147,7 +167,7 @@ class Radio(commands.Cog):
     @radio.command(name="statuschannel")
     @commands.admin_or_permissions(manage_guild=True)
     async def radio_status_channel(self, ctx: commands.Context, channel: discord.TextChannel | None = None):
-        """Set the channel where the now playing status message is shown."""
+        """Set the text channel where a now playing status message is shown."""
         if channel is None:
             await self.config.guild(ctx.guild).status_channel_id.clear()
             await self.config.guild(ctx.guild).status_message_id.clear()
@@ -189,11 +209,29 @@ class Radio(commands.Cog):
         else:
             await ctx.send("Set a status channel first with `radio statuschannel <channel>`.")
 
+    @radio.command(name="voicestatus")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def radio_voice_status(self, ctx: commands.Context, enabled: bool | None = None):
+        """Enable or disable updating the connected voice channel's status."""
+        if enabled is None:
+            enabled = not await self.config.guild(ctx.guild).voice_status_enabled()
+        await self.config.guild(ctx.guild).voice_status_enabled.set(enabled)
+
+        if enabled:
+            await self._refresh_voice_status(ctx.guild)
+            await ctx.send("Radio voice channel status is now enabled.")
+        else:
+            await self._clear_configured_voice_status(ctx.guild)
+            await ctx.send("Radio voice channel status is now disabled.")
+
     async def _play(self, ctx: commands.Context, channel: discord.VoiceChannel | None):
         data = await self.config.guild(ctx.guild).all()
         stream_url = data["stream_url"]
         if not stream_url:
             await ctx.send("Set a stream URL first with `radio url <stream_url>`.")
+            return
+        if shutil.which("ffmpeg") is None:
+            await ctx.send("`ffmpeg` is not installed or is not available in the bot's PATH.")
             return
 
         channel = channel or self._author_voice_channel(ctx.author)
@@ -216,15 +254,37 @@ class Radio(commands.Cog):
         except discord.HTTPException:
             await ctx.send("Discord rejected the voice connection request.")
             return
+        except asyncio.TimeoutError:
+            await ctx.send("Discord voice connection timed out. Try again in a moment.")
+            return
+        except RuntimeError as exc:
+            if "PyNaCl" in str(exc):
+                await ctx.send("Voice support is not installed. Install `PyNaCl` in the bot environment.")
+            else:
+                await ctx.send(f"Could not start Discord voice: {exc}")
+            return
+        except discord.ClientException as exc:
+            await ctx.send(f"Could not connect to voice: {exc}")
+            return
+        except Exception:
+            log.exception("Unexpected error while connecting radio voice in guild %s", ctx.guild.id)
+            await ctx.send("I hit an unexpected error while connecting to voice. Check the bot logs for details.")
+            return
 
-        if voice_client.is_playing() or voice_client.is_paused():
-            voice_client.stop()
+        try:
+            if voice_client.is_playing() or voice_client.is_paused():
+                voice_client.stop()
+        except Exception:
+            log.exception("Unexpected error while stopping previous radio source in guild %s", ctx.guild.id)
+            await ctx.send("I could not stop the existing voice source cleanly. Try `.radio leave` and then play again.")
+            return
 
         if not self._start_stream(ctx.guild, voice_client, stream_url):
             await ctx.send("I could not start the stream. Check that ffmpeg is installed and the URL is reachable.")
             return
 
         await self.config.guild(ctx.guild).voice_channel_id.set(channel.id)
+        await self._refresh_voice_status(ctx.guild)
         await ctx.send(f"Streaming radio in {channel.mention}.")
 
     async def _ensure_voice_client(
@@ -248,6 +308,7 @@ class Radio(commands.Cog):
         try:
             source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
         except (discord.ClientException, OSError):
+            log.exception("Could not create FFmpeg source for guild %s", guild.id)
             return False
 
         def after(error: Exception | None):
@@ -256,6 +317,7 @@ class Radio(commands.Cog):
         try:
             voice_client.play(source, after=after)
         except (discord.ClientException, OSError):
+            log.exception("Could not start FFmpeg playback for guild %s", guild.id)
             return False
         return True
 
@@ -306,12 +368,15 @@ class Radio(commands.Cog):
             try:
                 guild_data = await self.config.all_guilds()
                 for guild_id, data in guild_data.items():
-                    if not data.get("status_channel_id"):
+                    if not data.get("status_channel_id") and not data.get("voice_status_enabled"):
                         continue
                     guild = self.bot.get_guild(int(guild_id))
                     if guild is None:
                         continue
-                    await self._refresh_status_message(guild, data)
+                    if data.get("status_channel_id"):
+                        await self._refresh_status_message(guild, data)
+                    if data.get("voice_status_enabled"):
+                        await self._refresh_voice_status(guild, data)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -349,6 +414,49 @@ class Radio(commands.Cog):
             return False
 
         await self.config.guild(guild).status_message_id.set(message.id)
+        return True
+
+    async def _refresh_voice_status(self, guild: discord.Guild, data: dict | None = None) -> bool:
+        data = data or await self.config.guild(guild).all()
+        if not data.get("voice_status_enabled"):
+            return False
+
+        channel = self._configured_voice_channel(guild, data)
+        if channel is None:
+            return False
+
+        status = await self._fetch_status(data)
+        if status.get("online"):
+            text = self._voice_status_text(status["title"])
+        else:
+            text = "LongWayFM: offline"
+
+        return await self._set_voice_channel_status(channel, text)
+
+    async def _clear_configured_voice_status(self, guild: discord.Guild, data: dict | None = None) -> bool:
+        data = data or await self.config.guild(guild).all()
+        channel = self._configured_voice_channel(guild, data)
+        if channel is None:
+            return False
+        return await self._set_voice_channel_status(channel, None)
+
+    async def _set_voice_channel_status(
+        self,
+        channel: discord.VoiceChannel,
+        status: str | None,
+    ) -> bool:
+        try:
+            await self.bot.http.request(
+                Route("PUT", "/channels/{channel_id}/voice-status", channel_id=channel.id),
+                json={"status": status},
+                reason="Radio now playing status update",
+            )
+        except discord.Forbidden:
+            log.warning("Missing permission to set voice status for channel %s", channel.id)
+            return False
+        except discord.HTTPException:
+            log.exception("Discord rejected voice status update for channel %s", channel.id)
+            return False
         return True
 
     async def _fetch_status(self, data: dict) -> dict:
@@ -430,6 +538,21 @@ class Radio(commands.Cog):
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             return None
         return f"{parsed.scheme}://{parsed.netloc}/status-json.xsl"
+
+    def _configured_voice_channel(self, guild: discord.Guild, data: dict) -> discord.VoiceChannel | None:
+        voice_client = guild.voice_client
+        if voice_client and isinstance(voice_client.channel, discord.VoiceChannel):
+            return voice_client.channel
+        channel_id = data.get("voice_channel_id")
+        if not channel_id:
+            return None
+        channel = guild.get_channel(int(channel_id))
+        return channel if isinstance(channel, discord.VoiceChannel) else None
+
+    @staticmethod
+    def _voice_status_text(title: str) -> str:
+        text = f"LongWayFM: {title}".strip()
+        return text[:500]
 
     @staticmethod
     def _select_source(sources: list, stream_url: str | None) -> dict | None:
