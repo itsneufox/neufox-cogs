@@ -37,6 +37,7 @@ class Radio(commands.Cog):
             auto_play=True,
         )
         self._manual_stop: set[int] = set()
+        self._auto_leave: set[int] = set()
         self._reconnect_tasks: dict[int, asyncio.Task] = {}
         self._status_task = self.bot.loop.create_task(self._status_loop())
 
@@ -224,10 +225,10 @@ class Radio(commands.Cog):
             return
         channel_id = int(data["voice_channel_id"])
         if before.channel and before.channel.id == channel_id:
-            await self._sync_auto_play(member.guild, data)
+            self.bot.loop.create_task(self._sync_auto_play_soon(member.guild.id))
             return
         if after.channel and after.channel.id == channel_id:
-            await self._sync_auto_play(member.guild, data)
+            self.bot.loop.create_task(self._sync_auto_play_soon(member.guild.id))
             return
 
     async def _ensure_voice_client(
@@ -267,6 +268,9 @@ class Radio(commands.Cog):
     def _handle_stream_end(self, guild_id: int, error: Exception | None):
         if guild_id in self._manual_stop:
             self._manual_stop.discard(guild_id)
+            return
+        if guild_id in self._auto_leave:
+            self._auto_leave.discard(guild_id)
             return
         if guild_id in self._reconnect_tasks:
             return
@@ -308,6 +312,12 @@ class Radio(commands.Cog):
         if task is not None:
             task.cancel()
 
+    async def _sync_auto_play_soon(self, guild_id: int):
+        await asyncio.sleep(1)
+        guild = self.bot.get_guild(guild_id)
+        if guild is not None:
+            await self._sync_auto_play(guild)
+
     async def _sync_auto_play(self, guild: discord.Guild, data: dict | None = None):
         data = data or await self.config.guild(guild).all()
         if not data.get("auto_play") or not data.get("stream_url") or not data.get("voice_channel_id"):
@@ -322,7 +332,7 @@ class Radio(commands.Cog):
 
         if not has_listener:
             if voice_client and voice_client.channel and voice_client.channel.id == channel.id:
-                self._manual_stop.add(guild.id)
+                self._auto_leave.add(guild.id)
                 self._cancel_reconnect(guild.id)
                 await self._clear_configured_voice_status(guild, data)
                 await voice_client.disconnect(force=True)
@@ -337,12 +347,17 @@ class Radio(commands.Cog):
 
         try:
             self._manual_stop.discard(guild.id)
+            self._auto_leave.discard(guild.id)
             self._cancel_reconnect(guild.id)
             voice_client = await self._ensure_voice_client(guild, channel)
             if not voice_client.is_playing() and not voice_client.is_paused():
-                self._start_stream(guild, voice_client, data["stream_url"])
-                await self._refresh_voice_status(guild, data)
+                if self._start_stream(guild, voice_client, data["stream_url"]):
+                    await self._refresh_voice_status(guild, data)
+                else:
+                    await voice_client.disconnect(force=True)
+                    log.warning("Radio auto-start could not start stream for guild %s", guild.id)
         except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError, discord.ClientException, RuntimeError):
+            log.exception("Radio auto-start failed for guild %s", guild.id)
             return
 
     async def _status_loop(self):
