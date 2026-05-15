@@ -36,6 +36,16 @@ class LeaderboardView(discord.ui.View):
         await interaction.response.send_message("This leaderboard is not yours to control.", ephemeral=True)
         return False
 
+    @discord.ui.button(emoji="⏮️", style=discord.ButtonStyle.secondary)
+    async def first_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        self.page = 0
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
     async def previous_page(
         self,
@@ -56,6 +66,16 @@ class LeaderboardView(discord.ui.View):
         self._update_buttons()
         await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
 
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.secondary)
+    async def last_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        self.page = len(self.embeds) - 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
@@ -66,8 +86,10 @@ class LeaderboardView(discord.ui.View):
                 pass
 
     def _update_buttons(self):
+        self.first_page.disabled = self.page <= 0
         self.previous_page.disabled = self.page <= 0
         self.next_page.disabled = self.page >= len(self.embeds) - 1
+        self.last_page.disabled = self.page >= len(self.embeds) - 1
 
 
 class ActivityStats(commands.Cog):
