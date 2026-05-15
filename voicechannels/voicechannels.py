@@ -17,7 +17,7 @@ class VoiceDashboardView(discord.ui.View):
         self.cog = cog
 
     @discord.ui.button(
-        label="Create Voice Channel",
+        label="Create Channel",
         style=discord.ButtonStyle.primary,
         custom_id=DASHBOARD_CUSTOM_ID,
     )
@@ -32,7 +32,7 @@ class VoiceDashboardView(discord.ui.View):
         await self.cog.create_member_channel(interaction)
 
     @discord.ui.button(
-        label="Control My Channel",
+        label="Manage Channel",
         style=discord.ButtonStyle.secondary,
         custom_id="voicechannels:control",
     )
@@ -47,59 +47,55 @@ class VoiceDashboardView(discord.ui.View):
         await self.cog.send_owner_dashboard(interaction)
 
 
-class ChannelNameModal(discord.ui.Modal):
-    def __init__(self, cog: "VoiceChannels", channel_id: int):
-        super().__init__(title="Rename Voice Channel")
+class ChannelSettingsModal(discord.ui.Modal):
+    def __init__(
+        self,
+        cog: "VoiceChannels",
+        channel_id: int,
+        current_name: str,
+        current_limit: int,
+    ):
+        super().__init__(title="Channel Settings")
         self.cog = cog
         self.channel_id = channel_id
         self.name = discord.ui.TextInput(
             label="Channel name",
             max_length=100,
             placeholder="Study Room",
+            default=current_name,
         )
-        self.add_item(self.name)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.rename_owned_channel(interaction, self.channel_id, str(self.name))
-
-
-class ChannelLimitModal(discord.ui.Modal):
-    def __init__(self, cog: "VoiceChannels", channel_id: int):
-        super().__init__(title="Set User Limit")
-        self.cog = cog
-        self.channel_id = channel_id
         self.limit = discord.ui.TextInput(
             label="User limit",
             max_length=2,
             placeholder="0-99, 0 means unlimited",
+            default=str(current_limit),
+            required=False,
         )
+        self.add_item(self.name)
         self.add_item(self.limit)
 
     async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.set_owned_channel_limit(interaction, self.channel_id, str(self.limit))
+        await self.cog.update_owned_channel_settings(
+            interaction,
+            self.channel_id,
+            str(self.name),
+            str(self.limit),
+        )
 
 
 class MemberActionView(discord.ui.View):
-    def __init__(self, cog: "VoiceChannels", owner_id: int, channel_id: int, action: str):
+    def __init__(self, cog: "VoiceChannels", owner_id: int, channel_id: int, actions: dict[str, str]):
         super().__init__(timeout=60)
-        self.add_item(MemberActionSelect(cog, owner_id, channel_id, action))
+        self.add_item(MemberActionSelect(cog, owner_id, channel_id, actions))
 
 
 class MemberActionSelect(discord.ui.UserSelect):
-    def __init__(self, cog: "VoiceChannels", owner_id: int, channel_id: int, action: str):
-        labels = {
-            "invite": "invite",
-            "trust": "allow",
-            "untrust": "remove from allowed list",
-            "kick": "kick",
-            "block": "block",
-            "unblock": "unblock",
-        }
-        super().__init__(placeholder=f"Choose a member to {labels[action]}", min_values=1, max_values=1)
+    def __init__(self, cog: "VoiceChannels", owner_id: int, channel_id: int, actions: dict[str, str]):
+        super().__init__(placeholder="Choose a member", min_values=1, max_values=1)
         self.cog = cog
         self.owner_id = owner_id
         self.channel_id = channel_id
-        self.action = action
+        self.actions = actions
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.owner_id:
@@ -109,7 +105,56 @@ class MemberActionSelect(discord.ui.UserSelect):
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("That member is not available.", ephemeral=True)
             return
-        await self.cog.apply_member_action(interaction, self.channel_id, self.action, member)
+        await interaction.response.send_message(
+            f"What should I do with {member.mention}?",
+            view=MemberActionButtons(self.cog, self.owner_id, self.channel_id, member, self.actions),
+            ephemeral=True,
+        )
+
+
+class MemberActionButtons(discord.ui.View):
+    def __init__(
+        self,
+        cog: "VoiceChannels",
+        owner_id: int,
+        channel_id: int,
+        member: discord.Member,
+        actions: dict[str, str],
+    ):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.channel_id = channel_id
+        self.member = member
+        for action, label in actions.items():
+            style = discord.ButtonStyle.danger if action in {"kick", "block"} else discord.ButtonStyle.secondary
+            if action in {"invite", "trust"}:
+                style = discord.ButtonStyle.primary
+            self.add_item(MemberActionButton(action, label, style))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
+        return False
+
+
+class MemberActionButton(discord.ui.Button):
+    def __init__(self, action: str, label: str, style: discord.ButtonStyle):
+        super().__init__(label=label, style=style)
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if not isinstance(view, MemberActionButtons):
+            await interaction.response.send_message("This control expired.", ephemeral=True)
+            return
+        await view.cog.apply_member_action(
+            interaction,
+            view.channel_id,
+            self.action,
+            view.member,
+        )
 
 
 class VoiceOwnerDashboardView(discord.ui.View):
@@ -125,47 +170,51 @@ class VoiceOwnerDashboardView(discord.ui.View):
         await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
         return False
 
-    @discord.ui.button(label="Rename", style=discord.ButtonStyle.secondary, row=0)
-    async def name_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ChannelNameModal(self.cog, self.channel_id))
+    @discord.ui.button(label="Settings", style=discord.ButtonStyle.secondary, row=0)
+    async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        channel = await self.cog._validated_owned_channel(interaction, self.channel_id, respond=False)
+        if channel is None:
+            await interaction.response.send_message("That is not your active channel anymore.", ephemeral=True)
+            return
+        await interaction.response.send_modal(
+            ChannelSettingsModal(self.cog, self.channel_id, channel.name, channel.user_limit)
+        )
 
-    @discord.ui.button(label="User Limit", style=discord.ButtonStyle.secondary, row=0)
-    async def limit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ChannelLimitModal(self.cog, self.channel_id))
+    @discord.ui.button(label="Access", style=discord.ButtonStyle.primary, row=0)
+    async def access_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.send_member_picker(
+            interaction,
+            self.channel_id,
+            {
+                "invite": "Invite",
+                "trust": "Allow",
+                "untrust": "Remove Allow",
+                "unblock": "Unblock",
+            },
+            "Choose a member to invite, allow, or unblock.",
+        )
 
-    @discord.ui.button(label="Public / Private", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Moderation", style=discord.ButtonStyle.danger, row=0)
+    async def moderation_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.send_member_picker(
+            interaction,
+            self.channel_id,
+            {
+                "kick": "Kick",
+                "block": "Block",
+            },
+            "Choose a member to kick or block.",
+        )
+
+    @discord.ui.button(label="Privacy", style=discord.ButtonStyle.secondary, row=1)
     async def privacy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.toggle_privacy(interaction, self.channel_id)
 
-    @discord.ui.button(label="Text Chat", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Chat", style=discord.ButtonStyle.secondary, row=1)
     async def chat_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.toggle_chat(interaction, self.channel_id)
 
-    @discord.ui.button(label="Invite User", style=discord.ButtonStyle.primary, row=1)
-    async def invite_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_member_picker(interaction, self.channel_id, "invite")
-
-    @discord.ui.button(label="Allow User", style=discord.ButtonStyle.success, row=1)
-    async def trust_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_member_picker(interaction, self.channel_id, "trust")
-
-    @discord.ui.button(label="Remove Allow", style=discord.ButtonStyle.secondary, row=1)
-    async def untrust_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_member_picker(interaction, self.channel_id, "untrust")
-
-    @discord.ui.button(label="Kick User", style=discord.ButtonStyle.danger, row=2)
-    async def kick_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_member_picker(interaction, self.channel_id, "kick")
-
-    @discord.ui.button(label="Block User", style=discord.ButtonStyle.danger, row=2)
-    async def block_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_member_picker(interaction, self.channel_id, "block")
-
-    @discord.ui.button(label="Unblock User", style=discord.ButtonStyle.secondary, row=2)
-    async def unblock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.send_member_picker(interaction, self.channel_id, "unblock")
-
-    @discord.ui.button(label="Delete Channel", style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=1)
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.delete_owned_channel(interaction, self.channel_id)
 
@@ -411,7 +460,13 @@ class VoiceChannels(commands.Cog):
             ephemeral=True,
         )
 
-    async def rename_owned_channel(self, interaction: discord.Interaction, channel_id: int, name: str):
+    async def update_owned_channel_settings(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+        name: str,
+        raw_limit: str,
+    ):
         channel = await self._validated_owned_channel(interaction, channel_id)
         if channel is None:
             return
@@ -419,17 +474,7 @@ class VoiceChannels(commands.Cog):
         if not name:
             await interaction.response.send_message("Channel name cannot be empty.", ephemeral=True)
             return
-        try:
-            await channel.edit(name=name, reason=f"VoiceChannels rename by {interaction.user}")
-        except (discord.Forbidden, discord.HTTPException):
-            await interaction.response.send_message("I could not rename that channel.", ephemeral=True)
-            return
-        await interaction.response.send_message(f"Renamed your channel to **{name}**.", ephemeral=True)
-
-    async def set_owned_channel_limit(self, interaction: discord.Interaction, channel_id: int, raw_limit: str):
-        channel = await self._validated_owned_channel(interaction, channel_id)
-        if channel is None:
-            return
+        raw_limit = raw_limit.strip() or "0"
         try:
             limit = int(raw_limit)
         except ValueError:
@@ -439,12 +484,12 @@ class VoiceChannels(commands.Cog):
             await interaction.response.send_message("Limit must be between 0 and 99.", ephemeral=True)
             return
         try:
-            await channel.edit(user_limit=limit, reason=f"VoiceChannels limit by {interaction.user}")
+            await channel.edit(name=name, user_limit=limit, reason=f"VoiceChannels settings by {interaction.user}")
         except (discord.Forbidden, discord.HTTPException):
-            await interaction.response.send_message("I could not update that channel limit.", ephemeral=True)
+            await interaction.response.send_message("I could not update that channel.", ephemeral=True)
             return
         await interaction.response.send_message(
-            "Removed the user limit." if limit == 0 else f"Set user limit to {limit}.",
+            f"Updated your channel settings: **{name}**, limit {'none' if limit == 0 else limit}.",
             ephemeral=True,
         )
 
@@ -498,22 +543,20 @@ class VoiceChannels(commands.Cog):
             created_channels[str(channel_id)] = record
         await interaction.response.send_message(f"Created linked chat channel {text_channel.mention}.", ephemeral=True)
 
-    async def send_member_picker(self, interaction: discord.Interaction, channel_id: int, action: str):
+    async def send_member_picker(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+        actions: dict[str, str],
+        prompt: str,
+    ):
         channel = await self._validated_owned_channel(interaction, channel_id, respond=False)
         if channel is None:
             await interaction.response.send_message("That is not your active channel anymore.", ephemeral=True)
             return
-        labels = {
-            "invite": "Invite sends the selected member a DM and allows them to join.",
-            "trust": "Allow lets the selected member join when your channel is private.",
-            "untrust": "Remove Allow removes that private-channel exception.",
-            "kick": "Kick disconnects the selected member if they are inside.",
-            "block": "Block prevents the selected member from joining and kicks them if needed.",
-            "unblock": "Unblock removes the join denial.",
-        }
         await interaction.response.send_message(
-            labels[action],
-            view=MemberActionView(self, interaction.user.id, channel_id, action),
+            prompt,
+            view=MemberActionView(self, interaction.user.id, channel_id, actions),
             ephemeral=True,
         )
 
@@ -687,16 +730,14 @@ class VoiceChannels(commands.Cog):
         category: discord.CategoryChannel | None,
     ) -> discord.Embed:
         embed = discord.Embed(
-            title="Create a Voice Channel",
-            description="Press the button below to create a temporary voice channel.",
+            title="Temporary Voice Channels",
+            description=(
+                "Create a private space for a call when you need one.\n"
+                "Your channel is removed automatically when it is empty."
+            ),
             color=DEFAULT_COLOR,
         )
-        embed.add_field(
-            name="Category",
-            value=category.name if category else "Default placement",
-            inline=True,
-        )
-        embed.set_footer(text="Use Control My Channel after creating one. Empty channels are deleted automatically.")
+        embed.set_footer(text="Create a channel, then use Manage Channel to adjust access and settings.")
         return embed
 
     def _owner_dashboard_embed(
