@@ -1,10 +1,10 @@
 {
     "name": "Radio",
     "short": "Stream a radio URL into voice and show now playing status.",
-    "description": "Streams a configured radio URL into a voice channel using FFmpeg and keeps the voice channel status updated with Icecast now playing metadata.",
+    "description": "Streams a configured radio URL into a voice channel using FFmpeg, keeps the voice channel status updated with Icecast now playing metadata, and automatically joins or leaves based on listeners.",
     "author": ["itsneufox"],
     "min_bot_version": "3.5.0",
-    "install_msg": "Radio loaded! Use `[p]radio url <stream_url>`, then `[p]radio play [voice_channel]`. Voice channel status updates are enabled by default; use `[p]radio voicestatus false` to disable them. The host needs ffmpeg installed.",
+    "install_msg": "Radio loaded! Use `[p]radio url <stream_url>`, then `[p]radio autoplay <voice_channel>`. Manual overrides are `[p]radio forcejoin [voice_channel]` and `[p]radio forcestop`. The host needs ffmpeg installed.",
     "requirements": [],
     "tags": ["radio", "music", "voice", "stream"],
     "end_user_data_statement": "This cog stores configured radio stream URLs, optional voice channel IDs, optional text channel IDs, optional status API URLs, status feature settings, and the bot's status message IDs per guild. It does not store voice audio."

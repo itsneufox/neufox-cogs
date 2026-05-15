@@ -34,6 +34,7 @@ class Radio(commands.Cog):
             status_message_id=None,
             status_api_url=None,
             voice_status_enabled=True,
+            auto_play=True,
         )
         self._manual_stop: set[int] = set()
         self._reconnect_tasks: dict[int, asyncio.Task] = {}
@@ -48,7 +49,35 @@ class Radio(commands.Cog):
     @commands.guild_only()
     async def radio(self, ctx: commands.Context):
         """Manage the server radio stream."""
-        await ctx.invoke(self.radio_status)
+        data = await self.config.guild(ctx.guild).all()
+        channel = ctx.guild.get_channel(data["voice_channel_id"]) if data["voice_channel_id"] else None
+        voice_client = ctx.guild.voice_client
+
+        embed = discord.Embed(title="Radio", color=DEFAULT_COLOR)
+        embed.add_field(name="Stream URL", value=data["stream_url"] or "Not set", inline=False)
+        embed.add_field(
+            name="Auto Channel",
+            value=channel.mention if isinstance(channel, discord.VoiceChannel) else "Not set",
+            inline=True,
+        )
+        embed.add_field(name="Auto Play", value="Enabled" if data["auto_play"] else "Disabled", inline=True)
+        embed.add_field(name="Connected", value="Yes" if voice_client else "No", inline=True)
+        embed.add_field(
+            name="Playing",
+            value="Yes" if voice_client and voice_client.is_playing() else "No",
+            inline=True,
+        )
+        embed.add_field(
+            name="Commands",
+            value=(
+                f"`{ctx.clean_prefix}radio url <stream_url>`\n"
+                f"`{ctx.clean_prefix}radio autoplay <voice_channel> [true/false]`\n"
+                f"`{ctx.clean_prefix}radio forcejoin [voice_channel]`\n"
+                f"`{ctx.clean_prefix}radio forcestop`"
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
 
     @radio.command(name="url")
     @commands.admin_or_permissions(manage_guild=True)
@@ -58,55 +87,48 @@ class Radio(commands.Cog):
             await ctx.send("That does not look like a valid HTTP/HTTPS stream URL.")
             return
         await self.config.guild(ctx.guild).stream_url.set(url.strip())
+        await self._sync_auto_play(ctx.guild)
         await ctx.send("Radio stream URL updated.")
 
-    @radio.command(name="channel")
+    @radio.command(name="autoplay")
     @commands.admin_or_permissions(manage_guild=True)
-    async def radio_channel(self, ctx: commands.Context, channel: discord.VoiceChannel):
-        """Set the default voice channel for radio playback."""
+    async def radio_auto_play(
+        self,
+        ctx: commands.Context,
+        channel: discord.VoiceChannel,
+        enabled: bool = True,
+    ):
+        """Set the radio channel and enable or disable automatic join/leave."""
         await self.config.guild(ctx.guild).voice_channel_id.set(channel.id)
-        await ctx.send(f"Default radio channel set to {channel.mention}.")
+        await self.config.guild(ctx.guild).auto_play.set(enabled)
+        if enabled:
+            await self._sync_auto_play(ctx.guild)
+        else:
+            voice_client = ctx.guild.voice_client
+            if voice_client and voice_client.channel and voice_client.channel.id == channel.id:
+                self._manual_stop.add(ctx.guild.id)
+                self._cancel_reconnect(ctx.guild.id)
+                await self._clear_configured_voice_status(ctx.guild)
+                await voice_client.disconnect(force=True)
+        await ctx.send(
+            f"Radio auto play is now {'enabled' if enabled else 'disabled'} for {channel.mention}."
+        )
 
-    @radio.command(name="play")
+    @radio.command(name="forcejoin")
     @commands.guild_only()
     @commands.bot_has_permissions(connect=True, speak=True)
-    async def radio_play(self, ctx: commands.Context, channel: discord.VoiceChannel | None = None):
-        """Join voice and start the configured radio stream."""
+    async def radio_force_join(self, ctx: commands.Context, channel: discord.VoiceChannel | None = None):
+        """Force the bot to join and start the stream."""
         try:
-            await self._play(ctx, channel)
+            await self._play(ctx, channel, sync_auto=False)
         except Exception:
-            log.exception("Unhandled error in radio play for guild %s", ctx.guild.id if ctx.guild else None)
+            log.exception("Unhandled error in radio forcejoin for guild %s", ctx.guild.id if ctx.guild else None)
             await ctx.send("Radio failed before playback could start. Check the bot logs for the exact traceback.")
 
-    @radio.command(name="join")
+    @radio.command(name="forcestop")
     @commands.guild_only()
-    @commands.bot_has_permissions(connect=True, speak=True)
-    async def radio_join(self, ctx: commands.Context, channel: discord.VoiceChannel | None = None):
-        """Join voice and start the configured radio stream."""
-        try:
-            await self._play(ctx, channel)
-        except Exception:
-            log.exception("Unhandled error in radio join for guild %s", ctx.guild.id if ctx.guild else None)
-            await ctx.send("Radio failed before playback could start. Check the bot logs for the exact traceback.")
-
-    @radio.command(name="stop")
-    @commands.guild_only()
-    async def radio_stop(self, ctx: commands.Context):
-        """Stop radio playback but stay connected."""
-        voice_client = ctx.guild.voice_client
-        if voice_client is None:
-            await ctx.send("I am not connected to voice.")
-            return
-        self._manual_stop.add(ctx.guild.id)
-        self._cancel_reconnect(ctx.guild.id)
-        await self._clear_configured_voice_status(ctx.guild)
-        voice_client.stop()
-        await ctx.send("Radio playback stopped.")
-
-    @radio.command(name="leave")
-    @commands.guild_only()
-    async def radio_leave(self, ctx: commands.Context):
-        """Stop playback and leave voice."""
+    async def radio_force_stop(self, ctx: commands.Context):
+        """Force the bot to stop playback and leave voice."""
         voice_client = ctx.guild.voice_client
         if voice_client is None:
             await ctx.send("I am not connected to voice.")
@@ -115,116 +137,15 @@ class Radio(commands.Cog):
         self._cancel_reconnect(ctx.guild.id)
         await self._clear_configured_voice_status(ctx.guild)
         await voice_client.disconnect(force=True)
-        await ctx.send("Left voice.")
+        await ctx.send("Radio stopped and left voice.")
 
-    @radio.command(name="status")
-    @commands.guild_only()
-    async def radio_status(self, ctx: commands.Context):
-        """Show radio configuration and playback state."""
-        data = await self.config.guild(ctx.guild).all()
-        channel = ctx.guild.get_channel(data["voice_channel_id"]) if data["voice_channel_id"] else None
-        voice_client = ctx.guild.voice_client
-
-        embed = discord.Embed(title="Radio", color=DEFAULT_COLOR)
-        embed.add_field(name="Stream URL", value=data["stream_url"] or "Not set", inline=False)
-        embed.add_field(name="Status API", value=self._status_api_url(data) or "Not set", inline=False)
-        embed.add_field(
-            name="Default Channel",
-            value=channel.mention if isinstance(channel, discord.VoiceChannel) else "Not set",
-            inline=True,
-        )
-        status_channel = (
-            ctx.guild.get_channel(data["status_channel_id"]) if data["status_channel_id"] else None
-        )
-        embed.add_field(
-            name="Status Channel",
-            value=status_channel.mention if isinstance(status_channel, discord.TextChannel) else "Not set",
-            inline=True,
-        )
-        embed.add_field(name="Connected", value="Yes" if voice_client else "No", inline=True)
-        embed.add_field(
-            name="Playing",
-            value="Yes" if voice_client and voice_client.is_playing() else "No",
-            inline=True,
-        )
-        embed.add_field(name="Reconnect", value="Enabled" if data["reconnect"] else "Disabled", inline=True)
-        embed.add_field(
-            name="Voice Status",
-            value="Enabled" if data["voice_status_enabled"] else "Disabled",
-            inline=True,
-        )
-        await ctx.send(embed=embed)
-
-    @radio.command(name="reconnect")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def radio_reconnect(self, ctx: commands.Context, enabled: bool | None = None):
-        """Enable or disable automatic stream reconnect."""
-        if enabled is None:
-            enabled = not await self.config.guild(ctx.guild).reconnect()
-        await self.config.guild(ctx.guild).reconnect.set(enabled)
-        await ctx.send(f"Radio reconnect is now {'enabled' if enabled else 'disabled'}.")
-
-    @radio.command(name="statuschannel")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def radio_status_channel(self, ctx: commands.Context, channel: discord.TextChannel | None = None):
-        """Set the text channel where a now playing status message is shown."""
-        if channel is None:
-            await self.config.guild(ctx.guild).status_channel_id.clear()
-            await self.config.guild(ctx.guild).status_message_id.clear()
-            await ctx.send("Radio status channel disabled.")
-            return
-
-        permissions = channel.permissions_for(ctx.guild.me)
-        if not permissions.send_messages or not permissions.embed_links or not permissions.read_message_history:
-            await ctx.send("I need Send Messages, Embed Links, and Read Message History in that channel.")
-            return
-
-        await self.config.guild(ctx.guild).status_channel_id.set(channel.id)
-        await self.config.guild(ctx.guild).status_message_id.clear()
-        await self._refresh_status_message(ctx.guild)
-        await ctx.send(f"Radio status message enabled in {channel.mention}.")
-
-    @radio.command(name="statusapi")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def radio_status_api(self, ctx: commands.Context, *, url: str | None = None):
-        """Override the Icecast status JSON endpoint."""
-        if url is None:
-            await self.config.guild(ctx.guild).status_api_url.clear()
-            await ctx.send("Radio status API reset. It will be derived from the stream URL.")
-            return
-        if not self._valid_stream_url(url):
-            await ctx.send("That does not look like a valid HTTP/HTTPS status URL.")
-            return
-        await self.config.guild(ctx.guild).status_api_url.set(url.strip())
-        await self._refresh_status_message(ctx.guild)
-        await ctx.send("Radio status API updated.")
-
-    @radio.command(name="refresh")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def radio_refresh(self, ctx: commands.Context):
-        """Refresh the now playing status message immediately."""
-        refreshed = await self._refresh_status_message(ctx.guild)
-        if refreshed:
-            await ctx.send("Radio status message refreshed.")
-        else:
-            await ctx.send("Set a status channel first with `radio statuschannel <channel>`.")
-
-    @radio.command(name="voicestatus")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def radio_voice_status(self, ctx: commands.Context, enabled: bool | None = None):
-        """Enable or disable updating the connected voice channel's status."""
-        if enabled is None:
-            enabled = not await self.config.guild(ctx.guild).voice_status_enabled()
-        await self.config.guild(ctx.guild).voice_status_enabled.set(enabled)
-
-        if enabled:
-            await self._refresh_voice_status(ctx.guild)
-            await ctx.send("Radio voice channel status is now enabled.")
-        else:
-            await self._clear_configured_voice_status(ctx.guild)
-            await ctx.send("Radio voice channel status is now disabled.")
-
-    async def _play(self, ctx: commands.Context, channel: discord.VoiceChannel | None):
+    async def _play(
+        self,
+        ctx: commands.Context,
+        channel: discord.VoiceChannel | None,
+        *,
+        sync_auto: bool = True,
+    ):
         data = await self.config.guild(ctx.guild).all()
         stream_url = data["stream_url"]
         if not stream_url:
@@ -240,7 +161,7 @@ class Radio(commands.Cog):
             if isinstance(configured_channel, discord.VoiceChannel):
                 channel = configured_channel
         if channel is None:
-            await ctx.send("Join a voice channel or set one with `radio channel <voice_channel>`.")
+            await ctx.send("Join a voice channel or provide one with `radio forcejoin <voice_channel>`.")
             return
 
         self._manual_stop.discard(ctx.guild.id)
@@ -276,7 +197,7 @@ class Radio(commands.Cog):
                 voice_client.stop()
         except Exception:
             log.exception("Unexpected error while stopping previous radio source in guild %s", ctx.guild.id)
-            await ctx.send("I could not stop the existing voice source cleanly. Try `.radio leave` and then play again.")
+            await ctx.send("I could not stop the existing voice source cleanly. Try `.radio forcestop` and then join again.")
             return
 
         if not self._start_stream(ctx.guild, voice_client, stream_url):
@@ -285,7 +206,29 @@ class Radio(commands.Cog):
 
         await self.config.guild(ctx.guild).voice_channel_id.set(channel.id)
         await self._refresh_voice_status(ctx.guild)
+        if sync_auto:
+            await self._sync_auto_play(ctx.guild)
         await ctx.send(f"Streaming radio in {channel.mention}.")
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ):
+        if member.bot:
+            return
+        data = await self.config.guild(member.guild).all()
+        if not data.get("auto_play") or not data.get("voice_channel_id"):
+            return
+        channel_id = int(data["voice_channel_id"])
+        if before.channel and before.channel.id == channel_id:
+            await self._sync_auto_play(member.guild, data)
+            return
+        if after.channel and after.channel.id == channel_id:
+            await self._sync_auto_play(member.guild, data)
+            return
 
     async def _ensure_voice_client(
         self,
@@ -344,6 +287,9 @@ class Radio(commands.Cog):
                 configured_channel = guild.get_channel(int(data["voice_channel_id"]))
                 if isinstance(configured_channel, discord.VoiceChannel):
                     channel = configured_channel
+            if data.get("auto_play") and channel is not None and not self._has_human_listener(channel):
+                await self._clear_configured_voice_status(guild, data)
+                return
             voice_client = guild.voice_client
             if voice_client is None:
                 if channel is None:
@@ -361,6 +307,43 @@ class Radio(commands.Cog):
         task = self._reconnect_tasks.pop(guild_id, None)
         if task is not None:
             task.cancel()
+
+    async def _sync_auto_play(self, guild: discord.Guild, data: dict | None = None):
+        data = data or await self.config.guild(guild).all()
+        if not data.get("auto_play") or not data.get("stream_url") or not data.get("voice_channel_id"):
+            return
+
+        channel = guild.get_channel(int(data["voice_channel_id"]))
+        if not isinstance(channel, discord.VoiceChannel):
+            return
+
+        voice_client = guild.voice_client
+        has_listener = self._has_human_listener(channel)
+
+        if not has_listener:
+            if voice_client and voice_client.channel and voice_client.channel.id == channel.id:
+                self._manual_stop.add(guild.id)
+                self._cancel_reconnect(guild.id)
+                await self._clear_configured_voice_status(guild, data)
+                await voice_client.disconnect(force=True)
+            return
+
+        if voice_client and voice_client.channel and voice_client.channel.id != channel.id:
+            return
+        if voice_client and voice_client.is_playing():
+            return
+        if shutil.which("ffmpeg") is None:
+            return
+
+        try:
+            self._manual_stop.discard(guild.id)
+            self._cancel_reconnect(guild.id)
+            voice_client = await self._ensure_voice_client(guild, channel)
+            if not voice_client.is_playing() and not voice_client.is_paused():
+                self._start_stream(guild, voice_client, data["stream_url"])
+                await self._refresh_voice_status(guild, data)
+        except (discord.Forbidden, discord.HTTPException, asyncio.TimeoutError, discord.ClientException, RuntimeError):
+            return
 
     async def _status_loop(self):
         await self.bot.wait_until_red_ready()
@@ -548,6 +531,10 @@ class Radio(commands.Cog):
             return None
         channel = guild.get_channel(int(channel_id))
         return channel if isinstance(channel, discord.VoiceChannel) else None
+
+    @staticmethod
+    def _has_human_listener(channel: discord.VoiceChannel) -> bool:
+        return any(not member.bot for member in channel.members)
 
     @staticmethod
     def _voice_status_text(title: str) -> str:
