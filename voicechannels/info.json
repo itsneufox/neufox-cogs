@@ -7,5 +7,5 @@
     "install_msg": "VoiceChannels loaded! Use `[p]voicechannels setup <dashboard_channel> [category]` to post the creation dashboard. Members can use dashboard buttons to create and manage their temporary voice channel.",
     "requirements": [],
     "tags": ["voice", "channels", "temporary", "utility"],
-    "end_user_data_statement": "This cog stores configured dashboard/category channel IDs, temporary voice channel IDs, creator IDs, allowed user IDs, blocked user IDs, and privacy state. It does not store voice audio or message content."
+    "end_user_data_statement": "This cog stores configured dashboard/category/log channel IDs, temporary voice channel IDs, temporary panel message IDs, creator IDs, allowed user IDs, blocked user IDs, privacy state, and bounded temporary channel action history. It does not store voice audio or message content."
 }

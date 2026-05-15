@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from pathlib import Path
 
 import discord
@@ -14,6 +15,7 @@ DEFAULT_COLOR = discord.Color.blurple()
 DASHBOARD_CUSTOM_ID = "voicechannels:create"
 DEFAULT_NAME_TEMPLATE = "{member}'s Channel"
 EMPTY_DELETE_DELAY_SECONDS = 120
+CHANNEL_HISTORY_LIMIT = 25
 CHANNEL_NAME_MAX_LENGTH = 80
 CHANNEL_NAME_BLOCKED_CHARS = re.compile(r"[@#:`*_~>|\\/<>\[\]{}]+")
 CHANNEL_NAME_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
@@ -309,6 +311,7 @@ class VoiceChannels(commands.Cog):
             dashboard_channel_id=None,
             dashboard_message_id=None,
             category_id=None,
+            log_channel_id=None,
             channel_name_template=DEFAULT_NAME_TEMPLATE,
             user_limit=0,
             created_channels={},
@@ -403,12 +406,24 @@ class VoiceChannels(commands.Cog):
         await self.config.guild(ctx.guild).user_limit.set(limit)
         await ctx.send("Created voice channels will have no user limit." if limit == 0 else f"Created voice channels will have a user limit of {limit}.")
 
+    @voicechannels.command(name="logs")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def voicechannels_logs(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel,
+    ):
+        """Set the text channel used for VoiceChannels audit logs."""
+        await self.config.guild(ctx.guild).log_channel_id.set(channel.id)
+        await ctx.send(f"Voice channel audit logs will be sent to {channel.mention}.")
+
     @voicechannels.command(name="show")
     @commands.admin_or_permissions(manage_guild=True)
     async def voicechannels_show(self, ctx: commands.Context):
         """Show current VoiceChannels configuration."""
         data = await self.config.guild(ctx.guild).all()
         dashboard_channel = self._text_channel(ctx.guild, data["dashboard_channel_id"])
+        log_channel = self._text_channel(ctx.guild, data["log_channel_id"])
         category = self._category(ctx.guild, data["category_id"])
         active_count = len(data["created_channels"])
 
@@ -428,6 +443,11 @@ class VoiceChannels(commands.Cog):
             value=str(data["user_limit"]) if data["user_limit"] else "None",
             inline=True,
         )
+        embed.add_field(
+            name="Log Channel",
+            value=log_channel.mention if log_channel else "Not set",
+            inline=True,
+        )
         embed.add_field(name="Name Template", value=f"`{data['channel_name_template']}`", inline=False)
         embed.add_field(name="Tracked Channels", value=str(active_count), inline=True)
 
@@ -440,6 +460,8 @@ class VoiceChannels(commands.Cog):
                 f"`{prefix}voicechannels category [category]`\n"
                 f"`{prefix}voicechannels name <template>`\n"
                 f"`{prefix}voicechannels limit [0-99]`\n"
+                f"`{prefix}voicechannels logs [channel]`\n"
+                f"`{prefix}voicechannels history [channel]`\n"
                 f"`{prefix}voicechannels cleanup`"
             ),
             inline=False,
@@ -461,6 +483,49 @@ class VoiceChannels(commands.Cog):
         """Delete empty tracked channels and forget missing ones."""
         deleted, forgotten = await self.cleanup_guild_channels(ctx.guild)
         await ctx.send(f"Cleanup complete: deleted {deleted}, forgot {forgotten}.")
+
+    @voicechannels.command(name="history")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def voicechannels_history(
+        self,
+        ctx: commands.Context,
+        channel: discord.VoiceChannel | None = None,
+    ):
+        """Show the owner/action history for a temporary voice channel."""
+        data = await self.config.guild(ctx.guild).created_channels()
+        if channel is None:
+            if len(data) != 1:
+                await ctx.send("Provide a temporary voice channel when more than one is active.")
+                return
+            channel_id = next(iter(data))
+            channel = ctx.guild.get_channel(int(channel_id))
+        if not isinstance(channel, discord.VoiceChannel):
+            await ctx.send("That temporary voice channel is not available.")
+            return
+
+        raw_record = data.get(str(channel.id))
+        if raw_record is None:
+            await ctx.send("That channel is not tracked by VoiceChannels.")
+            return
+        record = self._normalize_record(raw_record)
+        history = record.get("history", [])
+        embed = discord.Embed(title=f"Voice Channel History: {channel.name}", color=DEFAULT_COLOR)
+        embed.add_field(name="Current Owner", value=self._member_label(ctx.guild, int(record["owner_id"])), inline=False)
+        if not history:
+            embed.description = "No recorded events yet."
+        else:
+            lines = []
+            for event in history[-10:]:
+                timestamp = int(event.get("ts", 0))
+                action = str(event.get("action", "event")).replace("_", " ").title()
+                actor = self._member_label(ctx.guild, int(event.get("actor_id", 0)))
+                target_id = event.get("target_id")
+                target = f" -> {self._member_label(ctx.guild, int(target_id))}" if target_id else ""
+                detail = str(event.get("detail", ""))
+                lines.append(f"<t:{timestamp}:R> **{action}** by {actor}{target}{f' - {detail}' if detail else ''}")
+            embed.description = "\n".join(lines)
+            embed.set_footer(text=f"Showing last {min(len(history), 10)} of {len(history)} recorded events.")
+        await ctx.send(embed=embed)
 
     async def create_member_channel(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -507,7 +572,10 @@ class VoiceChannels(commands.Cog):
             return
 
         async with self.config.guild(guild).created_channels() as created_channels:
-            created_channels[str(channel.id)] = self._new_channel_record(member.id)
+            record = self._new_channel_record(member.id)
+            self._append_history_event(record, "created", actor_id=member.id, detail=f"Initial name: {channel.name}")
+            created_channels[str(channel.id)] = record
+        await self._send_audit_log(guild, channel, record, "Created", actor_id=member.id, detail=f"Initial name: {channel.name}")
 
         panel_posted = await self._send_voice_channel_dashboard_message(channel, member.id)
 
@@ -564,7 +632,12 @@ class VoiceChannels(commands.Cog):
         channel = await self._validated_owned_channel(interaction, channel_id)
         if channel is None:
             return
-        name = self._clean_channel_name(name.strip(), fallback="Temporary Channel")[:CHANNEL_NAME_MAX_LENGTH]
+        original_name = name.strip()
+        default_name = self._channel_name(DEFAULT_NAME_TEMPLATE, interaction.user)
+        name = self._clean_channel_name(original_name, fallback=default_name)[:CHANNEL_NAME_MAX_LENGTH]
+        name_rejected = self._channel_name_was_rejected(original_name, name)
+        if name_rejected:
+            name = default_name
         if not name:
             await interaction.response.send_message("Channel name cannot be empty.", ephemeral=True)
             return
@@ -582,10 +655,12 @@ class VoiceChannels(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             await interaction.response.send_message("I could not update that channel.", ephemeral=True)
             return
+        warning = "\nThe channel name you chose is not allowed, so I used your default channel name." if name_rejected else ""
         await interaction.response.send_message(
-            f"Updated your channel settings: **{name}**, limit {'none' if limit == 0 else limit}.",
+            f"Updated your channel settings: **{name}**, limit {'none' if limit == 0 else limit}.{warning}",
             ephemeral=True,
         )
+        await self._refresh_voice_channel_dashboard_message(channel)
 
     async def toggle_privacy(self, interaction: discord.Interaction, channel_id: int):
         channel = await self._validated_owned_channel(interaction, channel_id)
@@ -594,12 +669,25 @@ class VoiceChannels(commands.Cog):
         async with self.config.guild(interaction.guild).created_channels() as created_channels:
             record = self._normalize_record(created_channels[str(channel_id)])
             record["private"] = not bool(record.get("private"))
+            self._append_history_event(
+                record,
+                "privacy_private" if record["private"] else "privacy_public",
+                actor_id=interaction.user.id,
+            )
             created_channels[str(channel_id)] = record
         await self._apply_access_overwrites(interaction.guild, channel, record)
+        await self._send_audit_log(
+            interaction.guild,
+            channel,
+            record,
+            "Privacy Private" if record["private"] else "Privacy Public",
+            actor_id=interaction.user.id,
+        )
         await interaction.response.send_message(
             "Your channel is now private." if record["private"] else "Your channel is now public.",
             ephemeral=True,
         )
+        await self._refresh_voice_channel_dashboard_message(channel)
 
     async def send_member_picker(
         self,
@@ -667,11 +755,20 @@ class VoiceChannels(commands.Cog):
                 trusted.add(old_owner_id)
                 trusted.discard(member.id)
                 blocked.discard(member.id)
+            self._append_history_event(record, action, actor_id=interaction.user.id, target_id=member.id)
             record["trusted_ids"] = list(trusted)
             record["blocked_ids"] = list(blocked)
             created_channels[str(channel_id)] = record
 
         await self._apply_access_overwrites(interaction.guild, channel, record)
+        await self._send_audit_log(
+            interaction.guild,
+            channel,
+            record,
+            action.replace("_", " ").title(),
+            actor_id=interaction.user.id,
+            target_id=member.id,
+        )
         if action == "transfer":
             await self._clear_previous_owner_permissions(interaction.guild, channel, old_owner_id)
         if action in {"kick", "block"} and member.voice and member.voice.channel == channel:
@@ -694,6 +791,10 @@ class VoiceChannels(commands.Cog):
             "transfer": f"Transferred ownership to {member.mention}.",
         }
         await interaction.response.send_message(responses[action], ephemeral=True)
+        if action == "transfer":
+            await self._refresh_voice_channel_dashboard_message(channel, owner_id=member.id)
+        else:
+            await self._refresh_voice_channel_dashboard_message(channel)
 
     async def delete_owned_channel(self, interaction: discord.Interaction, channel_id: int):
         channel = await self._validated_owned_channel(interaction, channel_id)
@@ -801,14 +902,105 @@ class VoiceChannels(commands.Cog):
         if record is None:
             return False
         try:
-            await channel.send(
+            message = await channel.send(
+                embed=self._owner_dashboard_embed(channel, record),
+                view=VoiceOwnerDashboardView(self, owner_id, channel.id),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await self._set_panel_message_id(channel.guild, channel.id, message.id)
+            return True
+        except (AttributeError, discord.Forbidden, discord.HTTPException):
+            return False
+
+    async def _refresh_voice_channel_dashboard_message(
+        self,
+        channel: discord.VoiceChannel,
+        owner_id: int | None = None,
+    ) -> bool:
+        record = await self._channel_record(channel.guild, channel.id)
+        if record is None:
+            return False
+        message_id = record.get("panel_message_id")
+        if not message_id:
+            return False
+        owner_id = int(owner_id or record["owner_id"])
+        try:
+            message = await channel.fetch_message(int(message_id))
+            await message.edit(
                 embed=self._owner_dashboard_embed(channel, record),
                 view=VoiceOwnerDashboardView(self, owner_id, channel.id),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return True
-        except (AttributeError, discord.Forbidden, discord.HTTPException):
+        except (AttributeError, discord.Forbidden, discord.NotFound, discord.HTTPException):
             return False
+
+    async def _set_panel_message_id(self, guild: discord.Guild, channel_id: int, message_id: int):
+        async with self.config.guild(guild).created_channels() as created_channels:
+            raw_record = created_channels.get(str(channel_id))
+            if raw_record is None:
+                return
+            record = self._normalize_record(raw_record)
+            record["panel_message_id"] = message_id
+            created_channels[str(channel_id)] = record
+
+    async def _send_audit_log(
+        self,
+        guild: discord.Guild,
+        channel: discord.VoiceChannel,
+        record: dict,
+        action: str,
+        *,
+        actor_id: int,
+        target_id: int | None = None,
+        detail: str = "",
+    ):
+        data = await self.config.guild(guild).all()
+        log_channel = self._text_channel(guild, data["log_channel_id"])
+        if log_channel is None:
+            return
+        embed = discord.Embed(title=f"Voice Channel {action}", color=DEFAULT_COLOR)
+        embed.add_field(name="Channel", value=f"{channel.mention}\n`{channel.id}`", inline=False)
+        embed.add_field(name="Owner", value=self._member_label(guild, int(record["owner_id"])), inline=False)
+        embed.add_field(name="Actor", value=self._member_label(guild, actor_id), inline=True)
+        if target_id is not None:
+            embed.add_field(name="Target", value=self._member_label(guild, target_id), inline=True)
+        if detail:
+            embed.add_field(name="Detail", value=detail[:1024], inline=False)
+        embed.timestamp = discord.utils.utcnow()
+        try:
+            await log_channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            pass
+
+    @staticmethod
+    def _append_history_event(
+        record: dict,
+        action: str,
+        *,
+        actor_id: int,
+        target_id: int | None = None,
+        detail: str = "",
+    ):
+        history = list(record.get("history", []))
+        event = {
+            "ts": int(time.time()),
+            "action": action,
+            "actor_id": int(actor_id),
+        }
+        if target_id is not None:
+            event["target_id"] = int(target_id)
+        if detail:
+            event["detail"] = detail[:120]
+        history.append(event)
+        record["history"] = history[-CHANNEL_HISTORY_LIMIT:]
+
+    @staticmethod
+    def _member_label(guild: discord.Guild, user_id: int) -> str:
+        member = guild.get_member(user_id)
+        if member:
+            return f"{member.display_name} (`{member.id}`)"
+        return f"Unknown (`{user_id}`)"
 
     def _dashboard_embed(
         self,
@@ -863,13 +1055,13 @@ class VoiceChannels(commands.Cog):
             title="Voice Channel Controls",
             description=(
                 f"Managing {channel.mention}\n"
+                f"Owner: {owner.mention if owner else 'Unknown'}\n"
                 "**Invite User** sends a DM invite and lets that user join.\n"
                 "**Allow User** lets someone join private channels without sending a DM.\n"
                 "**Transfer** gives ownership of this channel to another member."
             ),
             color=DEFAULT_COLOR,
         )
-        embed.add_field(name="Owner", value=owner.mention if owner else "Unknown", inline=True)
         embed.add_field(name="Privacy", value="Private" if record.get("private") else "Public", inline=True)
         embed.add_field(name="User Limit", value=str(channel.user_limit) if channel.user_limit else "None", inline=True)
         embed.add_field(name="Allowed", value=str(allowed), inline=True)
@@ -900,6 +1092,12 @@ class VoiceChannels(commands.Cog):
             name,
             fallback=DEFAULT_NAME_TEMPLATE.replace("{member}", clean_member_name),
         )[:CHANNEL_NAME_MAX_LENGTH]
+
+    @staticmethod
+    def _channel_name_was_rejected(original_name: str, cleaned_name: str) -> bool:
+        normalized_original = CHANNEL_NAME_SPACES.sub(" ", original_name).strip(" .-_")
+        normalized_cleaned = CHANNEL_NAME_SPACES.sub(" ", cleaned_name).strip(" .-_")
+        return bool(normalized_original) and normalized_original.casefold() != normalized_cleaned.casefold()
 
     @classmethod
     def _clean_channel_name(
@@ -1102,6 +1300,8 @@ class VoiceChannels(commands.Cog):
             "private": False,
             "trusted_ids": [],
             "blocked_ids": [],
+            "panel_message_id": None,
+            "history": [],
         }
 
     def _normalize_record(self, raw_record: int | dict | None) -> dict:
