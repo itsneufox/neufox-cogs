@@ -119,6 +119,39 @@ class VoiceDashboardView(discord.ui.View):
             return
         await self.cog.send_owner_dashboard(interaction)
 
+    @discord.ui.button(
+        label="Admin Controls",
+        style=discord.ButtonStyle.secondary,
+        custom_id="voicechannels:admin_control",
+    )
+    async def admin_control_voice_channel(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+            return
+        if not self.cog._can_admin_manage(interaction.user):
+            await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
+            return
+        await interaction.response.send_modal(AdminChannelModal(self.cog))
+
+
+class AdminChannelModal(discord.ui.Modal):
+    def __init__(self, cog: "VoiceChannels"):
+        super().__init__(title="Admin Channel Controls")
+        self.cog = cog
+        self.channel_id = discord.ui.TextInput(
+            label="Voice channel ID",
+            max_length=25,
+            placeholder="Paste the temporary voice channel ID",
+        )
+        self.add_item(self.channel_id)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog.send_admin_dashboard(interaction, str(self.channel_id))
+
 
 class ChannelSettingsModal(discord.ui.Modal):
     def __init__(
@@ -127,10 +160,12 @@ class ChannelSettingsModal(discord.ui.Modal):
         channel_id: int,
         current_name: str,
         current_limit: int,
+        admin_mode: bool = False,
     ):
         super().__init__(title="Channel Settings")
         self.cog = cog
         self.channel_id = channel_id
+        self.admin_mode = admin_mode
         self.name = discord.ui.TextInput(
             label="Channel name",
             max_length=100,
@@ -153,25 +188,41 @@ class ChannelSettingsModal(discord.ui.Modal):
             self.channel_id,
             str(self.name),
             str(self.limit),
+            admin_mode=self.admin_mode,
         )
 
 
 class MemberActionView(discord.ui.View):
-    def __init__(self, cog: "VoiceChannels", owner_id: int, channel_id: int, actions: dict[str, str]):
+    def __init__(
+        self,
+        cog: "VoiceChannels",
+        owner_id: int,
+        channel_id: int,
+        actions: dict[str, str],
+        controller_id: int | None = None,
+    ):
         super().__init__(timeout=60)
-        self.add_item(MemberActionSelect(cog, owner_id, channel_id, actions))
+        self.add_item(MemberActionSelect(cog, owner_id, channel_id, actions, controller_id=controller_id))
 
 
 class MemberActionSelect(discord.ui.UserSelect):
-    def __init__(self, cog: "VoiceChannels", owner_id: int, channel_id: int, actions: dict[str, str]):
+    def __init__(
+        self,
+        cog: "VoiceChannels",
+        owner_id: int,
+        channel_id: int,
+        actions: dict[str, str],
+        controller_id: int | None = None,
+    ):
         super().__init__(placeholder="Choose a member", min_values=1, max_values=1)
         self.cog = cog
         self.owner_id = owner_id
+        self.controller_id = controller_id or owner_id
         self.channel_id = channel_id
         self.actions = actions
 
     async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.owner_id:
+        if interaction.user.id != self.controller_id:
             await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
             return
         member = self.values[0]
@@ -180,7 +231,14 @@ class MemberActionSelect(discord.ui.UserSelect):
             return
         await interaction.response.send_message(
             f"What should I do with {member.mention}?",
-            view=MemberActionButtons(self.cog, self.owner_id, self.channel_id, member, self.actions),
+            view=MemberActionButtons(
+                self.cog,
+                self.owner_id,
+                self.channel_id,
+                member,
+                self.actions,
+                controller_id=self.controller_id,
+            ),
             ephemeral=True,
         )
 
@@ -193,10 +251,12 @@ class MemberActionButtons(discord.ui.View):
         channel_id: int,
         member: discord.Member,
         actions: dict[str, str],
+        controller_id: int | None = None,
     ):
         super().__init__(timeout=60)
         self.cog = cog
         self.owner_id = owner_id
+        self.controller_id = controller_id or owner_id
         self.channel_id = channel_id
         self.member = member
         for action, label in actions.items():
@@ -206,7 +266,7 @@ class MemberActionButtons(discord.ui.View):
             self.add_item(MemberActionButton(action, label, style))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.owner_id:
+        if interaction.user.id == self.controller_id:
             return True
         await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
         return False
@@ -231,26 +291,46 @@ class MemberActionButton(discord.ui.Button):
 
 
 class VoiceOwnerDashboardView(discord.ui.View):
-    def __init__(self, cog: "VoiceChannels", owner_id: int, channel_id: int):
+    def __init__(
+        self,
+        cog: "VoiceChannels",
+        owner_id: int,
+        channel_id: int,
+        controller_id: int | None = None,
+        admin_mode: bool = False,
+    ):
         super().__init__(timeout=600)
         self.cog = cog
         self.owner_id = owner_id
+        self.controller_id = controller_id or owner_id
         self.channel_id = channel_id
+        self.admin_mode = admin_mode
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.owner_id:
+        if interaction.user.id == self.controller_id:
             return True
         await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
         return False
 
     @discord.ui.button(label="Settings", style=discord.ButtonStyle.secondary, row=0)
     async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        channel = await self.cog._validated_owned_channel(interaction, self.channel_id, respond=False)
+        channel = await self.cog._validated_controlled_channel(
+            interaction,
+            self.channel_id,
+            admin_mode=self.admin_mode,
+            respond=False,
+        )
         if channel is None:
-            await interaction.response.send_message("That is not your active channel anymore.", ephemeral=True)
+            await interaction.response.send_message("That channel is not available anymore.", ephemeral=True)
             return
         await interaction.response.send_modal(
-            ChannelSettingsModal(self.cog, self.channel_id, channel.name, channel.user_limit)
+            ChannelSettingsModal(
+                self.cog,
+                self.channel_id,
+                channel.name,
+                channel.user_limit,
+                admin_mode=self.admin_mode,
+            )
         )
 
     @discord.ui.button(label="Access", style=discord.ButtonStyle.primary, row=0)
@@ -265,6 +345,7 @@ class VoiceOwnerDashboardView(discord.ui.View):
                 "unblock": "Unblock",
             },
             "Choose a member to invite, allow, or unblock.",
+            admin_mode=self.admin_mode,
         )
 
     @discord.ui.button(label="Moderation", style=discord.ButtonStyle.danger, row=0)
@@ -277,11 +358,12 @@ class VoiceOwnerDashboardView(discord.ui.View):
                 "block": "Block",
             },
             "Choose a member to kick or block.",
+            admin_mode=self.admin_mode,
         )
 
     @discord.ui.button(label="Privacy", style=discord.ButtonStyle.secondary, row=1)
     async def privacy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.toggle_privacy(interaction, self.channel_id)
+        await self.cog.toggle_privacy(interaction, self.channel_id, admin_mode=self.admin_mode)
 
     @discord.ui.button(label="Transfer", style=discord.ButtonStyle.primary, row=1)
     async def transfer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -290,15 +372,16 @@ class VoiceOwnerDashboardView(discord.ui.View):
             self.channel_id,
             {"transfer": "Transfer Owner"},
             "Choose the new owner for this temporary channel.",
+            admin_mode=self.admin_mode,
         )
 
     @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=1)
     async def panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.post_voice_channel_dashboard(interaction, self.channel_id)
+        await self.cog.post_voice_channel_dashboard(interaction, self.channel_id, admin_mode=self.admin_mode)
 
     @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=1)
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.delete_owned_channel(interaction, self.channel_id)
+        await self.cog.delete_owned_channel(interaction, self.channel_id, admin_mode=self.admin_mode)
 
 
 class VoiceChannels(commands.Cog):
@@ -610,14 +693,51 @@ class VoiceChannels(commands.Cog):
             ephemeral=True,
         )
 
-    async def post_voice_channel_dashboard(self, interaction: discord.Interaction, channel_id: int):
-        channel = await self._validated_owned_channel(interaction, channel_id)
+    async def send_admin_dashboard(self, interaction: discord.Interaction, raw_channel_id: str):
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+            return
+        if not self._can_admin_manage(interaction.user):
+            await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
+            return
+        try:
+            channel_id = int(raw_channel_id.strip())
+        except ValueError:
+            await interaction.response.send_message("That is not a valid channel ID.", ephemeral=True)
+            return
+
+        channel = interaction.guild.get_channel(channel_id)
+        record = await self._channel_record(interaction.guild, channel_id)
+        if record is None or not isinstance(channel, discord.VoiceChannel):
+            await interaction.response.send_message("That is not a tracked temporary voice channel.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            embed=self._owner_dashboard_embed(channel, record, admin_viewer=interaction.user),
+            view=VoiceOwnerDashboardView(
+                self,
+                int(record["owner_id"]),
+                channel.id,
+                controller_id=interaction.user.id,
+                admin_mode=True,
+            ),
+            ephemeral=True,
+        )
+
+    async def post_voice_channel_dashboard(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+        admin_mode: bool = False,
+    ):
+        channel = await self._validated_controlled_channel(interaction, channel_id, admin_mode=admin_mode)
         if channel is None:
             return
         record = await self._channel_record(interaction.guild, channel_id)
         if record is not None:
             await self._delete_voice_channel_dashboard_message(channel, record)
-        if await self._send_voice_channel_dashboard_message(channel, interaction.user.id):
+        owner_id = int(record["owner_id"]) if record is not None else interaction.user.id
+        if await self._send_voice_channel_dashboard_message(channel, owner_id):
             await interaction.response.send_message("Posted a fresh control panel in the voice channel chat.", ephemeral=True)
             if record is not None:
                 await self._record_channel_event(
@@ -649,8 +769,9 @@ class VoiceChannels(commands.Cog):
         channel_id: int,
         name: str,
         raw_limit: str,
+        admin_mode: bool = False,
     ):
-        channel = await self._validated_owned_channel(interaction, channel_id)
+        channel = await self._validated_controlled_channel(interaction, channel_id, admin_mode=admin_mode)
         if channel is None:
             return
         original_name = name.strip()
@@ -694,8 +815,8 @@ class VoiceChannels(commands.Cog):
         )
         await self._refresh_voice_channel_dashboard_message(channel)
 
-    async def toggle_privacy(self, interaction: discord.Interaction, channel_id: int):
-        channel = await self._validated_owned_channel(interaction, channel_id)
+    async def toggle_privacy(self, interaction: discord.Interaction, channel_id: int, admin_mode: bool = False):
+        channel = await self._validated_controlled_channel(interaction, channel_id, admin_mode=admin_mode)
         if channel is None:
             return
         async with self.config.guild(interaction.guild).created_channels() as created_channels:
@@ -727,14 +848,27 @@ class VoiceChannels(commands.Cog):
         channel_id: int,
         actions: dict[str, str],
         prompt: str,
+        admin_mode: bool = False,
     ):
-        channel = await self._validated_owned_channel(interaction, channel_id, respond=False)
-        if channel is None:
-            await interaction.response.send_message("That is not your active channel anymore.", ephemeral=True)
+        channel = await self._validated_controlled_channel(
+            interaction,
+            channel_id,
+            admin_mode=admin_mode,
+            respond=False,
+        )
+        record = await self._channel_record(interaction.guild, channel_id) if interaction.guild else None
+        if channel is None or record is None:
+            await interaction.response.send_message("That channel is not available anymore.", ephemeral=True)
             return
         await interaction.response.send_message(
             prompt,
-            view=MemberActionView(self, interaction.user.id, channel_id, actions),
+            view=MemberActionView(
+                self,
+                int(record["owner_id"]),
+                channel_id,
+                actions,
+                controller_id=interaction.user.id if admin_mode else None,
+            ),
             ephemeral=True,
         )
 
@@ -745,10 +879,16 @@ class VoiceChannels(commands.Cog):
         action: str,
         member: discord.Member,
     ):
-        channel = await self._validated_owned_channel(interaction, channel_id)
+        channel = await self._validated_controlled_channel(
+            interaction,
+            channel_id,
+            admin_mode=self._can_admin_manage(interaction.user),
+        )
         if channel is None:
             return
-        if member.id == interaction.user.id:
+        record = await self._channel_record(interaction.guild, channel_id)
+        owner_id = int(record["owner_id"]) if record is not None else interaction.user.id
+        if member.id == owner_id:
             await interaction.response.send_message("You cannot use that action on yourself.", ephemeral=True)
             return
         if action == "transfer":
@@ -829,8 +969,13 @@ class VoiceChannels(commands.Cog):
         else:
             await self._refresh_voice_channel_dashboard_message(channel)
 
-    async def delete_owned_channel(self, interaction: discord.Interaction, channel_id: int):
-        channel = await self._validated_owned_channel(interaction, channel_id)
+    async def delete_owned_channel(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+        admin_mode: bool = False,
+    ):
+        channel = await self._validated_controlled_channel(interaction, channel_id, admin_mode=admin_mode)
         if channel is None:
             return
         record = await self._channel_record(interaction.guild, channel_id)
@@ -838,12 +983,13 @@ class VoiceChannels(commands.Cog):
             await self._record_channel_event(
                 interaction.guild,
                 channel,
-                "deleted_by_owner",
+                "deleted_by_admin" if admin_mode else "deleted_by_owner",
                 actor_id=interaction.user.id,
                 record=record,
             )
         try:
-            await channel.delete(reason=f"VoiceChannels deleted by owner {interaction.user}")
+            reason = "admin" if admin_mode else "owner"
+            await channel.delete(reason=f"VoiceChannels deleted by {reason} {interaction.user}")
         except (discord.Forbidden, discord.HTTPException):
             await interaction.response.send_message("I could not delete your voice channel.", ephemeral=True)
             return
@@ -1184,15 +1330,18 @@ class VoiceChannels(commands.Cog):
         self,
         channel: discord.VoiceChannel,
         record: dict,
+        admin_viewer: discord.Member | None = None,
     ) -> discord.Embed:
         owner = channel.guild.get_member(int(record["owner_id"]))
         allowed = len(record.get("trusted_ids", []))
         blocked = len(record.get("blocked_ids", []))
         embed = discord.Embed(
-            title="Voice Channel Controls",
+            title="Admin Voice Channel Controls" if admin_viewer else "Voice Channel Controls",
             description=(
                 f"Managing {channel.mention}\n"
                 f"Owner: {owner.mention if owner else 'Unknown'}\n"
+                + (f"Admin viewer: {admin_viewer.mention}\n" if admin_viewer else "")
+                +
                 "**Invite User** sends a DM invite and lets that user join.\n"
                 "**Allow User** lets someone join private channels without sending a DM.\n"
                 "**Transfer** gives ownership of this channel to another member."
@@ -1325,6 +1474,32 @@ class VoiceChannels(commands.Cog):
             return None
         return channel
 
+    async def _validated_controlled_channel(
+        self,
+        interaction: discord.Interaction,
+        channel_id: int,
+        *,
+        admin_mode: bool = False,
+        respond: bool = True,
+    ) -> discord.VoiceChannel | None:
+        if not admin_mode:
+            return await self._validated_owned_channel(interaction, channel_id, respond=respond)
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            if respond:
+                await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+            return None
+        if not self._can_admin_manage(interaction.user):
+            if respond:
+                await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
+            return None
+        record = await self._channel_record(interaction.guild, channel_id)
+        channel = interaction.guild.get_channel(channel_id)
+        if record is None or not isinstance(channel, discord.VoiceChannel):
+            if respond:
+                await interaction.response.send_message("That is not a tracked temporary voice channel.", ephemeral=True)
+            return None
+        return channel
+
     async def _channel_record(self, guild: discord.Guild, channel_id: int) -> dict | None:
         created_channels = await self.config.guild(guild).created_channels()
         raw_record = created_channels.get(str(channel_id))
@@ -1373,7 +1548,14 @@ class VoiceChannels(commands.Cog):
             member = guild.get_member(int(user_id))
             if member:
                 try:
-                    await channel.set_permissions(member, connect=False, speak=False, reason="VoiceChannels blocked user")
+                    await channel.set_permissions(
+                        member,
+                        connect=False,
+                        speak=False,
+                        manage_channels=False,
+                        move_members=False,
+                        reason="VoiceChannels blocked user",
+                    )
                 except (discord.Forbidden, discord.HTTPException):
                     pass
 
@@ -1449,6 +1631,14 @@ class VoiceChannels(commands.Cog):
             record["blocked_ids"] = [int(user_id) for user_id in record.get("blocked_ids", [])]
             return record
         return self._new_channel_record(int(raw_record or 0))
+
+    @staticmethod
+    def _can_admin_manage(member: discord.Member | discord.User) -> bool:
+        return isinstance(member, discord.Member) and (
+            member.guild_permissions.manage_guild
+            or member.guild_permissions.manage_channels
+            or member.guild_permissions.administrator
+        )
 
     @staticmethod
     def _text_channel(guild: discord.Guild, channel_id: int | None) -> discord.TextChannel | None:

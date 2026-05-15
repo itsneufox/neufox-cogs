@@ -978,9 +978,11 @@ class ActivityStats(commands.Cog):
         embeds: list[discord.Embed],
     ):
         view = LeaderboardView(interaction.user.id, embeds) if len(embeds) > 1 else None
+        if view is None:
+            await interaction.response.send_message(embed=embeds[0])
+            return
         await interaction.response.send_message(embed=embeds[0], view=view)
-        if view is not None:
-            view.message = await interaction.original_response()
+        view.message = await interaction.original_response()
 
     async def _leaderboard_embeds(
         self,
