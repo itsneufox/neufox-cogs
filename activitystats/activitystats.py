@@ -106,6 +106,8 @@ class ActivityStats(commands.Cog):
             message_authors={},
             received_reactions={},
             message_reactions={},
+            voice_seconds={},
+            active_voice_sessions={},
             top_message_roles={tier: None for tier in TOP_MESSAGE_ROLE_TIERS},
         )
         self._last_role_sync: dict[int, float] = {}
@@ -126,11 +128,13 @@ class ActivityStats(commands.Cog):
             for user_reactions in data["received_reactions"].values()
             for count in user_reactions.values()
         )
+        voice_seconds = await self._total_voice_seconds(ctx.guild)
 
         embed = discord.Embed(title="ActivityStats", color=DEFAULT_COLOR)
         embed.add_field(name="Status", value="Enabled" if data["enabled"] else "Disabled", inline=True)
         embed.add_field(name="Messages", value=str(data["total_messages"]), inline=True)
         embed.add_field(name="Received Reactions", value=str(reactions), inline=True)
+        embed.add_field(name="Voice Time", value=self._format_duration(voice_seconds), inline=True)
         embed.add_field(name="Users Tracked", value=str(users_tracked), inline=True)
         embed.add_field(name="Known Messages", value=str(messages_tracked), inline=True)
         await ctx.send(embed=embed)
@@ -149,8 +153,10 @@ class ActivityStats(commands.Cog):
             value=(
                 "`/messages [member]` - show your message count and rank\n"
                 "`/reactions [member]` - show received reaction counts\n"
+                "`/voice [member]` - show tracked voice time\n"
                 "`/topmessages` - show the message leaderboard\n"
-                "`/topreacts [emoji]` - show the received reaction leaderboard"
+                "`/topreacts [emoji]` - show the received reaction leaderboard\n"
+                "`/topvoice` - show the voice-time leaderboard"
             ),
             inline=False,
         )
@@ -159,7 +165,9 @@ class ActivityStats(commands.Cog):
             value=(
                 f"`{prefix}activitystats server` - show tracked totals\n"
                 f"`{prefix}activitystats messages` - show the message leaderboard\n"
+                f"`{prefix}activitystats voice` - show the voice-time leaderboard\n"
                 f"`{prefix}activitystats me [member]` - show a member's message rank\n"
+                f"`{prefix}activitystats voiceme [member]` - show a member's voice time\n"
                 f"`{prefix}activitystats reactions [member]` - show a member's received reactions\n"
                 f"`{prefix}activitystats reactiontop [emoji]` - show reaction rankings"
             ),
@@ -271,6 +279,33 @@ class ActivityStats(commands.Cog):
             ),
         )
 
+    @activitystats.command(name="voice")
+    async def activitystats_voice(self, ctx: commands.Context):
+        """Show users with the most tracked voice time."""
+        embeds = await self._voice_leaderboard_embeds(ctx.guild)
+        await self._send_paginated_context(ctx, embeds)
+
+    @app_commands.command(name="topvoice", description="Show the voice-time leaderboard.")
+    @app_commands.guild_only()
+    async def topvoice(self, interaction: discord.Interaction):
+        """Show users with the most tracked voice time."""
+        embeds = await self._voice_leaderboard_embeds(interaction.guild)
+        await self._send_paginated_interaction(interaction, embeds)
+
+    async def _voice_leaderboard_embeds(self, guild: discord.Guild) -> list[discord.Embed]:
+        voice_seconds = await self._voice_seconds_with_active(guild)
+        entries = sorted(
+            ((int(user_id), int(seconds)) for user_id, seconds in voice_seconds.items() if int(seconds) > 0),
+            key=lambda item: item[1],
+            reverse=True,
+        )
+        return await self._leaderboard_embeds(
+            guild=guild,
+            title="Voice Time Rankings",
+            entries=entries,
+            formatter=lambda page_entries, start: self._format_voice_lines(guild, page_entries, start),
+        )
+
     @activitystats.command(name="me")
     async def activitystats_me(self, ctx: commands.Context, member: discord.Member | None = None):
         """Show your message rank and count, or another member's."""
@@ -304,6 +339,41 @@ class ActivityStats(commands.Cog):
         embed.add_field(name="User", value=member.mention, inline=True)
         embed.add_field(name="Rank", value=f"#{rank}" if rank else "Unranked", inline=True)
         embed.add_field(name="Messages", value=str(count), inline=True)
+        return embed
+
+    @activitystats.command(name="voiceme")
+    async def activitystats_voiceme(self, ctx: commands.Context, member: discord.Member | None = None):
+        """Show your voice-time rank and total, or another member's."""
+        await ctx.send(embed=await self._voice_rank_embed(ctx.guild, ctx.author, member))
+
+    @app_commands.command(name="voice", description="Show your tracked voice time.")
+    @app_commands.describe(member="The member to show voice time for.")
+    @app_commands.guild_only()
+    async def voice(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+    ):
+        """Show your voice-time rank and total, or another member's."""
+        await interaction.response.send_message(
+            embed=await self._voice_rank_embed(interaction.guild, interaction.user, member)
+        )
+
+    async def _voice_rank_embed(
+        self,
+        guild: discord.Guild,
+        author: discord.Member | discord.User,
+        member: discord.Member | None = None,
+    ) -> discord.Embed:
+        member = member or author
+        voice_seconds = await self._voice_seconds_with_active(guild)
+        seconds = int(voice_seconds.get(str(member.id), 0))
+        rank = self._rank_for_user(voice_seconds, member.id)
+
+        embed = discord.Embed(title="Voice Stats", color=DEFAULT_COLOR)
+        embed.add_field(name="User", value=member.mention, inline=True)
+        embed.add_field(name="Rank", value=f"#{rank}" if rank else "Unranked", inline=True)
+        embed.add_field(name="Voice Time", value=self._format_duration(seconds), inline=True)
         return embed
 
     @activitystats.command(name="reactions")
@@ -420,6 +490,8 @@ class ActivityStats(commands.Cog):
         await guild_conf.message_authors.set({})
         await guild_conf.received_reactions.set({})
         await guild_conf.message_reactions.set({})
+        await guild_conf.voice_seconds.set({})
+        await guild_conf.active_voice_sessions.set({})
         result = await self._sync_top_message_roles(ctx.guild)
         await ctx.send("ActivityStats data has been reset for this server.")
         if result["configured"]:
@@ -538,6 +610,28 @@ class ActivityStats(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent):
         await self._record_reaction(payload, delta=-1)
+
+    @commands.Cog.listener()
+    async def on_voice_state_update(
+        self,
+        member: discord.Member,
+        before: discord.VoiceState,
+        after: discord.VoiceState,
+    ):
+        if member.bot or member.guild is None:
+            return
+        if not await self.config.guild(member.guild).enabled():
+            return
+
+        was_connected = before.channel is not None
+        is_connected = after.channel is not None
+        if was_connected == is_connected:
+            return
+
+        if is_connected:
+            await self._start_voice_session(member.guild, member.id)
+        else:
+            await self._close_voice_session(member.guild, member.id, int(time.time()))
 
     async def _record_reaction(self, payload: discord.RawReactionActionEvent, delta: int):
         if payload.guild_id is None:
@@ -664,6 +758,42 @@ class ActivityStats(commands.Cog):
                 if count > 0:
                     counts[emoji] += count
         return dict(counts)
+
+    async def _start_voice_session(self, guild: discord.Guild, user_id: int):
+        now = int(time.time())
+        async with self.config.guild(guild).active_voice_sessions() as active_sessions:
+            active_sessions[str(user_id)] = now
+
+    async def _close_voice_session(self, guild: discord.Guild, user_id: int, ended_at: int):
+        user_key = str(user_id)
+        async with self.config.guild(guild).active_voice_sessions() as active_sessions:
+            started_at = active_sessions.pop(user_key, None)
+        if started_at is None:
+            return
+
+        elapsed = max(0, int(ended_at) - int(started_at))
+        if elapsed <= 0:
+            return
+
+        async with self.config.guild(guild).voice_seconds() as voice_seconds:
+            voice_seconds[user_key] = int(voice_seconds.get(user_key, 0)) + elapsed
+
+    async def _voice_seconds_with_active(self, guild: discord.Guild) -> dict[str, int]:
+        totals = {
+            str(user_id): int(seconds)
+            for user_id, seconds in (await self.config.guild(guild).voice_seconds()).items()
+        }
+        active_sessions = await self.config.guild(guild).active_voice_sessions()
+        now = int(time.time())
+        for user_id, started_at in active_sessions.items():
+            member = guild.get_member(int(user_id))
+            if member is None or member.voice is None or member.voice.channel is None:
+                continue
+            totals[str(user_id)] = int(totals.get(str(user_id), 0)) + max(0, now - int(started_at))
+        return totals
+
+    async def _total_voice_seconds(self, guild: discord.Guild) -> int:
+        return sum((await self._voice_seconds_with_active(guild)).values())
 
     async def _maybe_sync_top_message_roles(self, guild: discord.Guild):
         configured_roles = await self.config.guild(guild).top_message_roles()
@@ -899,6 +1029,21 @@ class ActivityStats(commands.Cog):
             lines.append(f"{rank} **{user}** - {reaction} x {count}")
         return "\n".join(lines)
 
+    async def _format_voice_lines(
+        self,
+        guild: discord.Guild,
+        entries: list[tuple[int, int]],
+        start_rank: int = 1,
+    ) -> str:
+        if not entries:
+            return "There are no entries to display here."
+
+        lines = []
+        for index, (user_id, seconds) in enumerate(entries, start=start_rank):
+            rank = RANK_PREFIXES.get(index, f"{index}.")
+            lines.append(f"{rank} **{await self._display_user(guild, user_id)}** - {self._format_duration(seconds)}")
+        return "\n".join(lines)
+
     async def _display_user(self, guild: discord.Guild, user_id: int) -> str:
         member = guild.get_member(user_id)
         if member:
@@ -915,6 +1060,24 @@ class ActivityStats(commands.Cog):
     @staticmethod
     def _clean_limit(limit: int) -> int:
         return max(1, min(int(limit), MAX_LIMIT))
+
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        days, seconds = divmod(seconds, 86400)
+        hours, seconds = divmod(seconds, 3600)
+        minutes, seconds = divmod(seconds, 60)
+
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if seconds or not parts:
+            parts.append(f"{seconds}s")
+        return " ".join(parts)
 
     @staticmethod
     def _entry_author_id(entry: Any) -> str | int | None:

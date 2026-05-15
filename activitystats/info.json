@@ -1,11 +1,11 @@
 {
     "name": "ActivityStats",
-    "short": "Message and reaction statistics.",
-    "description": "Tracks per-server message counts and received reaction counts with message and reaction leaderboard commands.",
+    "short": "Message, reaction, and voice statistics.",
+    "description": "Tracks per-server message counts, received reaction counts, and voice time with leaderboard commands.",
     "author": ["itsneufox"],
     "min_bot_version": "3.5.0",
-    "install_msg": "ActivityStats loaded! Use `/messages`, `/reactions`, `/topmessages`, or `/topreacts` after syncing slash commands. Prefix commands still work with `[p]activitystats` and related commands. Use `[p]activitystats backfill` to import old channel history.",
+    "install_msg": "ActivityStats loaded! Use `/messages`, `/reactions`, `/voice`, `/topmessages`, `/topreacts`, or `/topvoice` after syncing slash commands. Prefix commands still work with `[p]activitystats` and related commands. Use `[p]activitystats backfill` to import old channel history.",
     "requirements": [],
-    "tags": ["stats", "reactions", "messages", "utility"],
-    "end_user_data_statement": "This cog stores message IDs mapped to author IDs, per-user message counts, per-channel message counts, per-message reaction snapshots, and per-user received reaction counters. It does not store message content. Administrators can clear stored data with `[p]activitystats reset`."
+    "tags": ["stats", "reactions", "messages", "voice", "utility"],
+    "end_user_data_statement": "This cog stores message IDs mapped to author IDs, per-user message counts, per-channel message counts, per-message reaction snapshots, per-user received reaction counters, per-user voice time totals, and active voice session start timestamps. It does not store message content or voice audio. Administrators can clear stored data with `[p]activitystats reset`."
 }
