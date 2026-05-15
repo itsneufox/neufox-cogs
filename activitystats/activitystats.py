@@ -476,8 +476,13 @@ class ActivityStats(commands.Cog):
     async def activitystats_toggle(self, ctx: commands.Context):
         """Toggle stat tracking in this server."""
         enabled = await self.config.guild(ctx.guild).enabled()
-        await self.config.guild(ctx.guild).enabled.set(not enabled)
-        await ctx.send(f"ActivityStats tracking is now {'enabled' if not enabled else 'disabled'}.")
+        new_enabled = not enabled
+        if new_enabled:
+            await self._seed_current_voice_sessions(ctx.guild)
+        else:
+            await self._close_all_voice_sessions(ctx.guild, int(time.time()))
+        await self.config.guild(ctx.guild).enabled.set(new_enabled)
+        await ctx.send(f"ActivityStats tracking is now {'enabled' if new_enabled else 'disabled'}.")
 
     @activitystats.command(name="reset")
     @commands.admin_or_permissions(manage_guild=True)
@@ -492,6 +497,8 @@ class ActivityStats(commands.Cog):
         await guild_conf.message_reactions.set({})
         await guild_conf.voice_seconds.set({})
         await guild_conf.active_voice_sessions.set({})
+        if await guild_conf.enabled():
+            await self._seed_current_voice_sessions(ctx.guild)
         result = await self._sync_top_message_roles(ctx.guild)
         await ctx.send("ActivityStats data has been reset for this server.")
         if result["configured"]:
@@ -777,6 +784,34 @@ class ActivityStats(commands.Cog):
 
         async with self.config.guild(guild).voice_seconds() as voice_seconds:
             voice_seconds[user_key] = int(voice_seconds.get(user_key, 0)) + elapsed
+
+    async def _close_all_voice_sessions(self, guild: discord.Guild, ended_at: int):
+        async with self.config.guild(guild).active_voice_sessions() as active_sessions:
+            sessions = dict(active_sessions)
+            active_sessions.clear()
+        if not sessions:
+            return
+
+        async with self.config.guild(guild).voice_seconds() as voice_seconds:
+            for user_id, started_at in sessions.items():
+                elapsed = max(0, int(ended_at) - int(started_at))
+                if elapsed > 0:
+                    voice_seconds[str(user_id)] = int(voice_seconds.get(str(user_id), 0)) + elapsed
+
+    async def _seed_current_voice_sessions(self, guild: discord.Guild):
+        now = int(time.time())
+        active_user_ids = {
+            str(member.id)
+            for channel in guild.voice_channels
+            for member in channel.members
+            if not member.bot
+        }
+        async with self.config.guild(guild).active_voice_sessions() as active_sessions:
+            for user_id in list(active_sessions):
+                if user_id not in active_user_ids:
+                    active_sessions.pop(user_id, None)
+            for user_id in active_user_ids:
+                active_sessions.setdefault(user_id, now)
 
     async def _voice_seconds_with_active(self, guild: discord.Guild) -> dict[str, int]:
         totals = {
