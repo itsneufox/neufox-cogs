@@ -480,8 +480,6 @@ class VoiceChannels(commands.Cog):
         name = self._channel_name(data["channel_name_template"], member)
         overwrites = {
             member: discord.PermissionOverwrite(
-                manage_channels=True,
-                move_members=True,
                 connect=True,
                 speak=True,
             )
@@ -566,7 +564,7 @@ class VoiceChannels(commands.Cog):
         channel = await self._validated_owned_channel(interaction, channel_id)
         if channel is None:
             return
-        name = name.strip()[:100]
+        name = self._clean_channel_name(name.strip(), fallback="Temporary Channel")[:CHANNEL_NAME_MAX_LENGTH]
         if not name:
             await interaction.response.send_message("Channel name cannot be empty.", ephemeral=True)
             return
@@ -588,7 +586,6 @@ class VoiceChannels(commands.Cog):
             f"Updated your channel settings: **{name}**, limit {'none' if limit == 0 else limit}.",
             ephemeral=True,
         )
-        await self._send_voice_channel_dashboard_message(channel, interaction.user.id)
 
     async def toggle_privacy(self, interaction: discord.Interaction, channel_id: int):
         channel = await self._validated_owned_channel(interaction, channel_id)
@@ -603,7 +600,6 @@ class VoiceChannels(commands.Cog):
             "Your channel is now private." if record["private"] else "Your channel is now public.",
             ephemeral=True,
         )
-        await self._send_voice_channel_dashboard_message(channel, interaction.user.id)
 
     async def send_member_picker(
         self,
@@ -687,7 +683,6 @@ class VoiceChannels(commands.Cog):
             notified = await self._notify_invited_member(interaction.user, member, channel, record)
             suffix = " I sent them a DM invite." if notified else " I could not DM them, but they can join now."
             await interaction.response.send_message(f"Invited {member.mention}.{suffix}", ephemeral=True)
-            await self._send_voice_channel_dashboard_message(channel, interaction.user.id)
             return
 
         responses = {
@@ -699,10 +694,6 @@ class VoiceChannels(commands.Cog):
             "transfer": f"Transferred ownership to {member.mention}.",
         }
         await interaction.response.send_message(responses[action], ephemeral=True)
-        if action == "transfer":
-            await self._send_voice_channel_dashboard_message(channel, member.id)
-        else:
-            await self._send_voice_channel_dashboard_message(channel, interaction.user.id)
 
     async def delete_owned_channel(self, interaction: discord.Interaction, channel_id: int):
         channel = await self._validated_owned_channel(interaction, channel_id)
@@ -738,6 +729,28 @@ class VoiceChannels(commands.Cog):
         self.bot.loop.create_task(
             self._delete_if_empty_after(member.guild.id, before.channel.id, EMPTY_DELETE_DELAY_SECONDS)
         )
+
+    @commands.Cog.listener()
+    async def on_guild_channel_update(
+        self,
+        before: discord.abc.GuildChannel,
+        after: discord.abc.GuildChannel,
+    ):
+        if not isinstance(after, discord.VoiceChannel) or before.name == after.name:
+            return
+
+        record = await self._channel_record(after.guild, after.id)
+        if record is None:
+            return
+
+        clean_name = self._clean_channel_name(after.name, fallback="Temporary Channel")[:CHANNEL_NAME_MAX_LENGTH]
+        if clean_name == after.name:
+            return
+
+        try:
+            await after.edit(name=clean_name, reason="VoiceChannels filtered temporary channel name")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     async def cleanup_guild_channels(self, guild: discord.Guild) -> tuple[int, int]:
         deleted = 0
@@ -1006,8 +1019,8 @@ class VoiceChannels(commands.Cog):
                     owner,
                     connect=True,
                     speak=True,
-                    manage_channels=True,
-                    move_members=True,
+                    manage_channels=None,
+                    move_members=None,
                     reason="VoiceChannels owner permissions",
                 )
             except (discord.Forbidden, discord.HTTPException):
