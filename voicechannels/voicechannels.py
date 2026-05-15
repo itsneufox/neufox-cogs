@@ -87,7 +87,15 @@ class MemberActionView(discord.ui.View):
 
 class MemberActionSelect(discord.ui.UserSelect):
     def __init__(self, cog: "VoiceChannels", owner_id: int, channel_id: int, action: str):
-        super().__init__(placeholder=f"Choose a member to {action}", min_values=1, max_values=1)
+        labels = {
+            "invite": "invite",
+            "trust": "allow",
+            "untrust": "remove from allowed list",
+            "kick": "kick",
+            "block": "block",
+            "unblock": "unblock",
+        }
+        super().__init__(placeholder=f"Choose a member to {labels[action]}", min_values=1, max_values=1)
         self.cog = cog
         self.owner_id = owner_id
         self.channel_id = channel_id
@@ -117,47 +125,47 @@ class VoiceOwnerDashboardView(discord.ui.View):
         await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
         return False
 
-    @discord.ui.button(label="Name", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Rename", style=discord.ButtonStyle.secondary, row=0)
     async def name_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ChannelNameModal(self.cog, self.channel_id))
 
-    @discord.ui.button(label="Limit", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="User Limit", style=discord.ButtonStyle.secondary, row=0)
     async def limit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ChannelLimitModal(self.cog, self.channel_id))
 
-    @discord.ui.button(label="Privacy", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Public / Private", style=discord.ButtonStyle.secondary, row=0)
     async def privacy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.toggle_privacy(interaction, self.channel_id)
 
-    @discord.ui.button(label="Chat", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Text Chat", style=discord.ButtonStyle.secondary, row=0)
     async def chat_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.toggle_chat(interaction, self.channel_id)
 
-    @discord.ui.button(label="Invite", style=discord.ButtonStyle.primary, row=1)
+    @discord.ui.button(label="Invite User", style=discord.ButtonStyle.primary, row=1)
     async def invite_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(interaction, self.channel_id, "invite")
 
-    @discord.ui.button(label="Trust", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Allow User", style=discord.ButtonStyle.success, row=1)
     async def trust_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(interaction, self.channel_id, "trust")
 
-    @discord.ui.button(label="Untrust", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Remove Allow", style=discord.ButtonStyle.secondary, row=1)
     async def untrust_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(interaction, self.channel_id, "untrust")
 
-    @discord.ui.button(label="Kick", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="Kick User", style=discord.ButtonStyle.danger, row=2)
     async def kick_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(interaction, self.channel_id, "kick")
 
-    @discord.ui.button(label="Block", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="Block User", style=discord.ButtonStyle.danger, row=2)
     async def block_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(interaction, self.channel_id, "block")
 
-    @discord.ui.button(label="Unblock", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Unblock User", style=discord.ButtonStyle.secondary, row=2)
     async def unblock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(interaction, self.channel_id, "unblock")
 
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="Delete Channel", style=discord.ButtonStyle.danger, row=3)
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.delete_owned_channel(interaction, self.channel_id)
 
@@ -495,8 +503,16 @@ class VoiceChannels(commands.Cog):
         if channel is None:
             await interaction.response.send_message("That is not your active channel anymore.", ephemeral=True)
             return
+        labels = {
+            "invite": "Invite sends the selected member a DM and allows them to join.",
+            "trust": "Allow lets the selected member join when your channel is private.",
+            "untrust": "Remove Allow removes that private-channel exception.",
+            "kick": "Kick disconnects the selected member if they are inside.",
+            "block": "Block prevents the selected member from joining and kicks them if needed.",
+            "unblock": "Unblock removes the join denial.",
+        }
         await interaction.response.send_message(
-            f"Choose a member to {action}.",
+            labels[action],
             view=MemberActionView(self, interaction.user.id, channel_id, action),
             ephemeral=True,
         )
@@ -539,7 +555,20 @@ class VoiceChannels(commands.Cog):
                 await member.move_to(None, reason=f"VoiceChannels {action} by {interaction.user}")
             except (discord.Forbidden, discord.HTTPException):
                 pass
-        await interaction.response.send_message(f"Applied `{action}` to {member.mention}.", ephemeral=True)
+        if action == "invite":
+            notified = await self._notify_invited_member(interaction.user, member, channel, record)
+            suffix = " I sent them a DM invite." if notified else " I could not DM them, but they can join now."
+            await interaction.response.send_message(f"Invited {member.mention}.{suffix}", ephemeral=True)
+            return
+
+        responses = {
+            "trust": f"Allowed {member.mention} to join your private channel.",
+            "untrust": f"Removed {member.mention} from the allowed list.",
+            "kick": f"Kicked {member.mention} from your channel if they were inside.",
+            "block": f"Blocked {member.mention} from joining your channel.",
+            "unblock": f"Unblocked {member.mention}.",
+        }
+        await interaction.response.send_message(responses[action], ephemeral=True)
 
     async def delete_owned_channel(self, interaction: discord.Interaction, channel_id: int):
         channel = await self._validated_owned_channel(interaction, channel_id)
@@ -679,7 +708,12 @@ class VoiceChannels(commands.Cog):
         blocked = len(record.get("blocked_ids", []))
         embed = discord.Embed(
             title="Voice Channel Controls",
-            description=f"Managing {channel.mention}",
+            description=(
+                f"Managing {channel.mention}\n"
+                "**Invite User** sends a DM invite and lets that user join.\n"
+                "**Allow User** lets someone join private channels without sending a DM.\n"
+                "**Block User** prevents someone from joining."
+            ),
             color=DEFAULT_COLOR,
         )
         embed.add_field(name="Privacy", value="Private" if record.get("private") else "Public", inline=True)
@@ -693,7 +727,27 @@ class VoiceChannels(commands.Cog):
             value=text.mention if isinstance(text, discord.TextChannel) else "Disabled",
             inline=True,
         )
+        embed.set_footer(text="Only you can use these controls.")
         return embed
+
+    async def _notify_invited_member(
+        self,
+        owner: discord.Member | discord.User,
+        member: discord.Member,
+        channel: discord.VoiceChannel,
+        record: dict,
+    ) -> bool:
+        text_channel_id = record.get("text_channel_id")
+        text = channel.guild.get_channel(int(text_channel_id)) if text_channel_id else None
+        destination = text.mention if isinstance(text, discord.TextChannel) else channel.mention
+        try:
+            await member.send(
+                f"{owner.mention} invited you to join **{channel.name}** in **{channel.guild.name}**.\n"
+                f"Join here: {destination}"
+            )
+            return True
+        except discord.HTTPException:
+            return False
 
     def _channel_name(self, template: str, member: discord.Member) -> str:
         name = template.replace("{member}", member.display_name)
