@@ -10,6 +10,8 @@ from redbot.core import Config, app_commands, commands
 
 DEFAULT_COLOR = discord.Color.blue()
 MAX_LIMIT = 25
+LEADERBOARD_PAGE_SIZE = 10
+PAGINATION_TIMEOUT = 120
 ROLE_SYNC_INTERVAL = 300
 TOP_MESSAGE_ROLE_TIERS = ("first", "second", "third")
 RANK_PREFIXES = {
@@ -17,6 +19,55 @@ RANK_PREFIXES = {
     2: "🥈",
     3: "🥉",
 }
+
+
+class LeaderboardView(discord.ui.View):
+    def __init__(self, owner_id: int, embeds: list[discord.Embed]):
+        super().__init__(timeout=PAGINATION_TIMEOUT)
+        self.owner_id = owner_id
+        self.embeds = embeds
+        self.message: discord.Message | None = None
+        self.page = 0
+        self._update_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("This leaderboard is not yours to control.", ephemeral=True)
+        return False
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def previous_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        self.page = max(0, self.page - 1)
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        self.page = min(len(self.embeds) - 1, self.page + 1)
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    def _update_buttons(self):
+        self.previous_page.disabled = self.page <= 0
+        self.next_page.disabled = self.page >= len(self.embeds) - 1
 
 
 class ActivityStats(commands.Cog):
@@ -168,29 +219,34 @@ class ActivityStats(commands.Cog):
     @activitystats.command(name="messages")
     async def activitystats_messages(self, ctx: commands.Context):
         """Show users with the most tracked messages."""
-        await ctx.send(embed=await self._message_leaderboard_embed(ctx.guild))
+        embeds = await self._message_leaderboard_embeds(ctx.guild)
+        await self._send_paginated_context(ctx, embeds)
 
     @app_commands.command(name="topmessages", description="Show the message leaderboard.")
     @app_commands.guild_only()
     async def topmessages(self, interaction: discord.Interaction):
         """Show users with the most tracked messages."""
-        await interaction.response.send_message(
-            embed=await self._message_leaderboard_embed(interaction.guild)
-        )
+        embeds = await self._message_leaderboard_embeds(interaction.guild)
+        await self._send_paginated_interaction(interaction, embeds)
 
-    async def _message_leaderboard_embed(self, guild: discord.Guild, limit: int = 10) -> discord.Embed:
-        limit = self._clean_limit(limit)
+    async def _message_leaderboard_embeds(self, guild: discord.Guild) -> list[discord.Embed]:
         user_messages = await self.config.guild(guild).user_messages()
         entries = sorted(
             ((int(user_id), int(count)) for user_id, count in user_messages.items()),
             key=lambda item: item[1],
             reverse=True,
-        )[:limit]
+        )
 
-        return discord.Embed(
+        return await self._leaderboard_embeds(
+            guild=guild,
             title="Message Rankings",
-            description=await self._format_user_count_lines(guild, entries, "messages"),
-            color=DEFAULT_COLOR,
+            entries=entries,
+            formatter=lambda page_entries, start: self._format_user_count_lines(
+                guild,
+                page_entries,
+                "messages",
+                start,
+            ),
         )
 
     @activitystats.command(name="me")
@@ -278,7 +334,8 @@ class ActivityStats(commands.Cog):
         emoji: str | None = None,
     ):
         """Show users with the most received reactions, optionally for one emoji."""
-        await ctx.send(embed=await self._reaction_leaderboard_embed(ctx.guild, emoji))
+        embeds = await self._reaction_leaderboard_embeds(ctx.guild, emoji)
+        await self._send_paginated_context(ctx, embeds)
 
     @app_commands.command(name="topreacts", description="Show the received reaction leaderboard.")
     @app_commands.describe(emoji="Only rank received reactions for this emoji.")
@@ -289,18 +346,14 @@ class ActivityStats(commands.Cog):
         emoji: str | None = None,
     ):
         """Show users with the most received reactions, optionally for one emoji."""
-        await interaction.response.send_message(
-            embed=await self._reaction_leaderboard_embed(interaction.guild, emoji)
-        )
+        embeds = await self._reaction_leaderboard_embeds(interaction.guild, emoji)
+        await self._send_paginated_interaction(interaction, embeds)
 
-    async def _reaction_leaderboard_embed(
+    async def _reaction_leaderboard_embeds(
         self,
         guild: discord.Guild,
         emoji: str | None = None,
-        limit: int = 10,
-    ) -> discord.Embed:
-        limit = self._clean_limit(limit)
-
+    ) -> list[discord.Embed]:
         all_reactions = await self.config.guild(guild).received_reactions()
         entries: list[tuple[int, int, str]] = []
         for user_id, reactions in all_reactions.items():
@@ -314,10 +367,16 @@ class ActivityStats(commands.Cog):
                         entries.append((int(user_id), int(count), reaction))
 
         entries.sort(key=lambda item: item[1], reverse=True)
-        return discord.Embed(
+        return await self._leaderboard_embeds(
+            guild=guild,
             title="Reaction Rankings",
-            description=await self._format_reaction_lines(guild, entries[:limit], emoji),
-            color=DEFAULT_COLOR,
+            entries=entries,
+            formatter=lambda page_entries, start: self._format_reaction_lines(
+                guild,
+                page_entries,
+                emoji,
+                start,
+            ),
         )
 
     @activitystats.command(name="toggle")
@@ -716,6 +775,58 @@ class ActivityStats(commands.Cog):
             message += "."
         return message
 
+    async def _send_paginated_context(
+        self,
+        ctx: commands.Context,
+        embeds: list[discord.Embed],
+    ):
+        view = LeaderboardView(ctx.author.id, embeds) if len(embeds) > 1 else None
+        message = await ctx.send(embed=embeds[0], view=view)
+        if view is not None:
+            view.message = message
+
+    async def _send_paginated_interaction(
+        self,
+        interaction: discord.Interaction,
+        embeds: list[discord.Embed],
+    ):
+        view = LeaderboardView(interaction.user.id, embeds) if len(embeds) > 1 else None
+        await interaction.response.send_message(embed=embeds[0], view=view)
+        if view is not None:
+            view.message = await interaction.original_response()
+
+    async def _leaderboard_embeds(
+        self,
+        guild: discord.Guild,
+        title: str,
+        entries: list[Any],
+        formatter: Any,
+    ) -> list[discord.Embed]:
+        if not entries:
+            return [
+                discord.Embed(
+                    title=title,
+                    description="There are no entries to display here.",
+                    color=DEFAULT_COLOR,
+                )
+            ]
+
+        embeds = []
+        pages = [
+            entries[index : index + LEADERBOARD_PAGE_SIZE]
+            for index in range(0, len(entries), LEADERBOARD_PAGE_SIZE)
+        ]
+        for page_index, page_entries in enumerate(pages, start=1):
+            start_rank = (page_index - 1) * LEADERBOARD_PAGE_SIZE + 1
+            embed = discord.Embed(
+                title=title,
+                description=await formatter(page_entries, start_rank),
+                color=DEFAULT_COLOR,
+            )
+            embed.set_footer(text=f"Page {page_index}/{len(pages)}")
+            embeds.append(embed)
+        return embeds
+
     @staticmethod
     def _apply_reaction_delta(
         received_reactions: dict[str, dict[str, int]],
@@ -737,12 +848,13 @@ class ActivityStats(commands.Cog):
         guild: discord.Guild,
         entries: list[tuple[int, int]],
         label: str,
+        start_rank: int = 1,
     ) -> str:
         if not entries:
             return "There are no entries to display here."
 
         lines = []
-        for index, (user_id, count) in enumerate(entries, start=1):
+        for index, (user_id, count) in enumerate(entries, start=start_rank):
             rank = RANK_PREFIXES.get(index, f"{index}.")
             lines.append(f"{rank} **{await self._display_user(guild, user_id)}** - {count} {label}")
         return "\n".join(lines)
@@ -752,13 +864,14 @@ class ActivityStats(commands.Cog):
         guild: discord.Guild,
         entries: list[tuple[int, int, str]],
         emoji: str | None,
+        start_rank: int = 1,
     ) -> str:
         if not entries:
             prefix = f"{emoji}: " if emoji else ""
             return f"{prefix}There are no entries to display here."
 
         lines = []
-        for index, (user_id, count, reaction) in enumerate(entries, start=1):
+        for index, (user_id, count, reaction) in enumerate(entries, start=start_rank):
             user = await self._display_user(guild, user_id)
             rank = RANK_PREFIXES.get(index, f"{index}.")
             lines.append(f"{rank} **{user}** - {reaction} x {count}")
