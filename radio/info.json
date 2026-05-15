@@ -1,0 +1,11 @@
+{
+    "name": "Radio",
+    "short": "Stream a radio URL into voice and show now playing status.",
+    "description": "Streams a configured radio URL into a voice channel using FFmpeg and can keep a Discord text channel updated with Icecast now playing metadata.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.0",
+    "install_msg": "Radio loaded! Use `[p]radio url <stream_url>`, then `[p]radio play [voice_channel]`. Use `[p]radio statuschannel <text_channel>` to show now playing metadata. The host needs ffmpeg installed.",
+    "requirements": [],
+    "tags": ["radio", "music", "voice", "stream"],
+    "end_user_data_statement": "This cog stores configured radio stream URLs, optional voice channel IDs, optional text channel IDs, optional status API URLs, and the bot's status message IDs per guild. It does not store voice audio."
+}
