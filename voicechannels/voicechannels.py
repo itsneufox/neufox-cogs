@@ -1,14 +1,85 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
+from pathlib import Path
 
 import discord
 from redbot.core import Config, commands
 
 
+BADWORDS_DIR = Path(__file__).with_name("badwords")
 DEFAULT_COLOR = discord.Color.blurple()
 DASHBOARD_CUSTOM_ID = "voicechannels:create"
 DEFAULT_NAME_TEMPLATE = "{member}'s Channel"
+EMPTY_DELETE_DELAY_SECONDS = 120
+CHANNEL_NAME_MAX_LENGTH = 80
+CHANNEL_NAME_BLOCKED_CHARS = re.compile(r"[@#:`*_~>|\\/<>\[\]{}]+")
+CHANNEL_NAME_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+CHANNEL_NAME_SPACES = re.compile(r"\s+")
+CHANNEL_NAME_LEET_TRANSLATION = str.maketrans(
+    {
+        "0": "o",
+        "1": "i",
+        "3": "e",
+        "4": "a",
+        "5": "s",
+        "7": "t",
+        "$": "s",
+        "!": "i",
+    }
+)
+
+
+def _load_channel_name_profanity_terms() -> set[str]:
+    fallback_terms = {
+        "asshole",
+        "bastard",
+        "bitch",
+        "cunt",
+        "fag",
+        "faggot",
+        "fuck",
+        "nigga",
+        "nigger",
+        "shit",
+        "slut",
+        "whore",
+    }
+    terms = set(fallback_terms)
+    try:
+        wordlist_paths = sorted(BADWORDS_DIR.glob("*.json"))
+    except OSError:
+        return fallback_terms
+    for path in wordlist_paths:
+        try:
+            wordlist = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        terms.update(str(term).strip().lower() for term in wordlist if str(term).strip())
+    return terms
+
+
+def _compile_channel_name_profanity_pattern(terms: set[str]) -> re.Pattern[str]:
+    escaped_terms = [
+        re.escape(term).replace(r"\ ", r"\s+")
+        for term in sorted(terms, key=len, reverse=True)
+    ]
+    return re.compile(r"(?<![A-Za-z0-9])(?:" + "|".join(escaped_terms) + r")(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def _normalize_profanity_term(term: str) -> str:
+    return "".join(re.findall(r"[a-z]+", term.lower().translate(CHANNEL_NAME_LEET_TRANSLATION)))
+
+
+CHANNEL_NAME_PROFANITY_TERMS = _load_channel_name_profanity_terms()
+CHANNEL_NAME_PROFANITY = _compile_channel_name_profanity_pattern(CHANNEL_NAME_PROFANITY_TERMS)
+CHANNEL_NAME_NORMALIZED_PROFANITY_TERMS = {
+    normalized
+    for normalized in (_normalize_profanity_term(term) for term in CHANNEL_NAME_PROFANITY_TERMS)
+    if len(normalized) >= 4
+}
 
 
 class VoiceDashboardView(discord.ui.View):
@@ -128,7 +199,7 @@ class MemberActionButtons(discord.ui.View):
         self.member = member
         for action, label in actions.items():
             style = discord.ButtonStyle.danger if action in {"kick", "block"} else discord.ButtonStyle.secondary
-            if action in {"invite", "trust"}:
+            if action in {"invite", "trust", "transfer"}:
                 style = discord.ButtonStyle.primary
             self.add_item(MemberActionButton(action, label, style))
 
@@ -210,6 +281,15 @@ class VoiceOwnerDashboardView(discord.ui.View):
     async def privacy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.toggle_privacy(interaction, self.channel_id)
 
+    @discord.ui.button(label="Transfer", style=discord.ButtonStyle.primary, row=1)
+    async def transfer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.send_member_picker(
+            interaction,
+            self.channel_id,
+            {"transfer": "Transfer Owner"},
+            "Choose the new owner for this temporary channel.",
+        )
+
     @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=1)
     async def panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.post_voice_channel_dashboard(interaction, self.channel_id)
@@ -260,7 +340,14 @@ class VoiceChannels(commands.Cog):
             view=VoiceDashboardView(self),
         )
         await self.config.guild(ctx.guild).dashboard_message_id.set(message.id)
-        await ctx.send(f"Voice channel dashboard posted in {dashboard_channel.mention}.")
+        warnings = self._setup_warnings(ctx.guild, dashboard_channel, category)
+        if warnings:
+            await ctx.send(
+                f"Voice channel dashboard posted in {dashboard_channel.mention}.\n"
+                "Permission checks to review:\n" + "\n".join(f"- {warning}" for warning in warnings)
+            )
+        else:
+            await ctx.send(f"Voice channel dashboard posted in {dashboard_channel.mention}.")
 
     @voicechannels.command(name="dashboard")
     @commands.admin_or_permissions(manage_guild=True)
@@ -299,8 +386,9 @@ class VoiceChannels(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def voicechannels_name(self, ctx: commands.Context, *, template: str):
         """Set the created channel name. Use {member} for the creator name."""
-        if len(template) > 80:
-            await ctx.send("Channel name template must be 80 characters or less.")
+        template = self._clean_channel_name(template, fallback=DEFAULT_NAME_TEMPLATE, allow_member_placeholder=True)
+        if len(template) > CHANNEL_NAME_MAX_LENGTH:
+            await ctx.send(f"Channel name template must be {CHANNEL_NAME_MAX_LENGTH} characters or less.")
             return
         await self.config.guild(ctx.guild).channel_name_template.set(template)
         await ctx.send(f"Voice channel name template set to `{template}`.")
@@ -360,7 +448,7 @@ class VoiceChannels(commands.Cog):
             name="Member Dashboard",
             value=(
                 "Members use the dashboard buttons to create and control their own temporary channels: "
-                "name, limit, privacy, invite, trust, untrust, kick, block, unblock, and delete."
+                "settings, privacy, invite, allow, remove allow, kick, block, unblock, transfer, refresh panel, and delete."
             ),
             inline=False,
         )
@@ -423,7 +511,7 @@ class VoiceChannels(commands.Cog):
         async with self.config.guild(guild).created_channels() as created_channels:
             created_channels[str(channel.id)] = self._new_channel_record(member.id)
 
-        await self._send_voice_channel_dashboard_message(channel, member.id)
+        panel_posted = await self._send_voice_channel_dashboard_message(channel, member.id)
 
         moved = False
         if member.voice and member.voice.channel:
@@ -434,22 +522,16 @@ class VoiceChannels(commands.Cog):
                 moved = False
 
         if moved:
-            record = await self._channel_record(guild, channel.id)
             await interaction.followup.send(
-                f"Created {channel.mention} and moved you in.",
-                embed=self._owner_dashboard_embed(channel, record),
-                view=VoiceOwnerDashboardView(self, member.id, channel.id),
+                self._creation_notice(channel, moved=True, panel_posted=panel_posted),
                 ephemeral=True,
             )
         else:
-            record = await self._channel_record(guild, channel.id)
             await interaction.followup.send(
-                f"Created {channel.mention}. Join it within 5 minutes or it will be deleted.",
-                embed=self._owner_dashboard_embed(channel, record),
-                view=VoiceOwnerDashboardView(self, member.id, channel.id),
+                self._creation_notice(channel, moved=False, panel_posted=panel_posted),
                 ephemeral=True,
             )
-            self.bot.loop.create_task(self._delete_if_empty_after(guild.id, channel.id, 300))
+            self.bot.loop.create_task(self._delete_if_empty_after(guild.id, channel.id, EMPTY_DELETE_DELAY_SECONDS))
 
     async def send_owner_dashboard(self, interaction: discord.Interaction):
         channel, record = await self._owned_channel_and_record(interaction.guild, interaction.user.id)
@@ -506,6 +588,7 @@ class VoiceChannels(commands.Cog):
             f"Updated your channel settings: **{name}**, limit {'none' if limit == 0 else limit}.",
             ephemeral=True,
         )
+        await self._send_voice_channel_dashboard_message(channel, interaction.user.id)
 
     async def toggle_privacy(self, interaction: discord.Interaction, channel_id: int):
         channel = await self._validated_owned_channel(interaction, channel_id)
@@ -520,6 +603,7 @@ class VoiceChannels(commands.Cog):
             "Your channel is now private." if record["private"] else "Your channel is now public.",
             ephemeral=True,
         )
+        await self._send_voice_channel_dashboard_message(channel, interaction.user.id)
 
     async def send_member_picker(
         self,
@@ -551,9 +635,25 @@ class VoiceChannels(commands.Cog):
         if member.id == interaction.user.id:
             await interaction.response.send_message("You cannot use that action on yourself.", ephemeral=True)
             return
+        if action == "transfer":
+            if member.bot:
+                await interaction.response.send_message("You cannot transfer ownership to a bot.", ephemeral=True)
+                return
+            existing = self._existing_owned_channel(
+                interaction.guild,
+                await self.config.guild(interaction.guild).created_channels(),
+                member.id,
+            )
+            if existing is not None and existing.id != channel_id:
+                await interaction.response.send_message(
+                    f"{member.mention} already owns {existing.mention}.",
+                    ephemeral=True,
+                )
+                return
 
         async with self.config.guild(interaction.guild).created_channels() as created_channels:
             record = self._normalize_record(created_channels[str(channel_id)])
+            old_owner_id = int(record["owner_id"])
             trusted = set(int(user_id) for user_id in record.get("trusted_ids", []))
             blocked = set(int(user_id) for user_id in record.get("blocked_ids", []))
             if action in {"invite", "trust"}:
@@ -566,11 +666,18 @@ class VoiceChannels(commands.Cog):
                 trusted.discard(member.id)
             elif action == "unblock":
                 blocked.discard(member.id)
+            elif action == "transfer":
+                record["owner_id"] = member.id
+                trusted.add(old_owner_id)
+                trusted.discard(member.id)
+                blocked.discard(member.id)
             record["trusted_ids"] = list(trusted)
             record["blocked_ids"] = list(blocked)
             created_channels[str(channel_id)] = record
 
         await self._apply_access_overwrites(interaction.guild, channel, record)
+        if action == "transfer":
+            await self._clear_previous_owner_permissions(interaction.guild, channel, old_owner_id)
         if action in {"kick", "block"} and member.voice and member.voice.channel == channel:
             try:
                 await member.move_to(None, reason=f"VoiceChannels {action} by {interaction.user}")
@@ -580,6 +687,7 @@ class VoiceChannels(commands.Cog):
             notified = await self._notify_invited_member(interaction.user, member, channel, record)
             suffix = " I sent them a DM invite." if notified else " I could not DM them, but they can join now."
             await interaction.response.send_message(f"Invited {member.mention}.{suffix}", ephemeral=True)
+            await self._send_voice_channel_dashboard_message(channel, interaction.user.id)
             return
 
         responses = {
@@ -588,8 +696,13 @@ class VoiceChannels(commands.Cog):
             "kick": f"Kicked {member.mention} from your channel if they were inside.",
             "block": f"Blocked {member.mention} from joining your channel.",
             "unblock": f"Unblocked {member.mention}.",
+            "transfer": f"Transferred ownership to {member.mention}.",
         }
         await interaction.response.send_message(responses[action], ephemeral=True)
+        if action == "transfer":
+            await self._send_voice_channel_dashboard_message(channel, member.id)
+        else:
+            await self._send_voice_channel_dashboard_message(channel, interaction.user.id)
 
     async def delete_owned_channel(self, interaction: discord.Interaction, channel_id: int):
         channel = await self._validated_owned_channel(interaction, channel_id)
@@ -622,15 +735,9 @@ class VoiceChannels(commands.Cog):
         if before.channel.members:
             return
 
-        try:
-            await before.channel.delete(reason="VoiceChannels temporary channel empty")
-            deleted = True
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            deleted = False
-
-        if deleted:
-            async with self.config.guild(member.guild).created_channels() as stored_channels:
-                stored_channels.pop(str(before.channel.id), None)
+        self.bot.loop.create_task(
+            self._delete_if_empty_after(member.guild.id, before.channel.id, EMPTY_DELETE_DELAY_SECONDS)
+        )
 
     async def cleanup_guild_channels(self, guild: discord.Guild) -> tuple[int, int]:
         deleted = 0
@@ -666,7 +773,7 @@ class VoiceChannels(commands.Cog):
         if str(channel.id) not in created_channels:
             return
         try:
-            await channel.delete(reason="VoiceChannels created channel remained empty")
+            await channel.delete(reason="VoiceChannels temporary channel remained empty")
         except (discord.Forbidden, discord.HTTPException):
             return
         async with self.config.guild(guild).created_channels() as stored_channels:
@@ -698,20 +805,46 @@ class VoiceChannels(commands.Cog):
         embed = discord.Embed(
             title="Temporary Voice Channels",
             description=(
-                "Create a private space for a call when you need one.\n"
-                "Your channel is removed automatically when it is empty."
+                "Create a temporary voice channel when you need one.\n"
+                "Your controls will appear in the text chat attached to the voice channel."
             ),
             color=DEFAULT_COLOR,
         )
-        embed.set_footer(text="Create a channel, then use Manage Channel to adjust access and settings.")
+        embed.set_footer(text="Empty temporary channels are deleted after 2 minutes.")
         return embed
+
+    def _creation_notice(
+        self,
+        channel: discord.VoiceChannel,
+        *,
+        moved: bool,
+        panel_posted: bool,
+    ) -> str:
+        status = f"Created {channel.mention}"
+        if moved:
+            status += " and moved you in."
+        else:
+            status += ". Join it within 2 minutes or it will be deleted."
+
+        if panel_posted:
+            return (
+                f"{status}\n"
+                "Your channel settings are in the text chat attached to that voice channel."
+            )
+
+        return (
+            f"{status}\n"
+            "I could not post the settings panel in the voice channel text chat. "
+            "Use **Manage Channel** on the main dashboard to open your controls."
+        )
 
     def _owner_dashboard_embed(
         self,
         channel: discord.VoiceChannel,
         record: dict,
     ) -> discord.Embed:
-        trusted = len(record.get("trusted_ids", []))
+        owner = channel.guild.get_member(int(record["owner_id"]))
+        allowed = len(record.get("trusted_ids", []))
         blocked = len(record.get("blocked_ids", []))
         embed = discord.Embed(
             title="Voice Channel Controls",
@@ -719,13 +852,14 @@ class VoiceChannels(commands.Cog):
                 f"Managing {channel.mention}\n"
                 "**Invite User** sends a DM invite and lets that user join.\n"
                 "**Allow User** lets someone join private channels without sending a DM.\n"
-                "**Block User** prevents someone from joining."
+                "**Transfer** gives ownership of this channel to another member."
             ),
             color=DEFAULT_COLOR,
         )
+        embed.add_field(name="Owner", value=owner.mention if owner else "Unknown", inline=True)
         embed.add_field(name="Privacy", value="Private" if record.get("private") else "Public", inline=True)
         embed.add_field(name="User Limit", value=str(channel.user_limit) if channel.user_limit else "None", inline=True)
-        embed.add_field(name="Trusted", value=str(trusted), inline=True)
+        embed.add_field(name="Allowed", value=str(allowed), inline=True)
         embed.add_field(name="Blocked", value=str(blocked), inline=True)
         embed.set_footer(text="This panel is also posted in the voice channel chat.")
         return embed
@@ -747,8 +881,49 @@ class VoiceChannels(commands.Cog):
             return False
 
     def _channel_name(self, template: str, member: discord.Member) -> str:
-        name = template.replace("{member}", member.display_name)
-        return name[:100] or DEFAULT_NAME_TEMPLATE.replace("{member}", member.display_name)
+        clean_member_name = self._clean_channel_name(member.display_name, fallback="Member")
+        name = template.replace("{member}", clean_member_name)
+        return self._clean_channel_name(
+            name,
+            fallback=DEFAULT_NAME_TEMPLATE.replace("{member}", clean_member_name),
+        )[:CHANNEL_NAME_MAX_LENGTH]
+
+    @classmethod
+    def _clean_channel_name(
+        cls,
+        name: str,
+        *,
+        fallback: str,
+        allow_member_placeholder: bool = False,
+    ) -> str:
+        placeholder = "MEMBERPLACEHOLDER"
+        if allow_member_placeholder:
+            name = name.replace("{member}", placeholder)
+
+        name = CHANNEL_NAME_CONTROL_CHARS.sub("", name)
+        name = cls._scrub_channel_name_profanity(name)
+        name = CHANNEL_NAME_BLOCKED_CHARS.sub("", name)
+        name = CHANNEL_NAME_SPACES.sub(" ", name).strip(" .-_")
+
+        if allow_member_placeholder:
+            name = name.replace(placeholder, "{member}")
+
+        return name or fallback
+
+    @staticmethod
+    def _scrub_channel_name_profanity(name: str) -> str:
+        scrubbed = CHANNEL_NAME_PROFANITY.sub("clean", name)
+        normalized = scrubbed.lower().translate(CHANNEL_NAME_LEET_TRANSLATION)
+        normalized_words = re.findall(r"[a-z]+", normalized)
+        compact = "".join(normalized_words)
+        has_obfuscated_profanity = any(
+            word in CHANNEL_NAME_NORMALIZED_PROFANITY_TERMS
+            for word in normalized_words
+        ) or any(
+            len(word) >= 4 and word in compact
+            for word in CHANNEL_NAME_NORMALIZED_PROFANITY_TERMS
+        )
+        return "clean" if has_obfuscated_profanity else scrubbed
 
     def _existing_owned_channel(
         self,
@@ -853,6 +1028,59 @@ class VoiceChannels(commands.Cog):
                     await channel.set_permissions(member, connect=False, speak=False, reason="VoiceChannels blocked user")
                 except (discord.Forbidden, discord.HTTPException):
                     pass
+
+    async def _clear_previous_owner_permissions(
+        self,
+        guild: discord.Guild,
+        channel: discord.VoiceChannel,
+        old_owner_id: int,
+    ):
+        member = guild.get_member(old_owner_id)
+        if member is None:
+            return
+        try:
+            await channel.set_permissions(
+                member,
+                connect=True,
+                speak=True,
+                manage_channels=None,
+                move_members=None,
+                reason="VoiceChannels owner transfer",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    @staticmethod
+    def _setup_warnings(
+        guild: discord.Guild,
+        dashboard_channel: discord.TextChannel,
+        category: discord.CategoryChannel | None,
+    ) -> list[str]:
+        me = guild.me
+        if me is None:
+            return ["I could not check my server permissions."]
+
+        warnings: list[str] = []
+        dashboard_perms = dashboard_channel.permissions_for(me)
+        if not dashboard_perms.send_messages:
+            warnings.append(f"I cannot send messages in {dashboard_channel.mention}.")
+        if not dashboard_perms.embed_links:
+            warnings.append(f"I cannot embed links in {dashboard_channel.mention}.")
+
+        if category is None:
+            return warnings
+
+        category_perms = category.permissions_for(me)
+        checks = {
+            "manage_channels": "manage temporary voice channels",
+            "move_members": "move members into or out of temporary channels",
+            "send_messages": "post the settings panel in voice channel text chats",
+            "embed_links": "post embedded settings panels in voice channel text chats",
+        }
+        for permission, reason in checks.items():
+            if not getattr(category_perms, permission, False):
+                warnings.append(f"In **{category.name}**, I may not be able to {reason}.")
+        return warnings
 
     @staticmethod
     def _new_channel_record(owner_id: int) -> dict:
