@@ -210,9 +210,9 @@ class VoiceOwnerDashboardView(discord.ui.View):
     async def privacy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.toggle_privacy(interaction, self.channel_id)
 
-    @discord.ui.button(label="Chat", style=discord.ButtonStyle.secondary, row=1)
-    async def chat_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.toggle_chat(interaction, self.channel_id)
+    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=1)
+    async def panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.post_voice_channel_dashboard(interaction, self.channel_id)
 
     @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=1)
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -360,7 +360,7 @@ class VoiceChannels(commands.Cog):
             name="Member Dashboard",
             value=(
                 "Members use the dashboard buttons to create and control their own temporary channels: "
-                "name, limit, privacy, chat, invite, trust, untrust, kick, block, unblock, and delete."
+                "name, limit, privacy, invite, trust, untrust, kick, block, unblock, and delete."
             ),
             inline=False,
         )
@@ -423,6 +423,8 @@ class VoiceChannels(commands.Cog):
         async with self.config.guild(guild).created_channels() as created_channels:
             created_channels[str(channel.id)] = self._new_channel_record(member.id)
 
+        await self._send_voice_channel_dashboard_message(channel, member.id)
+
         moved = False
         if member.voice and member.voice.channel:
             try:
@@ -459,6 +461,18 @@ class VoiceChannels(commands.Cog):
             view=VoiceOwnerDashboardView(self, interaction.user.id, channel.id),
             ephemeral=True,
         )
+
+    async def post_voice_channel_dashboard(self, interaction: discord.Interaction, channel_id: int):
+        channel = await self._validated_owned_channel(interaction, channel_id)
+        if channel is None:
+            return
+        if await self._send_voice_channel_dashboard_message(channel, interaction.user.id):
+            await interaction.response.send_message("Posted a fresh control panel in the voice channel chat.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "I could not post in that voice channel chat. Check my Send Messages permissions.",
+                ephemeral=True,
+            )
 
     async def update_owned_channel_settings(
         self,
@@ -506,42 +520,6 @@ class VoiceChannels(commands.Cog):
             "Your channel is now private." if record["private"] else "Your channel is now public.",
             ephemeral=True,
         )
-
-    async def toggle_chat(self, interaction: discord.Interaction, channel_id: int):
-        channel = await self._validated_owned_channel(interaction, channel_id)
-        if channel is None:
-            return
-        record = await self._channel_record(interaction.guild, channel_id)
-        text_channel_id = record.get("text_channel_id")
-        text_channel = interaction.guild.get_channel(int(text_channel_id)) if text_channel_id else None
-        if isinstance(text_channel, discord.TextChannel):
-            try:
-                await text_channel.delete(reason="VoiceChannels chat disabled")
-            except (discord.Forbidden, discord.HTTPException):
-                await interaction.response.send_message("I could not delete that chat channel.", ephemeral=True)
-                return
-            async with self.config.guild(interaction.guild).created_channels() as created_channels:
-                record = self._normalize_record(created_channels[str(channel_id)])
-                record["text_channel_id"] = None
-                created_channels[str(channel_id)] = record
-            await interaction.response.send_message("Deleted your linked chat channel.", ephemeral=True)
-            return
-
-        try:
-            text_channel = await interaction.guild.create_text_channel(
-                name=channel.name,
-                category=channel.category,
-                overwrites=dict(channel.overwrites),
-                reason=f"VoiceChannels chat created by {interaction.user}",
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            await interaction.response.send_message("I could not create a chat channel.", ephemeral=True)
-            return
-        async with self.config.guild(interaction.guild).created_channels() as created_channels:
-            record = self._normalize_record(created_channels[str(channel_id)])
-            record["text_channel_id"] = text_channel.id
-            created_channels[str(channel_id)] = record
-        await interaction.response.send_message(f"Created linked chat channel {text_channel.mention}.", ephemeral=True)
 
     async def send_member_picker(
         self,
@@ -617,19 +595,11 @@ class VoiceChannels(commands.Cog):
         channel = await self._validated_owned_channel(interaction, channel_id)
         if channel is None:
             return
-        record = await self._channel_record(interaction.guild, channel_id)
-        text_channel_id = record.get("text_channel_id")
-        text_channel = interaction.guild.get_channel(int(text_channel_id)) if text_channel_id else None
         try:
             await channel.delete(reason=f"VoiceChannels deleted by owner {interaction.user}")
         except (discord.Forbidden, discord.HTTPException):
             await interaction.response.send_message("I could not delete your voice channel.", ephemeral=True)
             return
-        if isinstance(text_channel, discord.TextChannel):
-            try:
-                await text_channel.delete(reason="VoiceChannels linked chat cleanup")
-            except (discord.Forbidden, discord.HTTPException):
-                pass
         async with self.config.guild(interaction.guild).created_channels() as created_channels:
             created_channels.pop(str(channel_id), None)
         await interaction.response.send_message("Deleted your voice channel.", ephemeral=True)
@@ -660,14 +630,7 @@ class VoiceChannels(commands.Cog):
 
         if deleted:
             async with self.config.guild(member.guild).created_channels() as stored_channels:
-                record = self._normalize_record(stored_channels.pop(str(before.channel.id), {}))
-            text_channel_id = record.get("text_channel_id")
-            text_channel = member.guild.get_channel(int(text_channel_id)) if text_channel_id else None
-            if isinstance(text_channel, discord.TextChannel):
-                try:
-                    await text_channel.delete(reason="VoiceChannels linked chat cleanup")
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
+                stored_channels.pop(str(before.channel.id), None)
 
     async def cleanup_guild_channels(self, guild: discord.Guild) -> tuple[int, int]:
         deleted = 0
@@ -688,14 +651,6 @@ class VoiceChannels(commands.Cog):
                     deleted += 1
                 except (discord.Forbidden, discord.HTTPException):
                     continue
-                record = self._normalize_record(created_channels.get(channel_id))
-                text_channel_id = record.get("text_channel_id")
-                text_channel = guild.get_channel(int(text_channel_id)) if text_channel_id else None
-                if isinstance(text_channel, discord.TextChannel):
-                    try:
-                        await text_channel.delete(reason="VoiceChannels linked chat cleanup")
-                    except (discord.Forbidden, discord.HTTPException):
-                        pass
                 created_channels.pop(channel_id, None)
         return deleted, forgotten
 
@@ -715,14 +670,25 @@ class VoiceChannels(commands.Cog):
         except (discord.Forbidden, discord.HTTPException):
             return
         async with self.config.guild(guild).created_channels() as stored_channels:
-            record = self._normalize_record(stored_channels.pop(str(channel.id), {}))
-        text_channel_id = record.get("text_channel_id")
-        text_channel = guild.get_channel(int(text_channel_id)) if text_channel_id else None
-        if isinstance(text_channel, discord.TextChannel):
-            try:
-                await text_channel.delete(reason="VoiceChannels linked chat cleanup")
-            except (discord.Forbidden, discord.HTTPException):
-                pass
+            stored_channels.pop(str(channel.id), None)
+
+    async def _send_voice_channel_dashboard_message(
+        self,
+        channel: discord.VoiceChannel,
+        owner_id: int,
+    ) -> bool:
+        record = await self._channel_record(channel.guild, channel.id)
+        if record is None:
+            return False
+        try:
+            await channel.send(
+                embed=self._owner_dashboard_embed(channel, record),
+                view=VoiceOwnerDashboardView(self, owner_id, channel.id),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            return True
+        except (AttributeError, discord.Forbidden, discord.HTTPException):
+            return False
 
     def _dashboard_embed(
         self,
@@ -761,14 +727,7 @@ class VoiceChannels(commands.Cog):
         embed.add_field(name="User Limit", value=str(channel.user_limit) if channel.user_limit else "None", inline=True)
         embed.add_field(name="Trusted", value=str(trusted), inline=True)
         embed.add_field(name="Blocked", value=str(blocked), inline=True)
-        text_channel_id = record.get("text_channel_id")
-        text = channel.guild.get_channel(int(text_channel_id)) if text_channel_id else None
-        embed.add_field(
-            name="Chat",
-            value=text.mention if isinstance(text, discord.TextChannel) else "Disabled",
-            inline=True,
-        )
-        embed.set_footer(text="Only you can use these controls.")
+        embed.set_footer(text="This panel is also posted in the voice channel chat.")
         return embed
 
     async def _notify_invited_member(
@@ -778,13 +737,10 @@ class VoiceChannels(commands.Cog):
         channel: discord.VoiceChannel,
         record: dict,
     ) -> bool:
-        text_channel_id = record.get("text_channel_id")
-        text = channel.guild.get_channel(int(text_channel_id)) if text_channel_id else None
-        destination = text.mention if isinstance(text, discord.TextChannel) else channel.mention
         try:
             await member.send(
                 f"{owner.mention} invited you to join **{channel.name}** in **{channel.guild.name}**.\n"
-                f"Join here: {destination}"
+                f"Join here: {channel.mention}"
             )
             return True
         except discord.HTTPException:
@@ -898,14 +854,6 @@ class VoiceChannels(commands.Cog):
                 except (discord.Forbidden, discord.HTTPException):
                     pass
 
-        text_channel_id = record.get("text_channel_id")
-        text_channel = guild.get_channel(int(text_channel_id)) if text_channel_id else None
-        if isinstance(text_channel, discord.TextChannel):
-            try:
-                await text_channel.edit(overwrites=dict(channel.overwrites), reason="VoiceChannels chat permissions sync")
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-
     @staticmethod
     def _new_channel_record(owner_id: int) -> dict:
         return {
@@ -913,7 +861,6 @@ class VoiceChannels(commands.Cog):
             "private": False,
             "trusted_ids": [],
             "blocked_ids": [],
-            "text_channel_id": None,
         }
 
     def _normalize_record(self, raw_record: int | dict | None) -> dict:
