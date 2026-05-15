@@ -5,7 +5,7 @@ from collections import Counter
 from typing import Any
 
 import discord
-from redbot.core import Config, commands
+from redbot.core import Config, app_commands, commands
 
 
 DEFAULT_COLOR = discord.Color.blue()
@@ -168,44 +168,57 @@ class ActivityStats(commands.Cog):
     @activitystats.command(name="messages")
     async def activitystats_messages(self, ctx: commands.Context):
         """Show users with the most tracked messages."""
-        await self._send_message_leaderboard(ctx)
+        await ctx.send(embed=await self._message_leaderboard_embed(ctx.guild))
 
-    @commands.guild_only()
-    @commands.hybrid_command(name="topmessages")
-    async def topmessages(self, ctx: commands.Context):
+    @app_commands.command(name="topmessages", description="Show the message leaderboard.")
+    @app_commands.guild_only()
+    async def topmessages(self, interaction: discord.Interaction):
         """Show users with the most tracked messages."""
-        await self._send_message_leaderboard(ctx)
+        await interaction.response.send_message(
+            embed=await self._message_leaderboard_embed(interaction.guild)
+        )
 
-    async def _send_message_leaderboard(self, ctx: commands.Context, limit: int = 10):
+    async def _message_leaderboard_embed(self, guild: discord.Guild, limit: int = 10) -> discord.Embed:
         limit = self._clean_limit(limit)
-        user_messages = await self.config.guild(ctx.guild).user_messages()
+        user_messages = await self.config.guild(guild).user_messages()
         entries = sorted(
             ((int(user_id), int(count)) for user_id, count in user_messages.items()),
             key=lambda item: item[1],
             reverse=True,
         )[:limit]
 
-        embed = discord.Embed(
+        return discord.Embed(
             title="Message Rankings",
-            description=await self._format_user_count_lines(ctx.guild, entries, "messages"),
+            description=await self._format_user_count_lines(guild, entries, "messages"),
             color=DEFAULT_COLOR,
         )
-        await ctx.send(embed=embed)
 
     @activitystats.command(name="me")
     async def activitystats_me(self, ctx: commands.Context, member: discord.Member | None = None):
         """Show your message rank and count, or another member's."""
-        await self._send_message_rank(ctx, member)
+        await ctx.send(embed=await self._message_rank_embed(ctx.guild, ctx.author, member))
 
-    @commands.guild_only()
-    @commands.hybrid_command(name="messages")
-    async def messages(self, ctx: commands.Context, member: discord.Member | None = None):
+    @app_commands.command(name="messages", description="Show your message count and rank.")
+    @app_commands.describe(member="The member to show stats for.")
+    @app_commands.guild_only()
+    async def messages(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+    ):
         """Show your message rank and count, or another member's."""
-        await self._send_message_rank(ctx, member)
+        await interaction.response.send_message(
+            embed=await self._message_rank_embed(interaction.guild, interaction.user, member)
+        )
 
-    async def _send_message_rank(self, ctx: commands.Context, member: discord.Member | None = None):
-        member = member or ctx.author
-        user_messages = await self.config.guild(ctx.guild).user_messages()
+    async def _message_rank_embed(
+        self,
+        guild: discord.Guild,
+        author: discord.Member | discord.User,
+        member: discord.Member | None = None,
+    ) -> discord.Embed:
+        member = member or author
+        user_messages = await self.config.guild(guild).user_messages()
         count = int(user_messages.get(str(member.id), 0))
         rank = self._rank_for_user(user_messages, member.id)
 
@@ -213,22 +226,34 @@ class ActivityStats(commands.Cog):
         embed.add_field(name="User", value=member.mention, inline=True)
         embed.add_field(name="Rank", value=f"#{rank}" if rank else "Unranked", inline=True)
         embed.add_field(name="Messages", value=str(count), inline=True)
-        await ctx.send(embed=embed)
+        return embed
 
     @activitystats.command(name="reactions")
     async def activitystats_reactions(self, ctx: commands.Context, member: discord.Member | None = None):
         """Show received reaction counts for a member."""
-        await self._send_reaction_summary(ctx, member)
+        await ctx.send(embed=await self._reaction_summary_embed(ctx.guild, ctx.author, member))
 
-    @commands.guild_only()
-    @commands.hybrid_command(name="reactions")
-    async def reactions(self, ctx: commands.Context, member: discord.Member | None = None):
+    @app_commands.command(name="reactions", description="Show received reaction counts.")
+    @app_commands.describe(member="The member to show received reactions for.")
+    @app_commands.guild_only()
+    async def reactions(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+    ):
         """Show received reaction counts for a member."""
-        await self._send_reaction_summary(ctx, member)
+        await interaction.response.send_message(
+            embed=await self._reaction_summary_embed(interaction.guild, interaction.user, member)
+        )
 
-    async def _send_reaction_summary(self, ctx: commands.Context, member: discord.Member | None = None):
-        member = member or ctx.author
-        all_reactions = await self.config.guild(ctx.guild).received_reactions()
+    async def _reaction_summary_embed(
+        self,
+        guild: discord.Guild,
+        author: discord.Member | discord.User,
+        member: discord.Member | None = None,
+    ) -> discord.Embed:
+        member = member or author
+        all_reactions = await self.config.guild(guild).received_reactions()
         reactions = {
             emoji: int(count)
             for emoji, count in all_reactions.get(str(member.id), {}).items()
@@ -244,7 +269,7 @@ class ActivityStats(commands.Cog):
         else:
             for emoji, count in Counter(reactions).most_common(24):
                 embed.add_field(name=f"{emoji}\u200b", value=f"{count}x", inline=True)
-        await ctx.send(embed=embed)
+        return embed
 
     @activitystats.command(name="reactiontop")
     async def activitystats_reactiontop(
@@ -253,27 +278,30 @@ class ActivityStats(commands.Cog):
         emoji: str | None = None,
     ):
         """Show users with the most received reactions, optionally for one emoji."""
-        await self._send_reaction_leaderboard(ctx, emoji)
+        await ctx.send(embed=await self._reaction_leaderboard_embed(ctx.guild, emoji))
 
-    @commands.guild_only()
-    @commands.hybrid_command(name="topreacts")
+    @app_commands.command(name="topreacts", description="Show the received reaction leaderboard.")
+    @app_commands.describe(emoji="Only rank received reactions for this emoji.")
+    @app_commands.guild_only()
     async def topreacts(
         self,
-        ctx: commands.Context,
+        interaction: discord.Interaction,
         emoji: str | None = None,
     ):
         """Show users with the most received reactions, optionally for one emoji."""
-        await self._send_reaction_leaderboard(ctx, emoji)
+        await interaction.response.send_message(
+            embed=await self._reaction_leaderboard_embed(interaction.guild, emoji)
+        )
 
-    async def _send_reaction_leaderboard(
+    async def _reaction_leaderboard_embed(
         self,
-        ctx: commands.Context,
+        guild: discord.Guild,
         emoji: str | None = None,
         limit: int = 10,
-    ):
+    ) -> discord.Embed:
         limit = self._clean_limit(limit)
 
-        all_reactions = await self.config.guild(ctx.guild).received_reactions()
+        all_reactions = await self.config.guild(guild).received_reactions()
         entries: list[tuple[int, int, str]] = []
         for user_id, reactions in all_reactions.items():
             if emoji:
@@ -286,12 +314,11 @@ class ActivityStats(commands.Cog):
                         entries.append((int(user_id), int(count), reaction))
 
         entries.sort(key=lambda item: item[1], reverse=True)
-        embed = discord.Embed(
+        return discord.Embed(
             title="Reaction Rankings",
-            description=await self._format_reaction_lines(ctx.guild, entries[:limit], emoji),
+            description=await self._format_reaction_lines(guild, entries[:limit], emoji),
             color=DEFAULT_COLOR,
         )
-        await ctx.send(embed=embed)
 
     @activitystats.command(name="toggle")
     @commands.admin_or_permissions(manage_guild=True)
