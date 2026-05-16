@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 import aiohttp
@@ -18,6 +19,12 @@ FFMPEG_OPTIONS = {
     "options": "-vn",
 }
 STATUS_POLL_SECONDS = 30
+RADIO_SHOWS = (
+    {"name": "Early Haul", "start": 6, "end": 12},
+    {"name": "Midday Cruise", "start": 12, "end": 16},
+    {"name": "Heavy Miles", "start": 16, "end": 22},
+    {"name": "Night Drive", "start": 22, "end": 6},
+)
 
 
 class Radio(commands.Cog):
@@ -425,9 +432,9 @@ class Radio(commands.Cog):
 
         status = await self._fetch_status(data)
         if status.get("online"):
-            text = self._voice_status_text(status["title"])
+            text = self._voice_status_text(status.get("title") or "")
         else:
-            text = "LongWayFM: offline"
+            text = f"{self._current_show_name()}: offline"
 
         return await self._set_voice_channel_status(channel, text)
 
@@ -503,7 +510,7 @@ class Radio(commands.Cog):
 
         if status.get("online"):
             embed = discord.Embed(
-                title="LongWayFM",
+                title=self._current_show_name(),
                 description=f"Now playing: **{status['title']}**",
                 color=discord.Color.green(),
             )
@@ -512,7 +519,7 @@ class Radio(commands.Cog):
                 embed.add_field(name="Bitrate", value=f"{status['bitrate']} kbps", inline=True)
         else:
             embed = discord.Embed(
-                title="LongWayFM",
+                title=self._current_show_name(),
                 description="The stream is currently offline or metadata is unavailable.",
                 color=discord.Color.dark_grey(),
             )
@@ -553,8 +560,22 @@ class Radio(commands.Cog):
 
     @staticmethod
     def _voice_status_text(title: str) -> str:
-        text = f"LongWayFM: {title}".strip()
+        show_name = Radio._current_show_name()
+        title = title.strip()
+        text = f"{show_name}: {title}" if title else show_name
         return text[:500]
+
+    @staticmethod
+    def _current_show_name() -> str:
+        hour = datetime.now(timezone.utc).hour
+        for show in RADIO_SHOWS:
+            start = int(show["start"])
+            end = int(show["end"])
+            if start < end and start <= hour < end:
+                return str(show["name"])
+            if start > end and (hour >= start or hour < end):
+                return str(show["name"])
+        return "LongWayFM"
 
     @staticmethod
     def _select_source(sources: list, stream_url: str | None) -> dict | None:
