@@ -82,6 +82,26 @@ CHANNEL_NAME_NORMALIZED_PROFANITY_TERMS = {
     for normalized in (_normalize_profanity_term(term) for term in CHANNEL_NAME_PROFANITY_TERMS)
     if len(normalized) >= 4
 }
+ACTION_LABELS = {
+    "invite": "Invite",
+    "trust": "Allow",
+    "untrust": "Remove Allow",
+    "kick": "Kick",
+    "block": "Block",
+    "unblock": "Unblock",
+    "transfer": "Transfer Owner",
+}
+ACTION_MEMBER_PROMPTS = {
+    "invite": "Choose a member to invite.",
+    "trust": "Choose a member to allow.",
+    "untrust": "Choose a member to remove from the allowed list.",
+    "kick": "Choose a member to kick.",
+    "block": "Choose a member to block.",
+    "unblock": "Choose a member to unblock.",
+    "transfer": "Choose the new owner for this temporary channel.",
+}
+ACCESS_ACTIONS = ("invite", "trust", "untrust")
+MODERATION_ACTIONS = ("kick", "block", "unblock")
 
 
 class VoiceDashboardView(discord.ui.View):
@@ -216,6 +236,64 @@ class MemberActionView(discord.ui.View):
         self.add_item(MemberActionSelect(cog, owner_id, channel_id, actions, controller_id=controller_id))
 
 
+class ActionChoiceView(discord.ui.View):
+    def __init__(
+        self,
+        cog: "VoiceChannels",
+        owner_id: int,
+        channel_id: int,
+        actions: dict[str, str],
+        controller_id: int | None = None,
+        admin_mode: bool = False,
+    ):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.owner_id = owner_id
+        self.controller_id = controller_id or owner_id
+        self.channel_id = channel_id
+        self.admin_mode = admin_mode
+        self.add_item(ActionChoiceSelect(cog, channel_id, actions, admin_mode=admin_mode))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.controller_id:
+            return True
+        await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
+        return False
+
+
+class ActionChoiceSelect(discord.ui.Select):
+    def __init__(
+        self,
+        cog: "VoiceChannels",
+        channel_id: int,
+        actions: dict[str, str],
+        admin_mode: bool = False,
+    ):
+        super().__init__(
+            placeholder="Choose an action",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label=label, value=action)
+                for action, label in actions.items()
+            ],
+        )
+        self.cog = cog
+        self.channel_id = channel_id
+        self.actions = actions
+        self.admin_mode = admin_mode
+
+    async def callback(self, interaction: discord.Interaction):
+        action = self.values[0]
+        await self.cog.send_member_picker(
+            interaction,
+            self.channel_id,
+            {action: self.actions[action]},
+            self.cog._member_action_prompt(action),
+            admin_mode=self.admin_mode,
+        )
+
+
 class MemberActionSelect(discord.ui.UserSelect):
     def __init__(
         self,
@@ -240,64 +318,15 @@ class MemberActionSelect(discord.ui.UserSelect):
         if not isinstance(member, discord.Member):
             await interaction.response.send_message("That member is not available.", ephemeral=True)
             return
-        await interaction.response.send_message(
-            f"What should I do with {member.mention}?",
-            view=MemberActionButtons(
-                self.cog,
-                self.owner_id,
-                self.channel_id,
-                member,
-                self.actions,
-                controller_id=self.controller_id,
-            ),
-            ephemeral=True,
-        )
-
-
-class MemberActionButtons(discord.ui.View):
-    def __init__(
-        self,
-        cog: "VoiceChannels",
-        owner_id: int,
-        channel_id: int,
-        member: discord.Member,
-        actions: dict[str, str],
-        controller_id: int | None = None,
-    ):
-        super().__init__(timeout=60)
-        self.cog = cog
-        self.owner_id = owner_id
-        self.controller_id = controller_id or owner_id
-        self.channel_id = channel_id
-        self.member = member
-        for action, label in actions.items():
-            style = discord.ButtonStyle.danger if action in {"kick", "block"} else discord.ButtonStyle.secondary
-            if action in {"invite", "trust", "transfer"}:
-                style = discord.ButtonStyle.primary
-            self.add_item(MemberActionButton(action, label, style))
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.controller_id:
-            return True
-        await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
-        return False
-
-
-class MemberActionButton(discord.ui.Button):
-    def __init__(self, action: str, label: str, style: discord.ButtonStyle):
-        super().__init__(label=label, style=style)
-        self.action = action
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-        if not isinstance(view, MemberActionButtons):
+        if len(self.actions) != 1:
             await interaction.response.send_message("This control expired.", ephemeral=True)
             return
-        await view.cog.apply_member_action(
+        action = next(iter(self.actions))
+        await self.cog.apply_member_action(
             interaction,
-            view.channel_id,
-            self.action,
-            view.member,
+            self.channel_id,
+            action,
+            member,
         )
 
 
@@ -344,53 +373,45 @@ class VoiceOwnerDashboardView(discord.ui.View):
             )
         )
 
+    @discord.ui.button(label="Privacy", style=discord.ButtonStyle.secondary, row=0)
+    async def privacy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.toggle_privacy(interaction, self.channel_id, admin_mode=self.admin_mode)
+
     @discord.ui.button(label="Access", style=discord.ButtonStyle.primary, row=0)
     async def access_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(
             interaction,
             self.channel_id,
-            {
-                "invite": "Invite",
-                "trust": "Allow",
-                "untrust": "Remove Allow",
-                "unblock": "Unblock",
-            },
-            "Choose a member to invite, allow, or unblock.",
+            self.cog._actions_for(ACCESS_ACTIONS),
+            "Choose an access action.",
             admin_mode=self.admin_mode,
         )
 
-    @discord.ui.button(label="Moderation", style=discord.ButtonStyle.danger, row=0)
+    @discord.ui.button(label="Moderation", style=discord.ButtonStyle.danger, row=1)
     async def moderation_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(
             interaction,
             self.channel_id,
-            {
-                "kick": "Kick",
-                "block": "Block",
-            },
-            "Choose a member to kick or block.",
+            self.cog._actions_for(MODERATION_ACTIONS),
+            "Choose a moderation action.",
             admin_mode=self.admin_mode,
         )
-
-    @discord.ui.button(label="Privacy", style=discord.ButtonStyle.secondary, row=1)
-    async def privacy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog.toggle_privacy(interaction, self.channel_id, admin_mode=self.admin_mode)
 
     @discord.ui.button(label="Transfer", style=discord.ButtonStyle.primary, row=1)
     async def transfer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.send_member_picker(
             interaction,
             self.channel_id,
-            {"transfer": "Transfer Owner"},
-            "Choose the new owner for this temporary channel.",
+            self.cog._actions_for(("transfer",)),
+            self.cog._member_action_prompt("transfer"),
             admin_mode=self.admin_mode,
         )
 
-    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=2)
     async def panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.post_voice_channel_dashboard(interaction, self.channel_id, admin_mode=self.admin_mode)
 
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=1)
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=2)
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.delete_owned_channel(interaction, self.channel_id, admin_mode=self.admin_mode)
 
@@ -884,6 +905,20 @@ class VoiceChannels(commands.Cog):
         if channel is None or record is None:
             await interaction.response.send_message("That channel is not available anymore.", ephemeral=True)
             return
+        if len(actions) > 1:
+            await interaction.response.send_message(
+                prompt,
+                view=ActionChoiceView(
+                    self,
+                    int(record["owner_id"]),
+                    channel_id,
+                    actions,
+                    controller_id=interaction.user.id if admin_mode else None,
+                    admin_mode=admin_mode,
+                ),
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
             prompt,
             view=MemberActionView(
@@ -1309,6 +1344,14 @@ class VoiceChannels(commands.Cog):
             return f"{member.display_name} (`{member.id}`)"
         return f"Unknown (`{user_id}`)"
 
+    @staticmethod
+    def _member_action_prompt(action: str) -> str:
+        return ACTION_MEMBER_PROMPTS.get(action, "Choose a member.")
+
+    @staticmethod
+    def _actions_for(actions: tuple[str, ...]) -> dict[str, str]:
+        return {action: ACTION_LABELS[action] for action in actions}
+
     def _dashboard_embed(
         self,
         guild: discord.Guild,
@@ -1366,9 +1409,9 @@ class VoiceChannels(commands.Cog):
                 f"Owner: {owner.mention if owner else 'Unknown'}\n"
                 + (f"Admin viewer: {admin_viewer.mention}\n" if admin_viewer else "")
                 +
-                "**Invite User** sends a DM invite and lets that user join.\n"
-                "**Allow User** lets someone join private channels without sending a DM.\n"
-                "**Transfer** gives ownership of this channel to another member."
+                "**Access** is for invite and allow-list changes.\n"
+                "**Moderation** is for kick, block, and unblock actions.\n"
+                "**Transfer** changes the temporary channel owner."
             ),
             color=DEFAULT_COLOR,
         )
