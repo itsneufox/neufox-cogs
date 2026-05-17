@@ -256,6 +256,7 @@ class ActivityStats(commands.Cog):
     @app_commands.guild_only()
     async def topmessages(self, interaction: discord.Interaction):
         """Show users with the most tracked messages."""
+        await interaction.response.defer()
         embeds = await self._message_leaderboard_embeds(interaction.guild)
         await self._send_paginated_interaction(interaction, embeds)
 
@@ -289,6 +290,7 @@ class ActivityStats(commands.Cog):
     @app_commands.guild_only()
     async def topvoice(self, interaction: discord.Interaction):
         """Show users with the most tracked voice time."""
+        await interaction.response.defer()
         embeds = await self._voice_leaderboard_embeds(interaction.guild)
         await self._send_paginated_interaction(interaction, embeds)
 
@@ -320,8 +322,10 @@ class ActivityStats(commands.Cog):
         member: discord.Member | None = None,
     ):
         """Show your message rank and count, or another member's."""
-        await interaction.response.send_message(
-            embed=await self._message_rank_embed(interaction.guild, interaction.user, member)
+        await interaction.response.defer()
+        await self._send_interaction_embed(
+            interaction,
+            await self._message_rank_embed(interaction.guild, interaction.user, member),
         )
 
     async def _message_rank_embed(
@@ -355,8 +359,10 @@ class ActivityStats(commands.Cog):
         member: discord.Member | None = None,
     ):
         """Show your voice-time rank and total, or another member's."""
-        await interaction.response.send_message(
-            embed=await self._voice_rank_embed(interaction.guild, interaction.user, member)
+        await interaction.response.defer()
+        await self._send_interaction_embed(
+            interaction,
+            await self._voice_rank_embed(interaction.guild, interaction.user, member),
         )
 
     async def _voice_rank_embed(
@@ -390,8 +396,10 @@ class ActivityStats(commands.Cog):
         member: discord.Member | None = None,
     ):
         """Show received reaction counts for a member."""
-        await interaction.response.send_message(
-            embed=await self._reaction_summary_embed(interaction.guild, interaction.user, member)
+        await interaction.response.defer()
+        await self._send_interaction_embed(
+            interaction,
+            await self._reaction_summary_embed(interaction.guild, interaction.user, member),
         )
 
     async def _reaction_summary_embed(
@@ -438,6 +446,7 @@ class ActivityStats(commands.Cog):
         emoji: str | None = None,
     ):
         """Show users with the most received reactions, optionally for one emoji."""
+        await interaction.response.defer()
         embeds = await self._reaction_leaderboard_embeds(interaction.guild, emoji)
         await self._send_paginated_interaction(interaction, embeds)
 
@@ -979,10 +988,23 @@ class ActivityStats(commands.Cog):
     ):
         view = LeaderboardView(interaction.user.id, embeds) if len(embeds) > 1 else None
         if view is None:
-            await interaction.response.send_message(embed=embeds[0])
+            await self._send_interaction_embed(interaction, embeds[0])
+            return
+        if interaction.response.is_done():
+            view.message = await interaction.followup.send(embed=embeds[0], view=view, wait=True)
             return
         await interaction.response.send_message(embed=embeds[0], view=view)
         view.message = await interaction.original_response()
+
+    async def _send_interaction_embed(
+        self,
+        interaction: discord.Interaction,
+        embed: discord.Embed,
+    ):
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.response.send_message(embed=embed)
 
     async def _leaderboard_embeds(
         self,
@@ -1088,11 +1110,7 @@ class ActivityStats(commands.Cog):
         user = self.bot.get_user(user_id)
         if user:
             return user.name
-        try:
-            user = await self.bot.fetch_user(user_id)
-        except discord.HTTPException:
-            return str(user_id)
-        return user.name
+        return f"Unknown user ({user_id})"
 
     @staticmethod
     def _clean_limit(limit: int) -> int:

@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 import discord
@@ -21,6 +22,8 @@ MUSIC_PATTERN = re.compile(
 LINK_EMOJI    = "\U0001f517"                        # 🔗
 CHECK_EMOJI   = "✅"                            # ✅
 BROKEN_EMOJI  = "⛓️‍\U0001f4a5"     # ⛓️‍💥
+DEFAULT_REACT_TIMEOUT_SECONDS = 10 * 60
+BLOCKED_REACT_TIMEOUT_SECONDS = 60
 
 
 def _norm(emoji: str) -> str:
@@ -36,9 +39,16 @@ class MusicBoard(commands.Cog):
         self.config.register_guild(
             music_channel_id=None,
             posted_message_ids=[],
+            react_timeout_seconds=DEFAULT_REACT_TIMEOUT_SECONDS,
         )
         self._processing: set[int] = set()
         self._music_channels: dict[int, int] = {}  # guild_id -> channel_id
+        self._cleanup_tasks: dict[tuple[int, int], asyncio.Task] = {}
+
+    def cog_unload(self):
+        for task in self._cleanup_tasks.values():
+            task.cancel()
+        self._cleanup_tasks.clear()
 
     @commands.group(name="musicboard", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
@@ -74,8 +84,33 @@ class MusicBoard(commands.Cog):
             inline=True,
         )
         embed.add_field(name="Tracks Posted", value=str(posted_count), inline=True)
+        embed.add_field(
+            name="Reaction Timeout",
+            value=self._format_timeout(data["react_timeout_seconds"]),
+            inline=True,
+        )
         embed.set_footer(text="React with 🔗 on any music link to nominate it.")
         await ctx.send(embed=embed)
+
+    @musicboard.command(name="timeout")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def musicboard_timeout(self, ctx: commands.Context, minutes: int | None = None):
+        """Set how long MusicBoard prompt reactions stay up. Use 0 to disable."""
+        if minutes is None:
+            seconds = await self.config.guild(ctx.guild).react_timeout_seconds()
+            await ctx.send(f"MusicBoard reactions currently expire after {self._format_timeout(seconds)}.")
+            return
+
+        if minutes < 0:
+            await ctx.send("Reaction timeout must be 0 or higher.")
+            return
+
+        seconds = minutes * 60
+        await self.config.guild(ctx.guild).react_timeout_seconds.set(seconds)
+        if seconds:
+            await ctx.send(f"MusicBoard reactions now expire after {self._format_timeout(seconds)}.")
+        else:
+            await ctx.send("MusicBoard reactions will no longer expire automatically.")
 
     @musicboard.command(name="clear")
     @commands.admin_or_permissions(manage_guild=True)
@@ -105,6 +140,7 @@ class MusicBoard(commands.Cog):
                         await message.add_reaction(emoji)
                     except (discord.Forbidden, discord.HTTPException):
                         pass
+            await self._schedule_reaction_cleanup(message)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -125,7 +161,15 @@ class MusicBoard(commands.Cog):
                             await msg.clear_reaction(emoji_to_clear)
                         except (discord.Forbidden, discord.HTTPException):
                             pass
-                    await msg.add_reaction("❌")
+                    try:
+                        await msg.add_reaction("❌")
+                    except (discord.Forbidden, discord.HTTPException):
+                        return
+                    await self._schedule_reaction_cleanup(
+                        msg,
+                        emojis=("❌",),
+                        timeout=BLOCKED_REACT_TIMEOUT_SECONDS,
+                    )
                 except (discord.NotFound,):
                     pass
             return
@@ -186,6 +230,7 @@ class MusicBoard(commands.Cog):
             async with self.config.guild(guild).posted_message_ids() as id_list:
                 id_list.append(payload.message_id)
 
+            self._cancel_reaction_cleanup(message.channel.id, message.id)
             for emoji_to_clear in (LINK_EMOJI, BROKEN_EMOJI):
                 try:
                     await message.clear_reaction(emoji_to_clear)
@@ -198,6 +243,57 @@ class MusicBoard(commands.Cog):
         finally:
             self._processing.discard(payload.message_id)
 
+    async def _schedule_reaction_cleanup(
+        self,
+        message: discord.Message,
+        emojis: tuple[str, ...] = (LINK_EMOJI, BROKEN_EMOJI),
+        timeout: int | None = None,
+    ):
+        if timeout is None:
+            timeout = await self.config.guild(message.guild).react_timeout_seconds()
+        if not timeout:
+            return
+
+        key = (message.channel.id, message.id)
+        self._cancel_reaction_cleanup(*key)
+        task = asyncio.create_task(
+            self._cleanup_reactions_after(message.channel.id, message.id, timeout, emojis)
+        )
+        self._cleanup_tasks[key] = task
+        task.add_done_callback(lambda _: self._cleanup_tasks.pop(key, None))
+
+    async def _cleanup_reactions_after(
+        self,
+        channel_id: int,
+        message_id: int,
+        delay: int,
+        emojis: tuple[str, ...],
+    ):
+        try:
+            await asyncio.sleep(delay)
+            channel = self.bot.get_channel(channel_id)
+            if not channel or not isinstance(channel, discord.TextChannel):
+                return
+
+            if not self.bot.user:
+                return
+
+            message = await channel.fetch_message(message_id)
+            for emoji in emojis:
+                try:
+                    await message.remove_reaction(emoji, self.bot.user)
+                except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+                    pass
+        except asyncio.CancelledError:
+            pass
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+
+    def _cancel_reaction_cleanup(self, channel_id: int, message_id: int):
+        task = self._cleanup_tasks.pop((channel_id, message_id), None)
+        if task:
+            task.cancel()
+
     async def _get_music_channel_id(self, guild: discord.Guild) -> int | None:
         if guild.id not in self._music_channels:
             channel_id = await self.config.guild(guild).music_channel_id()
@@ -208,3 +304,11 @@ class MusicBoard(commands.Cog):
     def _extract_music_url(self, content: str) -> str | None:
         match = MUSIC_PATTERN.search(content)
         return match.group(0) if match else None
+
+    def _format_timeout(self, seconds: int) -> str:
+        if not seconds:
+            return "never"
+        minutes = seconds // 60
+        if minutes == 1:
+            return "1 minute"
+        return f"{minutes} minutes"

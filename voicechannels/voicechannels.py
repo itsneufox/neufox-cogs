@@ -135,22 +135,32 @@ class VoiceDashboardView(discord.ui.View):
         if not self.cog._can_admin_manage(interaction.user):
             await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
             return
-        await interaction.response.send_modal(AdminChannelModal(self.cog))
+        await self.cog.send_admin_channel_picker(interaction)
 
 
-class AdminChannelModal(discord.ui.Modal):
+class AdminChannelPickerView(discord.ui.View):
     def __init__(self, cog: "VoiceChannels"):
-        super().__init__(title="Admin Channel Controls")
+        super().__init__(timeout=60)
         self.cog = cog
-        self.channel_id = discord.ui.TextInput(
-            label="Voice channel ID",
-            max_length=25,
-            placeholder="Paste the temporary voice channel ID",
-        )
-        self.add_item(self.channel_id)
+        self.add_item(AdminChannelSelect(cog))
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await self.cog.send_admin_dashboard(interaction, str(self.channel_id))
+
+class AdminChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, cog: "VoiceChannels"):
+        super().__init__(
+            placeholder="Choose a temporary voice channel",
+            channel_types=[discord.ChannelType.voice],
+            min_values=1,
+            max_values=1,
+        )
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction):
+        channel = self.values[0]
+        if not isinstance(channel, discord.VoiceChannel):
+            await interaction.response.send_message("Choose a voice channel.", ephemeral=True)
+            return
+        await self.cog.send_admin_dashboard(interaction, channel)
 
 
 class ChannelSettingsModal(discord.ui.Modal):
@@ -693,22 +703,34 @@ class VoiceChannels(commands.Cog):
             ephemeral=True,
         )
 
-    async def send_admin_dashboard(self, interaction: discord.Interaction, raw_channel_id: str):
+    async def send_admin_channel_picker(self, interaction: discord.Interaction):
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
             return
         if not self._can_admin_manage(interaction.user):
             await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
             return
-        try:
-            channel_id = int(raw_channel_id.strip())
-        except ValueError:
-            await interaction.response.send_message("That is not a valid channel ID.", ephemeral=True)
+        created_channels = await self.config.guild(interaction.guild).created_channels()
+        if not created_channels:
+            await interaction.response.send_message("There are no tracked temporary voice channels.", ephemeral=True)
             return
 
-        channel = interaction.guild.get_channel(channel_id)
-        record = await self._channel_record(interaction.guild, channel_id)
-        if record is None or not isinstance(channel, discord.VoiceChannel):
+        await interaction.response.send_message(
+            "Choose the temporary voice channel to manage.",
+            view=AdminChannelPickerView(self),
+            ephemeral=True,
+        )
+
+    async def send_admin_dashboard(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+            return
+        if not self._can_admin_manage(interaction.user):
+            await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
+            return
+
+        record = await self._channel_record(interaction.guild, channel.id)
+        if record is None:
             await interaction.response.send_message("That is not a tracked temporary voice channel.", ephemeral=True)
             return
 
