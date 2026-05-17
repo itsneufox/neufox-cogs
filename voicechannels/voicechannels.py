@@ -156,11 +156,12 @@ class AdminChannelSelect(discord.ui.ChannelSelect):
         self.cog = cog
 
     async def callback(self, interaction: discord.Interaction):
-        channel = self.values[0]
-        if not isinstance(channel, discord.VoiceChannel):
+        selected = self.values[0]
+        channel_id = getattr(selected, "id", None)
+        if channel_id is None:
             await interaction.response.send_message("Choose a voice channel.", ephemeral=True)
             return
-        await self.cog.send_admin_dashboard(interaction, channel)
+        await self.cog.send_admin_dashboard(interaction, int(channel_id))
 
 
 class ChannelSettingsModal(discord.ui.Modal):
@@ -721,7 +722,7 @@ class VoiceChannels(commands.Cog):
             ephemeral=True,
         )
 
-    async def send_admin_dashboard(self, interaction: discord.Interaction, channel: discord.VoiceChannel):
+    async def send_admin_dashboard(self, interaction: discord.Interaction, channel_id: int):
         if interaction.guild is None or not isinstance(interaction.user, discord.Member):
             await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
             return
@@ -729,8 +730,9 @@ class VoiceChannels(commands.Cog):
             await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
             return
 
-        record = await self._channel_record(interaction.guild, channel.id)
-        if record is None:
+        channel = interaction.guild.get_channel(channel_id)
+        record = await self._channel_record(interaction.guild, channel_id)
+        if record is None or not isinstance(channel, discord.VoiceChannel):
             await interaction.response.send_message("That is not a tracked temporary voice channel.", ephemeral=True)
             return
 
