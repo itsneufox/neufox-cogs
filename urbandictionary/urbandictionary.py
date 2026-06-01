@@ -173,7 +173,7 @@ class UrbanDictionary(commands.Cog):
         example = self._clean_text(str(entry.get("example", "")))
         description = definition
         if example:
-            description = f"{description}\n\nExample: {example}"
+            description = f"{description}\n\n**Example:** {example}"
 
         embed = discord.Embed(
             title=self._truncate(title, 256),
