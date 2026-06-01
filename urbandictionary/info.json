@@ -1,0 +1,11 @@
+{
+    "name": "UrbanDictionary",
+    "short": "Look up Urban Dictionary definitions.",
+    "description": "Searches Urban Dictionary and displays definitions, examples, votes, author, and source links.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.0",
+    "install_msg": "UrbanDictionary loaded! Use `[p]urban <term>` or `[p]urban random`.",
+    "requirements": [],
+    "tags": ["dictionary", "urban dictionary", "utility", "fun"],
+    "end_user_data_statement": "This cog does not store end user data. Search terms are sent to Urban Dictionary only when a user runs a lookup command."
+}
