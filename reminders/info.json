@@ -4,7 +4,7 @@
     "description": "Adds slash commands for scheduling reminders for yourself or another server member, with persistent storage and automatic delivery.",
     "author": ["itsneufox"],
     "min_bot_version": "3.5.0",
-    "install_msg": "Reminders loaded! Sync slash commands, then use `/remindme` or `/remind`.",
+    "install_msg": "Reminders loaded! Use `[p]remindme <when> <message>` or `[p]remind <member> <when> <message>`. Run `[p]slash sync` for `/remindme` and `/remind`.",
     "requirements": [],
     "tags": ["reminders", "utility", "slash"],
     "end_user_data_statement": "This cog stores reminder creator IDs, target user IDs, guild IDs, channel IDs, due timestamps, creation timestamps, and reminder text until reminders are delivered or deleted."
