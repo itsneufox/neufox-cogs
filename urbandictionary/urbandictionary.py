@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from urllib.parse import quote_plus
 
 import aiohttp
@@ -12,9 +11,7 @@ API_BASE_URL = "https://api.urbandictionary.com/v0"
 DEFAULT_COLOR = discord.Color.dark_teal()
 REQUEST_TIMEOUT = 10
 EMBED_DESCRIPTION_LIMIT = 4096
-EMBED_FIELD_LIMIT = 1024
 MAX_RESULTS = 10
-BRACKETED_TERM_RE = re.compile(r"\[([^\]]+)\]")
 PAGINATION_TIMEOUT = 120
 
 
@@ -26,7 +23,6 @@ class DefinitionView(discord.ui.View):
         self.entries = entries
         self.page = 0
         self.message: discord.Message | None = None
-        self._update_buttons()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.owner_id:
@@ -40,8 +36,7 @@ class DefinitionView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        self.page = max(0, self.page - 1)
-        self._update_buttons()
+        self.page = (self.page - 1) % len(self.entries)
         await interaction.response.edit_message(
             embed=self.cog._build_embed(self.entries[self.page], page=self.page, total=len(self.entries)),
             view=self,
@@ -53,8 +48,7 @@ class DefinitionView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        self.page = min(len(self.entries) - 1, self.page + 1)
-        self._update_buttons()
+        self.page = (self.page + 1) % len(self.entries)
         await interaction.response.edit_message(
             embed=self.cog._build_embed(self.entries[self.page], page=self.page, total=len(self.entries)),
             view=self,
@@ -68,10 +62,6 @@ class DefinitionView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
-
-    def _update_buttons(self):
-        self.previous_page.disabled = self.page <= 0
-        self.next_page.disabled = self.page >= len(self.entries) - 1
 
 
 class UrbanDictionary(commands.Cog):
@@ -174,38 +164,27 @@ class UrbanDictionary(commands.Cog):
         total: int | None = None,
     ) -> discord.Embed:
         word = self._clean_text(str(entry.get("word", "Unknown")))
-        title = f"{title_prefix}: {word}" if title_prefix else word
+        author = self._clean_text(str(entry.get("author") or "Unknown"))
+        title = f"{word} by {author}"
+        if title_prefix:
+            title = f"{title_prefix}: {title}"
         permalink = entry.get("permalink") or self._term_url(word)
         definition = self._clean_text(str(entry.get("definition", "")))
         example = self._clean_text(str(entry.get("example", "")))
+        description = definition
+        if example:
+            description = f"{description}\n\nExample: {example}"
 
         embed = discord.Embed(
             title=self._truncate(title, 256),
             url=str(permalink),
-            description=self._truncate(definition, EMBED_DESCRIPTION_LIMIT),
+            description=self._truncate(description, EMBED_DESCRIPTION_LIMIT),
             color=DEFAULT_COLOR,
         )
 
-        if example:
-            embed.add_field(
-                name="Example",
-                value=self._truncate(example, EMBED_FIELD_LIMIT),
-                inline=False,
-            )
-
         thumbs_up = self._format_count(entry.get("thumbs_up"))
         thumbs_down = self._format_count(entry.get("thumbs_down"))
-        embed.add_field(name="Votes", value=f"+{thumbs_up} / -{thumbs_down}", inline=True)
-
-        author = entry.get("author")
-        if author:
-            embed.add_field(
-                name="Author",
-                value=self._truncate(self._clean_text(str(author)), 256),
-                inline=True,
-            )
-
-        footer = "Urban Dictionary"
+        footer = f"{thumbs_down} Down / {thumbs_up} Up, Powered by Urban Dictionary"
         if page is not None and total is not None and total > 1:
             footer = f"{footer} | Definition {page + 1}/{total}"
         embed.set_footer(text=footer)
@@ -213,7 +192,6 @@ class UrbanDictionary(commands.Cog):
 
     @staticmethod
     def _clean_text(value: str) -> str:
-        value = BRACKETED_TERM_RE.sub(r"\1", value)
         return value.replace("\r\n", "\n").replace("\r", "\n").strip()
 
     @staticmethod
