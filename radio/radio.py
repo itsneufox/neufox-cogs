@@ -87,6 +87,39 @@ class Radio(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @radio.command(name="help", aliases=["commands"])
+    @commands.guild_only()
+    async def radio_help(self, ctx: commands.Context):
+        """Show Radio help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="Radio Help",
+            description="Stream a configured radio URL into a voice channel.",
+            color=DEFAULT_COLOR,
+        )
+        embed.add_field(
+            name="User Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}radio` - show current radio status",
+                    f"`{prefix}radio forcejoin [voice_channel]` - join and start the stream",
+                    f"`{prefix}radio forcestop` - stop playback and leave voice",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Admin Setup",
+            value="\n".join(
+                [
+                    f"`{prefix}radio url <stream_url>` - set the stream URL",
+                    f"`{prefix}radio autoplay <voice_channel> [true/false]` - configure automatic join/leave",
+                ]
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
     @radio.command(name="url")
     @commands.admin_or_permissions(manage_guild=True)
     async def radio_url(self, ctx: commands.Context, *, url: str):

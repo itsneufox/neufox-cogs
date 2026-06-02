@@ -157,7 +157,7 @@ class ActivityStats(commands.Cog):
         embed.add_field(name="Known Messages", value=str(messages_tracked), inline=True)
         await ctx.send(embed=embed)
 
-    @activitystats.command(name="help")
+    @activitystats.command(name="help", aliases=["commands"])
     async def activitystats_help(self, ctx: commands.Context):
         """Show ActivityStats commands."""
         prefix = ctx.clean_prefix

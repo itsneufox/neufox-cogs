@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import secrets
 import time
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from aiohttp import web
 import discord
 from redbot.core import Config, commands
+from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 
 log = logging.getLogger("red.neufox.economy")
@@ -16,8 +18,18 @@ log = logging.getLogger("red.neufox.economy")
 CASH = "cash"
 DEFAULT_API_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8787
+DEFAULT_DAILY_AMOUNT = 250
+DEFAULT_DAILY_COOLDOWN = 86400
+DEFAULT_WEEKLY_AMOUNT = 1000
+DEFAULT_WEEKLY_COOLDOWN = 604800
+DEFAULT_WORK_AMOUNT = 75
+DEFAULT_WORK_MIN = 25
+DEFAULT_WORK_MAX = 100
+DEFAULT_WORK_COOLDOWN = 3600
 MAX_LEDGER_ENTRIES = 500
 MAX_AMOUNT = 10**15
+TOP_LIMIT = 10
+SHOP_PAGE_SIZE = 8
 
 
 class Economy(commands.Cog):
@@ -34,6 +46,18 @@ class Economy(commands.Cog):
             api_host=DEFAULT_API_HOST,
             api_port=DEFAULT_API_PORT,
             api_tokens={},
+            daily_amount=DEFAULT_DAILY_AMOUNT,
+            daily_cooldown=DEFAULT_DAILY_COOLDOWN,
+            weekly_amount=DEFAULT_WEEKLY_AMOUNT,
+            weekly_cooldown=DEFAULT_WEEKLY_COOLDOWN,
+            work_amount=DEFAULT_WORK_AMOUNT,
+            work_min=DEFAULT_WORK_MIN,
+            work_max=DEFAULT_WORK_MAX,
+            work_cooldown=DEFAULT_WORK_COOLDOWN,
+            claims={},
+            shops={},
+            inventories={},
+            log_channels={},
         )
         self._lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
@@ -48,6 +72,34 @@ class Economy(commands.Cog):
     async def economy(self, ctx: commands.Context):
         """View economy commands."""
         await ctx.invoke(self.economy_balance)
+
+    @economy.command(name="help", aliases=["commands"])
+    async def economy_help(self, ctx: commands.Context):
+        """Show economy help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="Economy Help",
+            description="Global cash balances with claims, transfers, shop items, and API access.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="User Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}eco balance [member]` - show a balance",
+                    f"`{prefix}eco pay <member> <amount>` - pay another member",
+                    f"`{prefix}eco daily` - claim daily cash",
+                    f"`{prefix}eco weekly` - claim weekly cash",
+                    f"`{prefix}eco work` - work for random cash",
+                    f"`{prefix}eco top` - show the leaderboard",
+                    f"`{prefix}eco shop` - view the server shop",
+                    f"`{prefix}eco buy <item> [quantity]` - buy a shop item",
+                    f"`{prefix}eco inventory [member]` - show inventory",
+                ]
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
 
     @economy.command(name="balance", aliases=["bal"])
     async def economy_balance(self, ctx: commands.Context, member: discord.Member | None = None):
@@ -77,6 +129,7 @@ class Economy(commands.Cog):
                 member.id,
                 amount,
                 actor_id=ctx.author.id,
+                guild_id=ctx.guild.id if ctx.guild else None,
                 reason=f"Discord pay command in guild {ctx.guild.id if ctx.guild else 'dm'}",
             )
         except EconomyError as error:
@@ -85,11 +138,210 @@ class Economy(commands.Cog):
 
         await ctx.send(f"Paid {member.mention} {amount:,} cash.", allowed_mentions=discord.AllowedMentions(users=True))
 
+    @economy.command(name="daily")
+    async def economy_daily(self, ctx: commands.Context):
+        """Claim your daily cash."""
+        await self._claim_reward(ctx, "daily")
+
+    @economy.command(name="weekly")
+    async def economy_weekly(self, ctx: commands.Context):
+        """Claim your weekly cash."""
+        await self._claim_reward(ctx, "weekly")
+
+    @economy.command(name="work")
+    async def economy_work(self, ctx: commands.Context):
+        """Work for some cash."""
+        await self._claim_reward(ctx, "work")
+
+    @economy.command(name="shop")
+    @commands.guild_only()
+    async def economy_shop(self, ctx: commands.Context):
+        """Show this server's cash shop."""
+        shop = await self._get_shop(ctx.guild.id)
+        items = sorted(shop.items(), key=lambda item: item[0])
+        if not items:
+            await ctx.send("This server's shop is empty.")
+            return
+
+        pages = []
+        for start in range(0, len(items), SHOP_PAGE_SIZE):
+            lines = []
+            for key, item in items[start : start + SHOP_PAGE_SIZE]:
+                stock = item.get("stock")
+                stock_text = "unlimited" if stock is None else f"{int(stock):,} left"
+                role_text = ""
+                role_id = item.get("role_id")
+                if role_id:
+                    role_text = f" | role: <@&{role_id}>"
+                description = item.get("description") or "No description."
+                lines.append(
+                    f"**{item.get('name', key)}** - {int(item.get('price', 0)):,} cash ({stock_text}){role_text}\n"
+                    f"{description}"
+                )
+            embed = discord.Embed(
+                title="Cash Shop",
+                description="\n\n".join(lines),
+                color=discord.Color.gold(),
+            )
+            embed.set_footer(text=f"Page {len(pages) + 1}/{(len(items) + SHOP_PAGE_SIZE - 1) // SHOP_PAGE_SIZE}")
+            pages.append(embed)
+        if len(pages) == 1:
+            await ctx.send(embed=pages[0])
+        else:
+            await menu(ctx, pages, DEFAULT_CONTROLS)
+
+    @economy.command(name="buy")
+    @commands.guild_only()
+    async def economy_buy(self, ctx: commands.Context, item_name: str, quantity: int = 1):
+        """Buy an item from this server's shop."""
+        if quantity <= 0:
+            await ctx.send("Quantity must be positive.")
+            return
+        if quantity > 1000:
+            await ctx.send("Quantity cannot exceed 1,000.")
+            return
+
+        try:
+            item, balances = await self.buy_item(ctx.guild, ctx.author, item_name, quantity)
+        except EconomyError as error:
+            await ctx.send(str(error))
+            return
+
+        role_id = item.get("role_id")
+        role_note = ""
+        if role_id:
+            role = ctx.guild.get_role(int(role_id))
+            if role and isinstance(ctx.author, discord.Member):
+                try:
+                    await ctx.author.add_roles(role, reason=f"Economy shop purchase: {item.get('name', item_name)}")
+                    role_note = f" Role added: {role.mention}."
+                except discord.Forbidden:
+                    role_note = " I could not add the configured role."
+                except discord.HTTPException:
+                    role_note = " Role assignment failed."
+
+        total = int(item.get("price", 0)) * quantity
+        await ctx.send(
+            f"Bought {quantity:,}x **{item.get('name', item_name)}** for {total:,} cash. "
+            f"Balance: {balances[CASH]:,} cash.{role_note}",
+            allowed_mentions=discord.AllowedMentions(roles=False),
+        )
+
+    @economy.command(name="inventory", aliases=["inv"])
+    @commands.guild_only()
+    async def economy_inventory(self, ctx: commands.Context, member: discord.Member | None = None):
+        """Show your inventory, or another member's inventory."""
+        member = member or ctx.author
+        inventory = await self._get_inventory(ctx.guild.id, member.id)
+        entries = [(name, int(quantity)) for name, quantity in inventory.items() if int(quantity) > 0]
+        if not entries:
+            await ctx.send(f"{member.display_name} has no items.")
+            return
+
+        lines = [f"**{name}** x{quantity:,}" for name, quantity in sorted(entries)]
+        embed = discord.Embed(
+            title=f"{member.display_name}'s Inventory",
+            description="\n".join(lines),
+            color=discord.Color.gold(),
+        )
+        await ctx.send(embed=embed)
+
+    @economy.command(name="top", aliases=["leaderboard"])
+    async def economy_top(self, ctx: commands.Context):
+        """Show the cash leaderboard."""
+        balances = await self.config.balances()
+        entries = sorted(
+            (
+                (int(user_id), int(account.get(CASH, 0)))
+                for user_id, account in balances.items()
+                if int(account.get(CASH, 0)) > 0
+            ),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:TOP_LIMIT]
+        if not entries:
+            await ctx.send("There are no economy balances yet.")
+            return
+
+        lines = []
+        for rank, (user_id, amount) in enumerate(entries, start=1):
+            lines.append(f"{rank}. **{await self._display_user(ctx.guild, user_id)}** - {amount:,} cash")
+        embed = discord.Embed(
+            title="Cash Leaderboard",
+            description="\n".join(lines),
+            color=discord.Color.gold(),
+        )
+        await ctx.send(embed=embed)
+
     @economy.group(name="admin", invoke_without_command=True)
     @commands.is_owner()
     async def economy_admin(self, ctx: commands.Context):
         """Owner-only economy management."""
-        await ctx.send_help()
+        await ctx.invoke(self.economy_admin_help)
+
+    @economy_admin.command(name="help", aliases=["commands"])
+    @commands.is_owner()
+    async def economy_admin_help(self, ctx: commands.Context):
+        """Show owner economy help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="Economy Admin Help",
+            description="Owner-only balance, claim, shop, log, and API commands.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Balances",
+            value="\n".join(
+                [
+                    f"`{prefix}eco admin add <member> <amount> [reason]`",
+                    f"`{prefix}eco admin remove <member> <amount> [reason]`",
+                    f"`{prefix}eco admin set <member> <amount> [reason]`",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Claims And Logs",
+            value="\n".join(
+                [
+                    f"`{prefix}eco admin claim show`",
+                    f"`{prefix}eco admin claim daily <amount> [cooldown_seconds]`",
+                    f"`{prefix}eco admin claim weekly <amount> [cooldown_seconds]`",
+                    f"`{prefix}eco admin claim work <amount> [cooldown_seconds]`",
+                    f"`{prefix}eco admin claim workrange <min> <max> [cooldown_seconds]`",
+                    f"`{prefix}eco admin logchannel [channel]`",
+                    f"`{prefix}eco admin clearlog`",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Shop",
+            value="\n".join(
+                [
+                    f"`{prefix}eco admin shop add <name> <price> [stock] [description]`",
+                    f"`{prefix}eco admin shop remove <name>`",
+                    f"`{prefix}eco admin shop role <name> [role]`",
+                    f"`{prefix}eco admin shop stock <name> <stock>`",
+                    "`stock -1` means unlimited.",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="API",
+            value="\n".join(
+                [
+                    f"`{prefix}eco api status`",
+                    f"`{prefix}eco api start [host] [port]`",
+                    f"`{prefix}eco api stop`",
+                    f"`{prefix}eco api token create <name>`",
+                    f"`{prefix}eco api token revoke <name>`",
+                ]
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
 
     @economy_admin.command(name="add")
     @commands.is_owner()
@@ -129,6 +381,182 @@ class Economy(commands.Cog):
     ):
         """Set a user's cash balance."""
         await self._owner_adjust(ctx, member, amount, "set", reason)
+
+    @economy_admin.group(name="claim", invoke_without_command=True)
+    @commands.is_owner()
+    async def economy_admin_claim(self, ctx: commands.Context):
+        """Manage claim rewards."""
+        await ctx.invoke(self.economy_admin_claim_show)
+
+    @economy_admin_claim.command(name="show")
+    @commands.is_owner()
+    async def economy_admin_claim_show(self, ctx: commands.Context):
+        """Show claim reward settings."""
+        daily_amount = await self.config.daily_amount()
+        daily_cooldown = await self.config.daily_cooldown()
+        work_amount = await self.config.work_amount()
+        work_cooldown = await self.config.work_cooldown()
+        await ctx.send(
+            "Claim rewards:\n"
+            f"Daily: {daily_amount:,} cash every {self._format_duration(daily_cooldown)}\n"
+            f"Weekly: {await self.config.weekly_amount():,} cash every {self._format_duration(await self.config.weekly_cooldown())}\n"
+            f"Work: {await self.config.work_min():,}-{await self.config.work_max():,} cash every {self._format_duration(work_cooldown)}"
+        )
+
+    @economy_admin_claim.command(name="daily")
+    @commands.is_owner()
+    async def economy_admin_claim_daily(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_DAILY_COOLDOWN):
+        """Set daily amount and cooldown."""
+        await self._set_claim_settings(ctx, "daily", amount, cooldown_seconds)
+
+    @economy_admin_claim.command(name="weekly")
+    @commands.is_owner()
+    async def economy_admin_claim_weekly(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_WEEKLY_COOLDOWN):
+        """Set weekly amount and cooldown."""
+        await self._set_claim_settings(ctx, "weekly", amount, cooldown_seconds)
+
+    @economy_admin_claim.command(name="work")
+    @commands.is_owner()
+    async def economy_admin_claim_work(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_WORK_COOLDOWN):
+        """Set fixed work amount and cooldown."""
+        await self._set_work_range(ctx, amount, amount, cooldown_seconds)
+
+    @economy_admin_claim.command(name="workrange")
+    @commands.is_owner()
+    async def economy_admin_claim_workrange(
+        self,
+        ctx: commands.Context,
+        minimum: int,
+        maximum: int,
+        cooldown_seconds: int = DEFAULT_WORK_COOLDOWN,
+    ):
+        """Set random work range and cooldown."""
+        await self._set_work_range(ctx, minimum, maximum, cooldown_seconds)
+
+    @economy_admin.command(name="logchannel")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_logchannel(self, ctx: commands.Context, channel: discord.TextChannel | None = None):
+        """Set the economy log channel for this server."""
+        channel = channel or ctx.channel
+        async with self.config.log_channels() as channels:
+            channels[str(ctx.guild.id)] = channel.id
+        await ctx.send(f"Economy logs will be sent to {channel.mention}.")
+
+    @economy_admin.command(name="clearlog")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_clearlog(self, ctx: commands.Context):
+        """Disable economy logs for this server."""
+        async with self.config.log_channels() as channels:
+            channels.pop(str(ctx.guild.id), None)
+        await ctx.send("Economy logs disabled for this server.")
+
+    @economy_admin.group(name="shop", invoke_without_command=True)
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_shop(self, ctx: commands.Context):
+        """Owner-only shop management."""
+        await ctx.invoke(self.economy_shop)
+
+    @economy_admin_shop.command(name="add")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_shop_add(
+        self,
+        ctx: commands.Context,
+        name: str,
+        price: int,
+        stock: int = -1,
+        *,
+        description: str = "No description.",
+    ):
+        """Add or replace a shop item. Use stock -1 for unlimited."""
+        if price <= 0:
+            await ctx.send("Price must be positive.")
+            return
+        if stock < -1:
+            await ctx.send("Stock must be -1 for unlimited, 0, or a positive number.")
+            return
+        key = self._shop_key(name)
+        item = {
+            "name": name,
+            "price": self._require_amount(price, allow_zero=False),
+            "stock": None if stock == -1 else int(stock),
+            "description": str(description or "No description.")[:500],
+            "role_id": None,
+        }
+        async with self.config.shops() as shops:
+            shop = shops.setdefault(str(ctx.guild.id), {})
+            shop[key] = item
+        await self._send_economy_log(
+            ctx.guild,
+            "shop item added",
+            amount=price,
+            actor_id=ctx.author.id,
+            target_id=None,
+            reason=key,
+            item_name=name,
+            item_quantity=stock if stock != -1 else None,
+        )
+        await ctx.send(f"Added **{name}** to the shop for {price:,} cash.")
+
+    @economy_admin_shop.command(name="remove")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_shop_remove(self, ctx: commands.Context, name: str):
+        """Remove a shop item."""
+        key = self._shop_key(name)
+        async with self.config.shops() as shops:
+            shop = shops.setdefault(str(ctx.guild.id), {})
+            item = shop.pop(key, None)
+        if not item:
+            await ctx.send("That item is not in the shop.")
+            return
+        await self._send_economy_log(
+            ctx.guild,
+            "shop item removed",
+            amount=None,
+            actor_id=ctx.author.id,
+            target_id=None,
+            reason=key,
+            item_name=item.get("name", name),
+            item_quantity=None,
+        )
+        await ctx.send(f"Removed **{item.get('name', name)}** from the shop.")
+
+    @economy_admin_shop.command(name="role")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_shop_role(self, ctx: commands.Context, name: str, role: discord.Role | None = None):
+        """Set or clear the role awarded by a shop item."""
+        key = self._shop_key(name)
+        async with self.config.shops() as shops:
+            shop = shops.setdefault(str(ctx.guild.id), {})
+            item = shop.get(key)
+            if not item:
+                await ctx.send("That item is not in the shop.")
+                return
+            item["role_id"] = role.id if role else None
+        await ctx.send(f"Role reward for **{item.get('name', name)}** {'set to ' + role.mention if role else 'cleared'}.")
+
+    @economy_admin_shop.command(name="stock")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_shop_stock(self, ctx: commands.Context, name: str, stock: int):
+        """Set item stock. Use -1 for unlimited."""
+        if stock < -1:
+            await ctx.send("Stock must be -1 for unlimited, 0, or a positive number.")
+            return
+        key = self._shop_key(name)
+        async with self.config.shops() as shops:
+            shop = shops.setdefault(str(ctx.guild.id), {})
+            item = shop.get(key)
+            if not item:
+                await ctx.send("That item is not in the shop.")
+                return
+            item["stock"] = None if stock == -1 else int(stock)
+        await ctx.send(f"Stock for **{item.get('name', name)}** set to {'unlimited' if stock == -1 else f'{stock:,}'}.")
 
     @economy.group(name="api", invoke_without_command=True)
     @commands.is_owner()
@@ -215,16 +643,100 @@ class Economy(commands.Cog):
 
         try:
             if operation == "add":
-                balances = await self.add_balance(member.id, amount, actor_id=ctx.author.id, reason=reason)
+                balances = await self.add_balance(
+                    member.id,
+                    amount,
+                    actor_id=ctx.author.id,
+                    guild_id=ctx.guild.id if ctx.guild else None,
+                    reason=reason,
+                )
             elif operation == "remove":
-                balances = await self.remove_balance(member.id, amount, actor_id=ctx.author.id, reason=reason)
+                balances = await self.remove_balance(
+                    member.id,
+                    amount,
+                    actor_id=ctx.author.id,
+                    guild_id=ctx.guild.id if ctx.guild else None,
+                    reason=reason,
+                )
             else:
-                balances = await self.set_balance(member.id, amount, actor_id=ctx.author.id, reason=reason)
+                balances = await self.set_balance(
+                    member.id,
+                    amount,
+                    actor_id=ctx.author.id,
+                    guild_id=ctx.guild.id if ctx.guild else None,
+                    reason=reason,
+                )
         except EconomyError as error:
             await ctx.send(str(error))
             return
 
         await ctx.send(f"{member.mention} now has {balances[CASH]:,} cash.", allowed_mentions=discord.AllowedMentions(users=True))
+
+    async def _claim_reward(self, ctx: commands.Context, claim_type: str):
+        if claim_type == "work":
+            minimum = int(await self.config.work_min())
+            maximum = int(await self.config.work_max())
+            amount = random.randint(minimum, maximum)
+        else:
+            amount = int(await getattr(self.config, f"{claim_type}_amount")())
+        cooldown = int(await getattr(self.config, f"{claim_type}_cooldown")())
+        now = int(time.time())
+        user_id = str(ctx.author.id)
+
+        async with self.config.claims() as claims:
+            user_claims = claims.setdefault(user_id, {})
+            last_claimed = int(user_claims.get(claim_type, 0))
+            next_claim = last_claimed + cooldown
+            if cooldown and now < next_claim:
+                await ctx.send(f"You can claim `{claim_type}` again <t:{next_claim}:R>.")
+                return
+            user_claims[claim_type] = now
+
+        balances = await self.add_balance(
+            ctx.author.id,
+            amount,
+            actor_id=ctx.author.id,
+            guild_id=ctx.guild.id if ctx.guild else None,
+            reason=f"{claim_type} claim",
+        )
+        await ctx.send(f"You claimed {amount:,} cash. Balance: {balances[CASH]:,} cash.")
+
+    async def _set_claim_settings(self, ctx: commands.Context, claim_type: str, amount: int, cooldown_seconds: int):
+        if amount < 0:
+            await ctx.send("Amount cannot be negative.")
+            return
+        if cooldown_seconds < 0:
+            await ctx.send("Cooldown cannot be negative.")
+            return
+        if amount > MAX_AMOUNT:
+            await ctx.send(f"Amount cannot exceed {MAX_AMOUNT:,}.")
+            return
+        await getattr(self.config, f"{claim_type}_amount").set(amount)
+        await getattr(self.config, f"{claim_type}_cooldown").set(cooldown_seconds)
+        await ctx.send(
+            f"{claim_type.title()} claim set to {amount:,} cash every {self._format_duration(cooldown_seconds)}."
+        )
+
+    async def _set_work_range(self, ctx: commands.Context, minimum: int, maximum: int, cooldown_seconds: int):
+        if minimum < 0 or maximum < 0:
+            await ctx.send("Work amounts cannot be negative.")
+            return
+        if minimum > maximum:
+            await ctx.send("Minimum cannot be greater than maximum.")
+            return
+        if maximum > MAX_AMOUNT:
+            await ctx.send(f"Amount cannot exceed {MAX_AMOUNT:,}.")
+            return
+        if cooldown_seconds < 0:
+            await ctx.send("Cooldown cannot be negative.")
+            return
+        await self.config.work_min.set(minimum)
+        await self.config.work_max.set(maximum)
+        await self.config.work_amount.set(maximum)
+        await self.config.work_cooldown.set(cooldown_seconds)
+        await ctx.send(
+            f"Work claim set to {minimum:,}-{maximum:,} cash every {self._format_duration(cooldown_seconds)}."
+        )
 
     async def get_balance(self, user_id: int) -> dict[str, int]:
         """Public cog API: return a user's balances."""
@@ -237,10 +749,11 @@ class Economy(commands.Cog):
         amount: int,
         *,
         actor_id: int | None = None,
+        guild_id: int | None = None,
         reason: str = "api add",
     ) -> dict[str, int]:
         """Public cog API: add cash to a user."""
-        return await self._adjust_balance(user_id, amount, actor_id=actor_id, reason=reason, operation="add")
+        return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="add")
 
     async def remove_balance(
         self,
@@ -248,10 +761,11 @@ class Economy(commands.Cog):
         amount: int,
         *,
         actor_id: int | None = None,
+        guild_id: int | None = None,
         reason: str = "api remove",
     ) -> dict[str, int]:
         """Public cog API: remove cash from a user."""
-        return await self._adjust_balance(user_id, amount, actor_id=actor_id, reason=reason, operation="remove")
+        return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="remove")
 
     async def set_balance(
         self,
@@ -259,10 +773,11 @@ class Economy(commands.Cog):
         amount: int,
         *,
         actor_id: int | None = None,
+        guild_id: int | None = None,
         reason: str = "api set",
     ) -> dict[str, int]:
         """Public cog API: set a user's cash balance."""
-        return await self._adjust_balance(user_id, amount, actor_id=actor_id, reason=reason, operation="set")
+        return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="set")
 
     async def transfer_balance(
         self,
@@ -271,6 +786,7 @@ class Economy(commands.Cog):
         amount: int,
         *,
         actor_id: int | None = None,
+        guild_id: int | None = None,
         reason: str = "api transfer",
     ) -> dict[str, dict[str, int]]:
         """Public cog API: transfer cash between users."""
@@ -291,6 +807,7 @@ class Economy(commands.Cog):
                 to_user_id=to_user_id,
                 amount=amount,
                 actor_id=actor_id,
+                guild_id=guild_id,
                 reason=reason,
             )
         return {"from": source, "to": target}
@@ -301,6 +818,7 @@ class Economy(commands.Cog):
         amount: int,
         *,
         actor_id: int | None,
+        guild_id: int | None,
         reason: str,
         operation: str,
     ) -> dict[str, int]:
@@ -325,6 +843,7 @@ class Economy(commands.Cog):
                 to_user_id=user_id,
                 amount=amount,
                 actor_id=actor_id,
+                guild_id=guild_id,
                 reason=reason,
             )
         return account
@@ -337,7 +856,9 @@ class Economy(commands.Cog):
         to_user_id: int | None,
         amount: int,
         actor_id: int | None,
+        guild_id: int | None,
         reason: str,
+        log_to_channel: bool = True,
     ):
         tx_id = int(await self.config.next_tx())
         await self.config.next_tx.set(tx_id + 1)
@@ -348,12 +869,131 @@ class Economy(commands.Cog):
             "to_user_id": to_user_id,
             "amount": amount,
             "actor_id": actor_id,
+            "guild_id": guild_id,
             "reason": str(reason or "")[:250],
             "created_at": int(time.time()),
         }
         async with self.config.ledger() as ledger:
             ledger.append(entry)
             del ledger[:-MAX_LEDGER_ENTRIES]
+        if guild_id and log_to_channel:
+            guild = self.bot.get_guild(guild_id)
+            if guild:
+                await self._send_economy_log(
+                    guild,
+                    tx_type,
+                    amount=amount,
+                    actor_id=actor_id,
+                    target_id=to_user_id,
+                    reason=reason,
+                    item_name=None,
+                    item_quantity=None,
+                )
+
+    async def buy_item(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        item_name: str,
+        quantity: int = 1,
+    ) -> tuple[dict[str, Any], dict[str, int]]:
+        """Public cog API: buy a guild shop item for a member."""
+        quantity = self._require_amount(quantity, allow_zero=False)
+        key = self._shop_key(item_name)
+        async with self._lock:
+            async with self.config.shops() as shops:
+                shop = shops.setdefault(str(guild.id), {})
+                item = dict(shop.get(key) or {})
+                if not item:
+                    raise EconomyError("That item is not in the shop.")
+                stock = item.get("stock")
+                if stock is not None and int(stock) < quantity:
+                    raise EconomyError("That item does not have enough stock.")
+                price = self._require_amount(item.get("price"), allow_zero=False)
+                total = price * quantity
+                if total > MAX_AMOUNT:
+                    raise EconomyError(f"Amount cannot exceed {MAX_AMOUNT:,}.")
+                async with self.config.balances() as balances:
+                    account = self._account_from_mapping(balances, member.id)
+                    if account[CASH] < total:
+                        raise EconomyError("Insufficient funds.")
+                    account[CASH] -= total
+                    balances[str(member.id)] = account
+                if stock is not None:
+                    item["stock"] = int(stock) - quantity
+                    shop[key] = item
+            async with self.config.inventories() as inventories:
+                guild_inventory = inventories.setdefault(str(guild.id), {})
+                inventory = guild_inventory.setdefault(str(member.id), {})
+                inventory[item.get("name", key)] = int(inventory.get(item.get("name", key), 0)) + quantity
+            await self._append_ledger(
+                "buy",
+                from_user_id=member.id,
+                to_user_id=None,
+                amount=total,
+                actor_id=member.id,
+                guild_id=guild.id,
+                reason=f"bought {quantity}x {item.get('name', key)}",
+                log_to_channel=False,
+            )
+        await self._send_economy_log(
+            guild,
+            "item bought",
+            amount=total,
+            actor_id=member.id,
+            target_id=member.id,
+            reason="buy",
+            item_name=item.get("name", key),
+            item_quantity=quantity,
+        )
+        return item, account
+
+    async def _get_shop(self, guild_id: int) -> dict[str, Any]:
+        shops = await self.config.shops()
+        return dict(shops.get(str(guild_id), {}))
+
+    async def _get_inventory(self, guild_id: int, user_id: int) -> dict[str, int]:
+        inventories = await self.config.inventories()
+        guild_inventory = inventories.get(str(guild_id), {})
+        inventory = guild_inventory.get(str(user_id), {})
+        return {str(name): int(quantity) for name, quantity in inventory.items()}
+
+    async def _send_economy_log(
+        self,
+        guild: discord.Guild,
+        action: str,
+        *,
+        amount: int | None,
+        actor_id: int | None,
+        target_id: int | None,
+        reason: str,
+        item_name: str | None,
+        item_quantity: int | None,
+    ):
+        channels = await self.config.log_channels()
+        channel_id = channels.get(str(guild.id))
+        if not channel_id:
+            return
+        channel = guild.get_channel(int(channel_id))
+        if not isinstance(channel, discord.TextChannel):
+            return
+        embed = discord.Embed(title="Economy Log", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
+        embed.add_field(name="Action", value=action, inline=True)
+        embed.add_field(name="Amount", value=f"{amount:,} cash" if amount is not None else "N/A", inline=True)
+        if actor_id:
+            embed.add_field(name="Executor", value=f"<@{actor_id}>", inline=True)
+        if target_id:
+            embed.add_field(name="Recipient", value=f"<@{target_id}>", inline=True)
+        if item_name:
+            embed.add_field(name="Item", value=item_name, inline=True)
+        if item_quantity:
+            embed.add_field(name="Item Amount", value=f"{item_quantity:,}", inline=True)
+        if reason:
+            embed.add_field(name="Reason", value=str(reason)[:1024], inline=False)
+        try:
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except discord.HTTPException:
+            log.exception("Could not send economy log in guild %s", guild.id)
 
     async def _start_api_if_enabled(self):
         await self.bot.wait_until_ready()
@@ -474,11 +1114,42 @@ class Economy(commands.Cog):
         return user_id if user_id > 0 else None
 
     @staticmethod
+    def _shop_key(name: str) -> str:
+        return str(name or "").strip().lower()
+
+    @staticmethod
     def _account_from_mapping(balances: dict[str, Any], user_id: int) -> dict[str, int]:
         account = balances.get(str(user_id), {})
         return {
             CASH: int(account.get(CASH, 0)),
         }
+
+    async def _display_user(self, guild: discord.Guild | None, user_id: int) -> str:
+        if guild is not None:
+            member = guild.get_member(user_id)
+            if member:
+                return member.display_name
+        user = self.bot.get_user(user_id)
+        if user:
+            return user.name
+        return f"Unknown user ({user_id})"
+
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        seconds = max(0, int(seconds))
+        days, seconds = divmod(seconds, 86400)
+        hours, seconds = divmod(seconds, 3600)
+        minutes, seconds = divmod(seconds, 60)
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if seconds or not parts:
+            parts.append(f"{seconds}s")
+        return " ".join(parts)
 
     @staticmethod
     def _require_amount(amount: Any, *, allow_zero: bool) -> int:

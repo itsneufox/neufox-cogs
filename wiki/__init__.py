@@ -396,7 +396,11 @@ class WikiCog(commands.Cog):
 
     @commands.command()
     @commands.cooldown(1, 5, commands.BucketType.user)
-    async def wiki(self, ctx: commands.Context, *, search_term: str):
+    async def wiki(self, ctx: commands.Context, *, search_term: Optional[str] = None):
+        if search_term is None or search_term.casefold() in {"help", "commands"}:
+            await ctx.invoke(self.wikihelp)
+            return
+
         if len(search_term) < 3:
             embed = discord.Embed(
                 title="Search Error",
@@ -518,6 +522,34 @@ class WikiCog(commands.Cog):
         # Create buttons for results (up to 5)
         view = WikiSearchView(self, search_id, min(len(filtered_results), 5))
         await ctx.send(embed=embed, view=view)
+
+    @commands.command(name="wikihelp", aliases=["wikicommands"])
+    async def wikihelp(self, ctx: commands.Context):
+        """Show Wiki help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="Wiki Help",
+            description="Search open.mp documentation and open result pages with buttons.",
+            color=0x0099ff,
+        )
+        embed.add_field(
+            name="Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}wiki <search term>` - search open.mp documentation",
+                    f"`{prefix}wiki help` - show this help",
+                    f"`{prefix}wikihelp` - show this help directly",
+                ]
+            ),
+            inline=False,
+        )
+        if await self.bot.is_owner(ctx.author):
+            embed.add_field(
+                name="Owner",
+                value=f"`{prefix}wikisetup` - show Wiki setup status",
+                inline=False,
+            )
+        await ctx.send(embed=embed)
 
 
     @commands.command()

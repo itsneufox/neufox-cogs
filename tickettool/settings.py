@@ -36,6 +36,69 @@ class settings(commands.Cog):
         """Configure TicketTool for your server."""
         pass
 
+    @configuration.command(name="help", aliases=["commands"])
+    async def configuration_help(self, ctx: commands.Context) -> None:
+        """Show TicketTool setup help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="TicketTool Setup Help",
+            description="Admin commands for ticket profiles and settings.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Profiles",
+            value="\n".join(
+                [
+                    f"`{prefix}settickettool profile` - list profiles",
+                    f"`{prefix}settickettool profile create <name>` - create a profile",
+                    f"`{prefix}settickettool profile delete <profile>` - delete a profile",
+                    f"`{prefix}settickettool enable <profile> <true|false>` - enable or disable a profile",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Channels",
+            value="\n".join(
+                [
+                    f"`{prefix}settickettool logschannel <profile> [channel]`",
+                    f"`{prefix}settickettool forumchannel <profile> [channel]`",
+                    f"`{prefix}settickettool categoryopen <profile> [category]`",
+                    f"`{prefix}settickettool categoryclose <profile> [category]`",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Roles",
+            value="\n".join(
+                [
+                    f"`{prefix}settickettool adminroles <profile> [roles...]`",
+                    f"`{prefix}settickettool supportroles <profile> [roles...]`",
+                    f"`{prefix}settickettool viewroles <profile> [roles...]`",
+                    f"`{prefix}settickettool pingroles <profile> [roles...]`",
+                    f"`{prefix}settickettool ticketrole <profile> [role]`",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Behavior And Panel",
+            value="\n".join(
+                [
+                    f"`{prefix}settickettool nbmax <profile> <number>`",
+                    f"`{prefix}settickettool usercanclose <profile> <true|false>`",
+                    f"`{prefix}settickettool closeconfirmation <profile> <true|false>`",
+                    f"`{prefix}settickettool closeonleave <profile> <true|false>`",
+                    f"`{prefix}settickettool deleteonclose <profile> <true|false>`",
+                    f"`{prefix}settickettool message <profile> <channel>`",
+                    f"`{prefix}settickettool language <language>`",
+                ]
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
     # ── Profile management ──────────────────────────────────────────────────
 
     @configuration.group(name="profile", invoke_without_command=True)

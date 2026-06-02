@@ -439,6 +439,40 @@ class VoiceChannels(commands.Cog):
         """Manage on-demand voice channels."""
         await ctx.invoke(self.voicechannels_show)
 
+    @voicechannels.command(name="help", aliases=["commands"])
+    @commands.admin_or_permissions(manage_guild=True)
+    async def voicechannels_help(self, ctx: commands.Context):
+        """Show VoiceChannels help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="VoiceChannels Help",
+            description="Create and manage temporary voice channels from a dashboard.",
+            color=DEFAULT_COLOR,
+        )
+        embed.add_field(
+            name="Setup Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}voicechannels setup <dashboard_channel> [category]` - configure and post dashboard",
+                    f"`{prefix}voicechannels dashboard` - repost the dashboard",
+                    f"`{prefix}voicechannels category [category]` - set or clear created-channel category",
+                    f"`{prefix}voicechannels name <template>` - set channel name template",
+                    f"`{prefix}voicechannels limit [0-99]` - set created-channel user limit",
+                    f"`{prefix}voicechannels logs <channel>` - set audit log channel",
+                    f"`{prefix}voicechannels show` - show current settings",
+                    f"`{prefix}voicechannels cleanup` - delete empty tracked channels and forget missing ones",
+                    f"`{prefix}voicechannels history [channel]` - show temporary channel history",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Member Controls",
+            value="Members use dashboard buttons to create a channel, change settings/privacy, invite or block members, transfer ownership, refresh the panel, and delete their channel.",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
     @voicechannels.command(name="setup")
     @commands.admin_or_permissions(manage_guild=True)
     @commands.bot_has_permissions(send_messages=True, embed_links=True, manage_channels=True, move_members=True)

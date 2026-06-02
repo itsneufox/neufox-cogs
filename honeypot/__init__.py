@@ -170,6 +170,46 @@ class Honeypot(commands.Cog):
 
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
+    @honeypot.command(name="help", aliases=["commands"])
+    @commands.admin()
+    async def honeypot_help(self, ctx: commands.Context):
+        """Show Honeypot help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="Honeypot Help",
+            description="Punish users who send messages in a configured trap channel.",
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name="Setup Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}honeypot` - show current configuration",
+                    f"`{prefix}honeypot set <channel>` - set the trap channel",
+                    f"`{prefix}honeypot log [channel]` - set or clear log channel",
+                    f"`{prefix}honeypot action <ban|kick|role>` - choose the punishment",
+                    f"`{prefix}honeypot punishrole [role]` - set or clear punishment role",
+                    f"`{prefix}honeypot striproles <true|false>` - toggle stripping existing roles",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Role Lists",
+            value="\n".join(
+                [
+                    f"`{prefix}honeypot exempt list` - list roles exempt from the honeypot",
+                    f"`{prefix}honeypot exempt add <role>` - add exempt role",
+                    f"`{prefix}honeypot exempt remove <role>` - remove exempt role",
+                    f"`{prefix}honeypot stripexception list` - list roles kept when stripping",
+                    f"`{prefix}honeypot stripexception add <role>` - keep this role when stripping",
+                    f"`{prefix}honeypot stripexception remove <role>` - remove keep-role exception",
+                ]
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
     @honeypot.command(name="set", aliases=["channel"])
     @commands.admin()
     async def honeypot_set(self, ctx: commands.Context, channel: discord.TextChannel):

@@ -849,6 +849,62 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
     async def ticket(self, ctx: commands.Context) -> None:
         """Commands for using the Tickets system."""
 
+    @ticket.command(name="help", aliases=["commands"])
+    async def command_help(self, ctx: commands.Context) -> None:
+        """Show TicketTool help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="Ticket Help",
+            description="Create and manage support tickets.",
+            color=await ctx.embed_color(),
+        )
+        embed.add_field(
+            name="Create Tickets",
+            value="\n".join(
+                [
+                    f"`{prefix}ticket create [profile] [reason]` - create a ticket",
+                    f"`{prefix}ticket + [profile] [reason]` - short create alias",
+                    f"`{prefix}ticket createfor [profile] <member> [reason]` - create for a member",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Ticket Actions",
+            value="\n".join(
+                [
+                    f"`{prefix}ticket export` - export ticket transcript",
+                    f"`{prefix}ticket close [reason]` - close a ticket",
+                    f"`{prefix}ticket open [reason]` - reopen a ticket",
+                    f"`{prefix}ticket lock [reason]` - lock a ticket",
+                    f"`{prefix}ticket unlock [reason]` - unlock a ticket",
+                    f"`{prefix}ticket rename <new_name> [reason]` - rename a ticket",
+                    f"`{prefix}ticket delete [reason]` - delete a ticket",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Members And Staff",
+            value="\n".join(
+                [
+                    f"`{prefix}ticket claim [member] [reason]` - claim a ticket",
+                    f"`{prefix}ticket unclaim [reason]` - unclaim a ticket",
+                    f"`{prefix}ticket owner <member> [reason]` - change ticket owner",
+                    f"`{prefix}ticket addmember <members...>` - add members",
+                    f"`{prefix}ticket removemember <members...>` - remove members",
+                    f"`{prefix}ticket list <profile> [open|close|all] [owner]` - list tickets",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Admin Setup",
+            value=f"`{prefix}settickettool help` - show ticket setup commands",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
     @ticket.command(name="create", aliases=["+"])
     async def command_create(
         self,

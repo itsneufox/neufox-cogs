@@ -100,6 +100,37 @@ class SixSeven(commands.Cog):
         """Manage SixSeven settings."""
         await ctx.invoke(self.sixseven_show)
 
+    @sixseven.command(name="help", aliases=["commands"])
+    @commands.admin_or_permissions(manage_guild=True)
+    async def sixseven_help(self, ctx: commands.Context):
+        """Show SixSeven help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="SixSeven Help",
+            description="Configure automatic annoyed replies to six seven jokes.",
+            color=discord.Color.orange(),
+        )
+        embed.add_field(
+            name="Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}sixseven show` - show current settings",
+                    f"`{prefix}sixseven toggle` - enable or disable replies",
+                    f"`{prefix}sixseven cooldown <seconds>` - set the server cooldown",
+                    f"`{prefix}sixseven response <text>` - set a fixed response",
+                    f"`{prefix}sixseven reset` - return to random built-in responses",
+                    f"`{prefix}sixseven responses [en|pt]` - list built-in responses",
+                    f"`{prefix}sixseven language default <en|pt>` - set default language",
+                    f"`{prefix}sixseven language channel <channel> <en|pt>` - set channel language",
+                    f"`{prefix}sixseven language category <category> <en|pt>` - set category language",
+                    f"`{prefix}sixseven language clearchannel <channel>` - remove channel override",
+                    f"`{prefix}sixseven language clearcategory <category>` - remove category override",
+                ]
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
     @sixseven.command(name="show")
     @commands.admin_or_permissions(manage_guild=True)
     async def sixseven_show(self, ctx: commands.Context):

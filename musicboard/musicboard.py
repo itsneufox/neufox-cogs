@@ -56,6 +56,35 @@ class MusicBoard(commands.Cog):
         """Manage MusicBoard settings."""
         await ctx.invoke(self.musicboard_show)
 
+    @musicboard.command(name="help", aliases=["commands"])
+    @commands.admin_or_permissions(manage_guild=True)
+    async def musicboard_help(self, ctx: commands.Context):
+        """Show MusicBoard help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="MusicBoard Help",
+            description="Post music links to a dedicated channel when members react with the link emoji.",
+            color=discord.Color.red(),
+        )
+        embed.add_field(
+            name="Setup Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}musicboard show` - show current settings",
+                    f"`{prefix}musicboard channel <channel>` - set the music channel",
+                    f"`{prefix}musicboard timeout [minutes]` - view or set reaction cleanup time",
+                    f"`{prefix}musicboard clear` - clear posted-message dedup history",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="How It Works",
+            value="Post a supported music link, then react with 🔗 to nominate it. React with the broken-link emoji to block a nomination prompt.",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
     @musicboard.command(name="channel")
     @commands.admin_or_permissions(manage_guild=True)
     async def musicboard_channel(self, ctx: commands.Context, channel: discord.TextChannel):

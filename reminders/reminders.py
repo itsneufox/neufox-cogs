@@ -39,6 +39,43 @@ class Reminders(commands.Cog):
     def cog_unload(self):
         self._task.cancel()
 
+    @commands.command(name="reminders", aliases=["reminderhelp", "remindhelp"])
+    async def reminders_help(self, ctx: commands.Context):
+        """Show reminder help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="Reminders Help",
+            description="Schedule reminders for yourself or another member. Reminders are delivered by DM first, with channel fallback.",
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(
+            name="Prefix Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}remindme <when> <message>` - remind yourself",
+                    f"`{prefix}remind <member> <when> <message>` - remind another member",
+                    f"`{prefix}reminders` - show this help",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Slash Commands",
+            value="\n".join(
+                [
+                    "`/remindme when message` - remind yourself",
+                    "`/remind user when message` - remind another member",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Time Examples",
+            value="`10s`, `15m`, `2h30m`, `1d`, `1w2d`",
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
     @commands.command(name="remindme")
     async def remindme_prefix(self, ctx: commands.Context, when: str, *, message: str):
         """Schedule a reminder for yourself."""

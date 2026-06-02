@@ -5,13 +5,35 @@ Global cash economy cog with API access for other bots or future SA-MP integrati
 ## User commands
 
 - `[p]eco balance [member]` - show a user's cash balance.
+- `[p]eco help` - show user economy commands.
 - `[p]eco pay <member> <amount>` - transfer cash to another member.
+- `[p]eco daily` - claim daily cash.
+- `[p]eco weekly` - claim weekly cash.
+- `[p]eco work` - claim hourly cash from a configurable random range.
+- `[p]eco top` - show the cash leaderboard.
+- `[p]eco shop` - show the server shop.
+- `[p]eco buy <item> [quantity]` - buy from the server shop.
+- `[p]eco inventory [member]` - show inventory items.
 
 ## Owner commands
 
 - `[p]eco admin add <member> <amount> [reason]`
+- `[p]eco admin help`
 - `[p]eco admin remove <member> <amount> [reason]`
 - `[p]eco admin set <member> <amount> [reason]`
+- `[p]eco admin claim show`
+- `[p]eco admin claim daily <amount> [cooldown_seconds]`
+- `[p]eco admin claim weekly <amount> [cooldown_seconds]`
+- `[p]eco admin claim work <amount> [cooldown_seconds]`
+- `[p]eco admin claim workrange <minimum> <maximum> [cooldown_seconds]`
+- `[p]eco admin logchannel [channel]`
+- `[p]eco admin clearlog`
+- `[p]eco admin shop add <name> <price> [stock] [description]`
+- `[p]eco admin shop remove <name>`
+- `[p]eco admin shop role <name> [role]`
+- `[p]eco admin shop stock <name> <stock>`
+
+Use `stock -1` for unlimited stock. Shop items are server-local because role rewards and log channels are server-local, but user cash balances stay global.
 
 ## API commands
 

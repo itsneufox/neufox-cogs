@@ -74,10 +74,37 @@ class UrbanDictionary(commands.Cog):
     async def urban(self, ctx: commands.Context, *, term: str | None = None):
         """Look up a term on Urban Dictionary."""
         if not term:
-            await ctx.send_help()
+            await ctx.invoke(self.urban_help)
+            return
+        if term.casefold() in {"help", "commands"}:
+            await ctx.invoke(self.urban_help)
             return
 
         await self._send_lookup(ctx, term)
+
+    @urban.command(name="help", aliases=["commands"])
+    async def urban_help(self, ctx: commands.Context):
+        """Show Urban Dictionary help."""
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="Urban Dictionary Help",
+            description="Look up Urban Dictionary definitions with button pagination.",
+            color=DEFAULT_COLOR,
+        )
+        embed.add_field(
+            name="Commands",
+            value="\n".join(
+                [
+                    f"`{prefix}urban <term>` - look up a term",
+                    f"`{prefix}ud <term>` - short alias",
+                    f"`{prefix}define <term>` - alternate lookup command",
+                    f"`{prefix}urban random` - show a random definition",
+                    f"`{prefix}urban help` - show this help",
+                ]
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
 
     @urban.command(name="random")
     async def urban_random(self, ctx: commands.Context):
