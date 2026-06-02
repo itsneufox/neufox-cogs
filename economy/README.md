@@ -71,13 +71,13 @@ balances = await economy.get_balance(user_id)
 
 ## ActivityStats integration
 
-The `activitystats` cog can pay `cash` rewards through this cog when these leaderboards are viewed:
+The `activitystats` cog can automatically pay `cash` rewards through this cog for these leaderboards:
 
 - `/topmessages` or `[p]activitystats messages`
 - `/topvoice` or `[p]activitystats voice`
 - `/topreacts` or `[p]activitystats reactiontop`
 
-Default rewards are once every 24 hours per server and category:
+The reward loop checks once per hour. Default rewards are paid once every 24 hours per server and category:
 
 - 1st place: 100 cash
 - 2nd place: 50 cash
@@ -87,7 +87,10 @@ Manage them with:
 
 ```text
 [p]activitystats rewards show
+[p]activitystats rewards logchannel [channel]
+[p]activitystats rewards clearlog
 [p]activitystats rewards toggle
 [p]activitystats rewards cooldown <seconds>
 [p]activitystats rewards set <messages|voice|reactions> <rank> <amount>
+[p]activitystats rewards run
 ```
