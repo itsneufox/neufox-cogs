@@ -19,6 +19,13 @@ RANK_PREFIXES = {
     2: "🥈",
     3: "🥉",
 }
+DEFAULT_REWARD_COOLDOWN = 86400
+REWARD_CATEGORIES = ("messages", "voice", "reactions")
+DEFAULT_REWARD_AMOUNTS = {
+    "messages": {"1": 100, "2": 50, "3": 25},
+    "voice": {"1": 100, "2": 50, "3": 25},
+    "reactions": {"1": 100, "2": 50, "3": 25},
+}
 
 
 class LeaderboardView(discord.ui.View):
@@ -109,6 +116,10 @@ class ActivityStats(commands.Cog):
             voice_seconds={},
             active_voice_sessions={},
             top_message_roles={tier: None for tier in TOP_MESSAGE_ROLE_TIERS},
+            reward_enabled=True,
+            reward_cooldown=DEFAULT_REWARD_COOLDOWN,
+            reward_amounts=DEFAULT_REWARD_AMOUNTS,
+            reward_last_paid={},
         )
         self._last_role_sync: dict[int, float] = {}
 
@@ -251,6 +262,7 @@ class ActivityStats(commands.Cog):
         """Show users with the most tracked messages."""
         embeds = await self._message_leaderboard_embeds(ctx.guild)
         await self._send_paginated_context(ctx, embeds)
+        await self._send_reward_notice_context(ctx, "messages")
 
     @app_commands.command(name="topmessages", description="Show the message leaderboard.")
     @app_commands.guild_only()
@@ -259,6 +271,7 @@ class ActivityStats(commands.Cog):
         await interaction.response.defer()
         embeds = await self._message_leaderboard_embeds(interaction.guild)
         await self._send_paginated_interaction(interaction, embeds)
+        await self._send_reward_notice_interaction(interaction, "messages")
 
     async def _message_leaderboard_embeds(self, guild: discord.Guild) -> list[discord.Embed]:
         user_messages = await self.config.guild(guild).user_messages()
@@ -285,6 +298,7 @@ class ActivityStats(commands.Cog):
         """Show users with the most tracked voice time."""
         embeds = await self._voice_leaderboard_embeds(ctx.guild)
         await self._send_paginated_context(ctx, embeds)
+        await self._send_reward_notice_context(ctx, "voice")
 
     @app_commands.command(name="topvoice", description="Show the voice-time leaderboard.")
     @app_commands.guild_only()
@@ -293,6 +307,7 @@ class ActivityStats(commands.Cog):
         await interaction.response.defer()
         embeds = await self._voice_leaderboard_embeds(interaction.guild)
         await self._send_paginated_interaction(interaction, embeds)
+        await self._send_reward_notice_interaction(interaction, "voice")
 
     async def _voice_leaderboard_embeds(self, guild: discord.Guild) -> list[discord.Embed]:
         voice_seconds = await self._voice_seconds_with_active(guild)
@@ -436,6 +451,8 @@ class ActivityStats(commands.Cog):
         """Show users with the most received reactions, optionally for one emoji."""
         embeds = await self._reaction_leaderboard_embeds(ctx.guild, emoji)
         await self._send_paginated_context(ctx, embeds)
+        if emoji is None:
+            await self._send_reward_notice_context(ctx, "reactions")
 
     @app_commands.command(name="topreacts", description="Show the received reaction leaderboard.")
     @app_commands.describe(emoji="Only rank received reactions for this emoji.")
@@ -449,6 +466,8 @@ class ActivityStats(commands.Cog):
         await interaction.response.defer()
         embeds = await self._reaction_leaderboard_embeds(interaction.guild, emoji)
         await self._send_paginated_interaction(interaction, embeds)
+        if emoji is None:
+            await self._send_reward_notice_interaction(interaction, "reactions")
 
     async def _reaction_leaderboard_embeds(
         self,
@@ -512,6 +531,75 @@ class ActivityStats(commands.Cog):
         await ctx.send("ActivityStats data has been reset for this server.")
         if result["configured"]:
             await ctx.send(self._format_role_sync_result(result))
+
+    @activitystats.group(name="rewards", invoke_without_command=True)
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_rewards(self, ctx: commands.Context):
+        """Manage economy rewards for activity leaderboards."""
+        await ctx.invoke(self.activitystats_rewards_show)
+
+    @activitystats_rewards.command(name="show")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_rewards_show(self, ctx: commands.Context):
+        """Show activity reward settings."""
+        data = await self.config.guild(ctx.guild).all()
+        amounts = self._reward_amounts(data["reward_amounts"])
+        last_paid = data["reward_last_paid"]
+        embed = discord.Embed(title="Activity Rewards", color=DEFAULT_COLOR)
+        embed.add_field(name="Status", value="Enabled" if data["reward_enabled"] else "Disabled", inline=True)
+        embed.add_field(name="Cooldown", value=self._format_duration(data["reward_cooldown"]), inline=True)
+        for category in REWARD_CATEGORIES:
+            lines = []
+            for rank, amount in sorted(amounts[category].items(), key=lambda item: int(item[0])):
+                lines.append(f"#{rank}: {amount:,} cash")
+            paid_at = int(last_paid.get(category, 0))
+            if paid_at:
+                lines.append(f"Last paid: <t:{paid_at}:R>")
+            embed.add_field(name=category.title(), value="\n".join(lines), inline=False)
+        await ctx.send(embed=embed)
+
+    @activitystats_rewards.command(name="toggle")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_rewards_toggle(self, ctx: commands.Context):
+        """Toggle automatic leaderboard economy rewards."""
+        enabled = await self.config.guild(ctx.guild).reward_enabled()
+        await self.config.guild(ctx.guild).reward_enabled.set(not enabled)
+        await ctx.send(f"Activity rewards are now {'enabled' if not enabled else 'disabled'}.")
+
+    @activitystats_rewards.command(name="cooldown")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_rewards_cooldown(self, ctx: commands.Context, seconds: int):
+        """Set reward cooldown in seconds."""
+        if seconds < 0 or seconds > 30 * 86400:
+            await ctx.send("Cooldown must be between 0 and 2,592,000 seconds.")
+            return
+        await self.config.guild(ctx.guild).reward_cooldown.set(seconds)
+        await ctx.send(f"Activity reward cooldown set to {self._format_duration(seconds)}.")
+
+    @activitystats_rewards.command(name="set")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_rewards_set(self, ctx: commands.Context, category: str, rank: int, amount: int):
+        """Set a reward amount for a category and rank."""
+        category = category.lower()
+        if category not in REWARD_CATEGORIES:
+            await ctx.send("Category must be one of: messages, voice, reactions.")
+            return
+        if rank < 1 or rank > 10:
+            await ctx.send("Rank must be between 1 and 10.")
+            return
+        if amount < 0:
+            await ctx.send("Amount cannot be negative.")
+            return
+
+        async with self.config.guild(ctx.guild).reward_amounts() as stored_amounts:
+            amounts = self._reward_amounts(stored_amounts)
+            if amount:
+                amounts[category][str(rank)] = amount
+            else:
+                amounts[category].pop(str(rank), None)
+            stored_amounts.clear()
+            stored_amounts.update(amounts)
+        await ctx.send(f"{category.title()} reward for rank #{rank} set to {amount:,} cash.")
 
     @activitystats.group(name="roles", invoke_without_command=True)
     @commands.admin_or_permissions(manage_roles=True)
@@ -970,6 +1058,101 @@ class ActivityStats(commands.Cog):
                 message += f"; and {len(skipped) - 3} more"
             message += "."
         return message
+
+    async def _send_reward_notice_context(self, ctx: commands.Context, category: str):
+        result = await self._maybe_pay_leaderboard_rewards(ctx.guild, category)
+        if result:
+            await ctx.send(result)
+
+    async def _send_reward_notice_interaction(self, interaction: discord.Interaction, category: str):
+        result = await self._maybe_pay_leaderboard_rewards(interaction.guild, category)
+        if result:
+            await interaction.followup.send(result)
+
+    async def _maybe_pay_leaderboard_rewards(self, guild: discord.Guild, category: str) -> str | None:
+        economy = self.bot.get_cog("Economy")
+        if economy is None or not hasattr(economy, "add_balance"):
+            return None
+
+        data = await self.config.guild(guild).all()
+        if not data["reward_enabled"]:
+            return None
+
+        now = int(time.time())
+        last_paid = data["reward_last_paid"]
+        cooldown = int(data["reward_cooldown"])
+        if cooldown and now - int(last_paid.get(category, 0)) < cooldown:
+            return None
+
+        amounts = self._reward_amounts(data["reward_amounts"])
+        category_amounts = amounts.get(category, {})
+        if not category_amounts:
+            return None
+
+        entries = await self._reward_entries(guild, category)
+        if not entries:
+            return None
+
+        paid_lines = []
+        for rank, (user_id, score) in enumerate(entries, start=1):
+            amount = int(category_amounts.get(str(rank), 0))
+            if amount <= 0 or score <= 0:
+                continue
+            try:
+                await economy.add_balance(
+                    user_id,
+                    amount,
+                    actor_id=self.bot.user.id if self.bot.user else None,
+                    reason=f"ActivityStats {category} leaderboard reward in guild {guild.id} for rank {rank}",
+                )
+            except Exception:
+                continue
+            paid_lines.append(f"#{rank} {await self._display_user(guild, user_id)}: {amount:,} cash")
+
+        if not paid_lines:
+            return None
+
+        async with self.config.guild(guild).reward_last_paid() as stored_last_paid:
+            stored_last_paid[category] = now
+
+        return f"Paid {category} leaderboard rewards:\n" + "\n".join(paid_lines)
+
+    async def _reward_entries(self, guild: discord.Guild, category: str) -> list[tuple[int, int]]:
+        if category == "messages":
+            user_messages = await self.config.guild(guild).user_messages()
+            entries = [(int(user_id), int(count)) for user_id, count in user_messages.items()]
+        elif category == "voice":
+            voice_seconds = await self._voice_seconds_with_active(guild)
+            entries = [(int(user_id), int(seconds)) for user_id, seconds in voice_seconds.items()]
+        elif category == "reactions":
+            received_reactions = await self.config.guild(guild).received_reactions()
+            entries = [
+                (int(user_id), sum(int(count) for count in reactions.values()))
+                for user_id, reactions in received_reactions.items()
+            ]
+        else:
+            return []
+
+        return sorted(
+            ((user_id, score) for user_id, score in entries if score > 0),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:10]
+
+    @staticmethod
+    def _reward_amounts(stored_amounts: dict[str, Any]) -> dict[str, dict[str, int]]:
+        amounts = {
+            category: dict(DEFAULT_REWARD_AMOUNTS[category])
+            for category in REWARD_CATEGORIES
+        }
+        for category, rewards in (stored_amounts or {}).items():
+            if category not in REWARD_CATEGORIES or not isinstance(rewards, dict):
+                continue
+            amounts[category] = {
+                str(rank): max(0, int(amount))
+                for rank, amount in rewards.items()
+            }
+        return amounts
 
     async def _send_paginated_context(
         self,
