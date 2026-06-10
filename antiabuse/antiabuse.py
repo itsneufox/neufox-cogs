@@ -28,10 +28,15 @@ class AntiAbuse(commands.Cog):
             # Detection
             rate_window_seconds=8,
             rate_threshold=7,
+            command_spam_enabled=False,
+            command_spam_window_seconds=10,
+            command_spam_threshold=5,
             mention_threshold=8,
             caps_ratio=0.75,
             caps_min_length=12,
             link_threshold=4,
+            ignored_channel_ids=[],
+            ignored_category_ids=[],
             # Escalation logic
             violation_decay_seconds=900,
             action_cooldown_seconds=20,
@@ -60,6 +65,7 @@ class AntiAbuse(commands.Cog):
         )
 
         self._message_buckets: dict[tuple[int, int], deque[float]] = defaultdict(deque)
+        self._command_buckets: dict[tuple[int, int], deque[float]] = defaultdict(deque)
         self._guild_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
     @commands.group(name="antiabuse", aliases=["abuse"], invoke_without_command=True)
@@ -117,6 +123,47 @@ class AntiAbuse(commands.Cog):
         if max_messages is not None:
             await guild_cfg.rate_threshold.set(max_messages)
         await ctx.send("Rate protection updated.")
+
+    @antiabuse.command(name="commandspam")
+    @commands.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    async def antiabuse_commandspam(
+        self,
+        ctx: commands.Context,
+        max_commands: int | None = None,
+        window_seconds: int | None = None,
+    ):
+        """View or set command-spam protection."""
+        guild_cfg = self.config.guild(ctx.guild)
+        if max_commands is None and window_seconds is None:
+            current = await guild_cfg.all()
+            await ctx.send(
+                "Command spam rule: "
+                f"{'enabled' if current['command_spam_enabled'] else 'disabled'}, "
+                f"max {current['command_spam_threshold']} commands per "
+                f"{current['command_spam_window_seconds']}s."
+            )
+            return
+
+        if max_commands is not None and max_commands < 0:
+            await ctx.send("Command limit must be 0 or greater. Use 0 to disable command-spam checks.")
+            return
+        if window_seconds is not None and window_seconds <= 0:
+            await ctx.send("Command-spam window must be greater than 0.")
+            return
+
+        if max_commands is not None:
+            await guild_cfg.command_spam_threshold.set(max_commands)
+            await guild_cfg.command_spam_enabled.set(max_commands > 0)
+        if window_seconds is not None:
+            await guild_cfg.command_spam_window_seconds.set(window_seconds)
+        current = await guild_cfg.all()
+        await ctx.send(
+            "Command spam rule updated: "
+            f"{'enabled' if current['command_spam_enabled'] else 'disabled'}, "
+            f"max {current['command_spam_threshold']} commands per "
+            f"{current['command_spam_window_seconds']}s."
+        )
 
     @antiabuse.command(name="mentions")
     @commands.admin_or_permissions(manage_guild=True)
@@ -476,6 +523,39 @@ class AntiAbuse(commands.Cog):
         else:
             await ctx.send(f"Anti-abuse actions will be logged in {channel.mention}.")
 
+    @antiabuse.command(name="ignorechannel")
+    @commands.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    async def antiabuse_ignorechannel(self, ctx: commands.Context, channel: discord.TextChannel | None = None):
+        """Toggle a channel ignored by anti-abuse checks."""
+        channel = channel or ctx.channel
+        ignored = set(await self.config.guild(ctx.guild).ignored_channel_ids())
+        if channel.id in ignored:
+            ignored.remove(channel.id)
+            await self.config.guild(ctx.guild).ignored_channel_ids.set(sorted(ignored))
+            await ctx.send(f"{channel.mention} is no longer ignored by anti-abuse.")
+            return
+
+        ignored.add(channel.id)
+        await self.config.guild(ctx.guild).ignored_channel_ids.set(sorted(ignored))
+        await ctx.send(f"{channel.mention} is now ignored by anti-abuse.")
+
+    @antiabuse.command(name="ignorecategory")
+    @commands.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    async def antiabuse_ignorecategory(self, ctx: commands.Context, category: discord.CategoryChannel):
+        """Toggle a category ignored by anti-abuse checks."""
+        ignored = set(await self.config.guild(ctx.guild).ignored_category_ids())
+        if category.id in ignored:
+            ignored.remove(category.id)
+            await self.config.guild(ctx.guild).ignored_category_ids.set(sorted(ignored))
+            await ctx.send(f"{category.name} is no longer ignored by anti-abuse.")
+            return
+
+        ignored.add(category.id)
+        await self.config.guild(ctx.guild).ignored_category_ids.set(sorted(ignored))
+        await ctx.send(f"{category.name} is now ignored by anti-abuse.")
+
     @antiabuse.group(name="lockdown", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
@@ -579,6 +659,8 @@ class AntiAbuse(commands.Cog):
         settings = await self.config.guild(message.guild).all()
         if not settings["antiabuse_enabled"]:
             return
+        if self._is_ignored_location(message, settings):
+            return
 
         await self._ensure_lockdown_expired(message.guild)
 
@@ -586,7 +668,7 @@ class AntiAbuse(commands.Cog):
         if any(role.id in exempt_ids for role in message.author.roles):
             return
 
-        violations = self._collect_violations(message, settings)
+        violations = await self._collect_violations(message, settings)
         if not violations:
             return
 
@@ -603,6 +685,14 @@ class AntiAbuse(commands.Cog):
         embed = discord.Embed(title="Anti-Abuse Protection", color=DEFAULT_COLOR)
         embed.add_field(name="Enabled", value="Yes" if settings["antiabuse_enabled"] else "No", inline=True)
         embed.add_field(name="Rate limit", value=f"{settings['rate_threshold']} per {settings['rate_window_seconds']}s", inline=True)
+        embed.add_field(
+            name="Command spam",
+            value=(
+                f"{'on' if settings['command_spam_enabled'] else 'off'} "
+                f"({settings['command_spam_threshold']} per {settings['command_spam_window_seconds']}s)"
+            ),
+            inline=True,
+        )
         embed.add_field(name="Mentions", value=f">{settings['mention_threshold']}", inline=True)
         embed.add_field(name="Caps", value=f">{settings['caps_ratio'] * 100:.0f}% uppercase ({settings['caps_min_length']} letters min)", inline=True)
         embed.add_field(name="Links", value=f">{settings['link_threshold']}", inline=True)
@@ -640,6 +730,16 @@ class AntiAbuse(commands.Cog):
         roles = [role for role in roles if role is not None]
         exempt_text = ", ".join(role.mention for role in roles) if roles else "None"
         embed.add_field(name="Exempt roles", value=exempt_text, inline=False)
+        ignored_channels = [ctx.guild.get_channel(channel_id) for channel_id in settings["ignored_channel_ids"]]
+        ignored_channels = [channel for channel in ignored_channels if channel is not None]
+        ignored_categories = [ctx.guild.get_channel(category_id) for category_id in settings["ignored_category_ids"]]
+        ignored_categories = [category for category in ignored_categories if category is not None]
+        ignored_text = []
+        if ignored_channels:
+            ignored_text.append("Channels: " + ", ".join(channel.mention for channel in ignored_channels))
+        if ignored_categories:
+            ignored_text.append("Categories: " + ", ".join(category.name for category in ignored_categories))
+        embed.add_field(name="Ignored locations", value="\n".join(ignored_text) if ignored_text else "None", inline=False)
         await ctx.send(embed=embed)
 
     async def _send_lockdown_status(self, ctx: commands.Context):
@@ -658,11 +758,14 @@ class AntiAbuse(commands.Cog):
             f"Auto-lockdown is {'enabled' if settings['auto_lockdown_enabled'] else 'disabled'}."
         )
 
-    def _collect_violations(self, message: discord.Message, settings: dict[str, Any]) -> list[str]:
+    async def _collect_violations(self, message: discord.Message, settings: dict[str, Any]) -> list[str]:
         violations: list[str] = []
 
         if self._is_rate_violation(message, settings["rate_window_seconds"], settings["rate_threshold"]):
             violations.append("message rate")
+
+        if await self._is_command_spam_violation(message, settings):
+            violations.append("command spam")
 
         mentions = self._count_mentions(message)
         if mentions > settings["mention_threshold"]:
@@ -676,6 +779,22 @@ class AntiAbuse(commands.Cog):
             violations.append(f"links ({links})")
 
         return violations
+
+    def _is_ignored_location(self, message: discord.Message, settings: dict[str, Any]) -> bool:
+        channel_id = getattr(message.channel, "id", None)
+        if channel_id in set(settings["ignored_channel_ids"]):
+            return True
+
+        category = getattr(message.channel, "category", None)
+        if category is not None and category.id in set(settings["ignored_category_ids"]):
+            return True
+
+        parent = getattr(message.channel, "parent", None)
+        parent_category = getattr(parent, "category", None)
+        if parent_category is not None and parent_category.id in set(settings["ignored_category_ids"]):
+            return True
+
+        return False
 
     def _is_rate_violation(self, message: discord.Message, window_seconds: int, threshold: int) -> bool:
         now = time.time()
@@ -691,6 +810,62 @@ class AntiAbuse(commands.Cog):
             return False
 
         return len(bucket) > threshold
+
+    async def _is_command_spam_violation(self, message: discord.Message, settings: dict[str, Any]) -> bool:
+        if not settings["command_spam_enabled"]:
+            return False
+        if settings["command_spam_threshold"] <= 0:
+            return False
+        if not await self._looks_like_command(message):
+            return False
+
+        now = time.time()
+        key = (message.guild.id if message.guild else 0, message.author.id)
+        bucket = self._command_buckets[key]
+        bucket.append(now)
+
+        window_seconds = settings["command_spam_window_seconds"]
+        while bucket and bucket[0] < now - window_seconds:
+            bucket.popleft()
+
+        if not bucket:
+            del self._command_buckets[key]
+            return False
+
+        return len(bucket) > settings["command_spam_threshold"]
+
+    async def _looks_like_command(self, message: discord.Message) -> bool:
+        content = message.content or ""
+        if not content:
+            return False
+
+        prefixes = []
+        get_valid_prefixes = getattr(self.bot, "get_valid_prefixes", None)
+        if get_valid_prefixes is not None:
+            try:
+                maybe_prefixes = get_valid_prefixes(message.guild)
+                if hasattr(maybe_prefixes, "__await__"):
+                    maybe_prefixes = await maybe_prefixes
+                prefixes = list(maybe_prefixes)
+            except Exception:
+                prefixes = []
+
+        if not prefixes:
+            command_prefix = getattr(self.bot, "command_prefix", None)
+            if isinstance(command_prefix, str):
+                prefixes = [command_prefix]
+            elif isinstance(command_prefix, (list, tuple)):
+                prefixes = list(command_prefix)
+
+        prefixes = [prefix for prefix in prefixes if isinstance(prefix, str) and prefix]
+        if prefixes:
+            return any(content.startswith(prefix) for prefix in prefixes)
+
+        try:
+            ctx = await self.bot.get_context(message)
+            return bool(getattr(ctx, "valid", False))
+        except Exception:
+            return False
 
     @staticmethod
     def _count_mentions(message: discord.Message) -> int:
