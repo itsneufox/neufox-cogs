@@ -20,10 +20,20 @@ class AdminHelper(commands.Cog):
         self.config.register_guild(
             log_channel_id=None,
             dm_users=True,
+            name_tracking_enabled=True,
             softban_delete_message_days=1,
             ban_delete_message_days=0,
+            next_case_id=1,
+            cases=[],
         )
-        self.config.register_member(warnings=[])
+        self.config.register_user(
+            previous_usernames=[],
+            previous_global_names=[],
+        )
+        self.config.register_member(
+            warnings=[],
+            previous_nicknames=[],
+        )
 
     @commands.group(name="adminhelper", aliases=["ah"], invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
@@ -36,11 +46,15 @@ class AdminHelper(commands.Cog):
         embed = discord.Embed(title="AdminHelper", color=DEFAULT_COLOR)
         embed.add_field(name="Log channel", value=log_channel.mention if log_channel else "Not set", inline=True)
         embed.add_field(name="DM users", value="Yes" if settings["dm_users"] else "No", inline=True)
+        embed.add_field(name="Name tracking", value="Yes" if settings["name_tracking_enabled"] else "No", inline=True)
         embed.add_field(name="Ban cleanup", value=f"{settings['ban_delete_message_days']} day(s)", inline=True)
         embed.add_field(name="Softban cleanup", value=f"{settings['softban_delete_message_days']} day(s)", inline=True)
         embed.add_field(
             name="Actions",
-            value="ban, hackban, unban, kick, softban, timeout, untimeout, warn, warnings, clearwarnings, userinfo",
+            value=(
+                "ban, hackban, unban, kick, softban, timeout, untimeout, warn, warnings, "
+                "clearwarnings, userinfo, case, cases, reason, modstats"
+            ),
             inline=False,
         )
         await ctx.send(embed=embed)
@@ -63,6 +77,14 @@ class AdminHelper(commands.Cog):
         """Enable or disable DM notices to moderated users."""
         await self.config.guild(ctx.guild).dm_users.set(enabled)
         await ctx.send(f"User DM notices {'enabled' if enabled else 'disabled'}.")
+
+    @adminhelper.command(name="nametracking")
+    @commands.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    async def adminhelper_nametracking(self, ctx: commands.Context, enabled: bool):
+        """Enable or disable username/display-name/nickname history tracking."""
+        await self.config.guild(ctx.guild).name_tracking_enabled.set(enabled)
+        await ctx.send(f"Name history tracking {'enabled' if enabled else 'disabled'}.")
 
     @adminhelper.command(name="cleanup")
     @commands.admin_or_permissions(manage_guild=True)
@@ -120,6 +142,9 @@ class AdminHelper(commands.Cog):
 
         status_icon = self._status_icon(member.status)
         status_text = self._status_text(member)
+        name_tracking_enabled = await self.config.guild(ctx.guild).name_tracking_enabled()
+        user_history = await self.config.user(member).all()
+        member_history = await self.config.member(member).all()
         description_lines = [
             f"{status_icon} **{member.display_name}**",
             status_text,
@@ -131,11 +156,11 @@ class AdminHelper(commands.Cog):
             "**Role**",
             role_text,
             "**Previous Username**",
-            "Not tracked yet",
+            self._format_history(user_history["previous_usernames"], name_tracking_enabled),
             "**Previous Global Display Names**",
-            "Not tracked yet",
+            self._format_history(user_history["previous_global_names"], name_tracking_enabled),
             "**Previous Server Nicknames**",
-            "Not tracked yet",
+            self._format_history(member_history["previous_nicknames"], name_tracking_enabled),
         ]
         if timeout_text:
             description_lines.extend(["**Moderation**", timeout_text])
@@ -192,7 +217,8 @@ class AdminHelper(commands.Cog):
             return
 
         await self._maybe_dm(member, ctx.guild, "timeout", reason, duration=f"{minutes} minute(s)")
-        await self._log_action(ctx.guild, ctx.author, member, "Timeout", reason, duration=f"{minutes} minute(s)")
+        case_id = await self._create_case(ctx.guild, ctx.author, member, "Timeout", reason, duration=f"{minutes} minute(s)")
+        await self._log_action(ctx.guild, ctx.author, member, "Timeout", reason, duration=f"{minutes} minute(s)", case_id=case_id)
         await ctx.send(f"{member.mention} has been timed out for {minutes} minute(s).")
 
     @commands.command(name="untimeout", aliases=["unmute"])
@@ -217,7 +243,8 @@ class AdminHelper(commands.Cog):
             await ctx.send(f"Unable to remove timeout from {member.mention}.")
             return
 
-        await self._log_action(ctx.guild, ctx.author, member, "Untimeout", reason)
+        case_id = await self._create_case(ctx.guild, ctx.author, member, "Untimeout", reason)
+        await self._log_action(ctx.guild, ctx.author, member, "Untimeout", reason, case_id=case_id)
         await ctx.send(f"Timeout removed from {member.mention}.")
 
     @commands.command(name="kick")
@@ -237,7 +264,8 @@ class AdminHelper(commands.Cog):
             await ctx.send(f"Unable to kick {member.mention}.")
             return
 
-        await self._log_action(ctx.guild, ctx.author, member, "Kick", reason)
+        case_id = await self._create_case(ctx.guild, ctx.author, member, "Kick", reason)
+        await self._log_action(ctx.guild, ctx.author, member, "Kick", reason, case_id=case_id)
         await ctx.send(f"{member.mention} has been kicked.")
 
     @commands.command(name="ban")
@@ -258,7 +286,9 @@ class AdminHelper(commands.Cog):
             await ctx.send(f"Unable to ban {member.mention}.")
             return
 
-        await self._log_action(ctx.guild, ctx.author, member, "Ban", reason, extra=f"Deleted {delete_days} day(s) of messages")
+        extra = f"Deleted {delete_days} day(s) of messages"
+        case_id = await self._create_case(ctx.guild, ctx.author, member, "Ban", reason, extra=extra)
+        await self._log_action(ctx.guild, ctx.author, member, "Ban", reason, extra=extra, case_id=case_id)
         await ctx.send(f"{member.mention} has been banned.")
 
     @commands.command(name="hackban", aliases=["forceban"])
@@ -283,7 +313,9 @@ class AdminHelper(commands.Cog):
             await ctx.send(f"Unable to ban {user}.")
             return
 
-        await self._log_action(ctx.guild, ctx.author, user, "Hackban", reason, extra=f"Deleted {delete_days} day(s) of messages")
+        extra = f"Deleted {delete_days} day(s) of messages"
+        case_id = await self._create_case(ctx.guild, ctx.author, user, "Hackban", reason, extra=extra)
+        await self._log_action(ctx.guild, ctx.author, user, "Hackban", reason, extra=extra, case_id=case_id)
         await ctx.send(f"{user} has been banned.")
 
     @commands.command(name="unban")
@@ -300,7 +332,8 @@ class AdminHelper(commands.Cog):
             await ctx.send(f"Unable to unban {user}.")
             return
 
-        await self._log_action(ctx.guild, ctx.author, user, "Unban", reason)
+        case_id = await self._create_case(ctx.guild, ctx.author, user, "Unban", reason)
+        await self._log_action(ctx.guild, ctx.author, user, "Unban", reason, case_id=case_id)
         await ctx.send(f"{user} has been unbanned.")
 
     @commands.command(name="softban")
@@ -323,7 +356,9 @@ class AdminHelper(commands.Cog):
             await ctx.send(f"Unable to softban {member.mention}.")
             return
 
-        await self._log_action(ctx.guild, ctx.author, member, "Softban", reason, extra=f"Deleted {delete_days} day(s) of messages")
+        extra = f"Deleted {delete_days} day(s) of messages"
+        case_id = await self._create_case(ctx.guild, ctx.author, member, "Softban", reason, extra=extra)
+        await self._log_action(ctx.guild, ctx.author, member, "Softban", reason, extra=extra, case_id=case_id)
         await ctx.send(f"{member.mention} has been softbanned.")
 
     @commands.command(name="warn")
@@ -336,17 +371,19 @@ class AdminHelper(commands.Cog):
             await ctx.send(f"Unable to warn {member.mention}: {failure}")
             return
 
+        case_id = await self._create_case(ctx.guild, ctx.author, member, "Warn", reason)
         warning = {
             "moderator_id": ctx.author.id,
             "reason": reason,
             "created_at": int(datetime.now(timezone.utc).timestamp()),
+            "case_id": case_id,
         }
         async with self.config.member(member).warnings() as warnings:
             warnings.append(warning)
             count = len(warnings)
 
         await self._maybe_dm(member, ctx.guild, "warn", reason)
-        await self._log_action(ctx.guild, ctx.author, member, "Warn", reason, extra=f"Warning #{count}")
+        await self._log_action(ctx.guild, ctx.author, member, "Warn", reason, extra=f"Warning #{count}", case_id=case_id)
         await ctx.send(f"{member.mention} has been warned. This is warning #{count}.")
 
     @commands.command(name="warnings")
@@ -376,8 +413,85 @@ class AdminHelper(commands.Cog):
         """Clear stored warnings for a member."""
         previous = len(await self.config.member(member).warnings())
         await self.config.member(member).warnings.set([])
-        await self._log_action(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=f"Cleared {previous} warning(s)")
+        extra = f"Cleared {previous} warning(s)"
+        case_id = await self._create_case(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=extra)
+        await self._log_action(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=extra, case_id=case_id)
         await ctx.send(f"Cleared {previous} warning(s) for {member.mention}.")
+
+    @commands.command(name="case")
+    @commands.admin_or_permissions(manage_messages=True)
+    @commands.guild_only()
+    async def case_info(self, ctx: commands.Context, case_id: int):
+        """Show one moderation case."""
+        case = await self._get_case(ctx.guild, case_id)
+        if case is None:
+            await ctx.send(f"Case #{case_id} was not found.")
+            return
+        await ctx.send(embed=self._case_embed(ctx.guild, case))
+
+    @commands.command(name="cases")
+    @commands.admin_or_permissions(manage_messages=True)
+    @commands.guild_only()
+    async def cases_member(self, ctx: commands.Context, member: discord.Member):
+        """Show recent cases for a member."""
+        cases = await self.config.guild(ctx.guild).cases()
+        matches = [case for case in cases if case.get("target_id") == member.id]
+        if not matches:
+            await ctx.send(f"No cases found for {member.mention}.")
+            return
+        lines = [self._format_case_line(case) for case in matches[-10:]]
+        await ctx.send(f"Recent cases for {member.mention} ({len(matches)} total):\n" + "\n".join(lines))
+
+    @commands.command(name="reason")
+    @commands.admin_or_permissions(manage_messages=True)
+    @commands.guild_only()
+    async def reason_case(self, ctx: commands.Context, case_id: int, *, reason: str):
+        """Update the reason on a moderation case."""
+        async with self.config.guild(ctx.guild).cases() as cases:
+            for case in cases:
+                if case.get("case_id") == case_id:
+                    case["reason"] = reason
+                    case["reason_updated_by"] = ctx.author.id
+                    case["reason_updated_at"] = int(datetime.now(timezone.utc).timestamp())
+                    await ctx.send(f"Case #{case_id} reason updated.")
+                    return
+        await ctx.send(f"Case #{case_id} was not found.")
+
+    @commands.command(name="modstats")
+    @commands.admin_or_permissions(manage_messages=True)
+    @commands.guild_only()
+    async def modstats_member(self, ctx: commands.Context, member: discord.Member):
+        """Show moderation actions done by and received by a member."""
+        cases = await self.config.guild(ctx.guild).cases()
+        as_moderator = [case for case in cases if case.get("moderator_id") == member.id]
+        as_target = [case for case in cases if case.get("target_id") == member.id]
+        moderator_counts = self._count_cases_by_action(as_moderator)
+        target_counts = self._count_cases_by_action(as_target)
+
+        embed = discord.Embed(title=f"Mod Stats: {member}", color=member.color or DEFAULT_COLOR)
+        embed.add_field(name="Actions performed", value=self._format_action_counts(moderator_counts), inline=False)
+        embed.add_field(name="Actions received", value=self._format_action_counts(target_counts), inline=False)
+        embed.set_footer(text=f"Performed {len(as_moderator)} case(s) | Received {len(as_target)} case(s)")
+        await ctx.send(embed=embed)
+
+    @commands.Cog.listener()
+    async def on_user_update(self, before: discord.User, after: discord.User):
+        if not await self._name_tracking_enabled_for_user(after):
+            return
+        if before.name != after.name:
+            await self._append_history(self.config.user(after).previous_usernames, before.name)
+
+        before_global_name = getattr(before, "global_name", None)
+        after_global_name = getattr(after, "global_name", None)
+        if before_global_name and before_global_name != after_global_name:
+            await self._append_history(self.config.user(after).previous_global_names, before_global_name)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        if not await self.config.guild(after.guild).name_tracking_enabled():
+            return
+        if before.nick and before.nick != after.nick:
+            await self._append_history(self.config.member(after).previous_nicknames, before.nick)
 
     async def _can_moderate_member(
         self,
@@ -430,6 +544,98 @@ class AdminHelper(commands.Cog):
         except Exception:
             return False
 
+    async def _create_case(
+        self,
+        guild: discord.Guild,
+        moderator: discord.Member,
+        target: discord.abc.User,
+        action: str,
+        reason: str,
+        *,
+        duration: str | None = None,
+        extra: str | None = None,
+    ) -> int:
+        guild_cfg = self.config.guild(guild)
+        case_id = await guild_cfg.next_case_id()
+        await guild_cfg.next_case_id.set(case_id + 1)
+        async with guild_cfg.cases() as cases:
+            cases.append(
+                {
+                    "case_id": case_id,
+                    "action": action,
+                    "target_id": target.id,
+                    "target_name": str(target),
+                    "moderator_id": moderator.id,
+                    "moderator_name": str(moderator),
+                    "reason": reason or DEFAULT_REASON,
+                    "duration": duration,
+                    "extra": extra,
+                    "created_at": int(datetime.now(timezone.utc).timestamp()),
+                }
+            )
+        return case_id
+
+    async def _get_case(self, guild: discord.Guild, case_id: int) -> dict[str, Any] | None:
+        cases = await self.config.guild(guild).cases()
+        for case in cases:
+            if case.get("case_id") == case_id:
+                return case
+        return None
+
+    def _case_embed(self, guild: discord.Guild, case: dict[str, Any]) -> discord.Embed:
+        case_id = case.get("case_id", "?")
+        embed = discord.Embed(title=f"Case #{case_id}: {case.get('action', 'Unknown')}", color=DEFAULT_COLOR)
+        target_id = case.get("target_id")
+        moderator_id = case.get("moderator_id")
+        target = guild.get_member(target_id) if target_id else None
+        moderator = guild.get_member(moderator_id) if moderator_id else None
+        target_text = target.mention if target else f"{case.get('target_name', 'Unknown')} (`{target_id}`)"
+        moderator_text = moderator.mention if moderator else f"{case.get('moderator_name', 'Unknown')} (`{moderator_id}`)"
+
+        embed.add_field(name="Target", value=target_text, inline=False)
+        embed.add_field(name="Moderator", value=moderator_text, inline=True)
+        created_at = case.get("created_at", 0)
+        embed.add_field(name="Created", value=f"<t:{created_at}:F>\n<t:{created_at}:R>" if created_at else "Unknown", inline=True)
+        if case.get("duration"):
+            embed.add_field(name="Duration", value=case["duration"], inline=True)
+        if case.get("extra"):
+            embed.add_field(name="Details", value=case["extra"], inline=False)
+        embed.add_field(name="Reason", value=case.get("reason") or DEFAULT_REASON, inline=False)
+        if case.get("reason_updated_at"):
+            embed.set_footer(text=f"Reason updated by {case.get('reason_updated_by')} at {case.get('reason_updated_at')}")
+        return embed
+
+    def _format_case_line(self, case: dict[str, Any]) -> str:
+        created_at = case.get("created_at", 0)
+        timestamp = f"<t:{created_at}:R>" if created_at else "unknown time"
+        reason = case.get("reason") or DEFAULT_REASON
+        if len(reason) > 80:
+            reason = reason[:77] + "..."
+        return f"`#{case.get('case_id')}` **{case.get('action', 'Unknown')}** {timestamp}: {reason}"
+
+    @staticmethod
+    def _count_cases_by_action(cases: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for case in cases:
+            action = case.get("action", "Unknown")
+            counts[action] = counts.get(action, 0) + 1
+        return counts
+
+    @staticmethod
+    def _format_action_counts(counts: dict[str, int]) -> str:
+        if not counts:
+            return "None"
+        return "\n".join(f"{action}: {count}" for action, count in sorted(counts.items()))
+
+    async def _name_tracking_enabled_for_user(self, user: discord.User) -> bool:
+        for guild in self.bot.guilds:
+            member = guild.get_member(user.id)
+            if member is None:
+                continue
+            if await self.config.guild(guild).name_tracking_enabled():
+                return True
+        return False
+
     def _format_timestamp(self, value: datetime | None) -> str:
         if value is None:
             return "None"
@@ -440,6 +646,23 @@ class AdminHelper(commands.Cog):
             return "Unknown"
         timestamp = int(value.timestamp())
         return f"<t:{timestamp}:f>\n<t:{timestamp}:R>"
+
+    @staticmethod
+    def _format_history(values: list[str], tracking_enabled: bool = True) -> str:
+        if not tracking_enabled:
+            return "Tracking disabled"
+        if not values:
+            return "Not tracked yet"
+        return ", ".join(values[-10:])
+
+    async def _append_history(self, config_value, value: str | None):
+        if not value:
+            return
+        async with config_value() as values:
+            if value in values:
+                values.remove(value)
+            values.append(value)
+            del values[:-20]
 
     @staticmethod
     def _avatar_url(member: discord.Member) -> str:
@@ -491,6 +714,7 @@ class AdminHelper(commands.Cog):
         *,
         duration: str | None = None,
         extra: str | None = None,
+        case_id: int | None = None,
     ):
         if not await self.config.guild(guild).dm_users():
             return
@@ -529,6 +753,8 @@ class AdminHelper(commands.Cog):
             return
 
         embed = discord.Embed(title=f"AdminHelper: {action}", color=DEFAULT_COLOR)
+        if case_id is not None:
+            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
         embed.add_field(name="Target", value=f"{target} (`{target.id}`)", inline=False)
         embed.add_field(name="Moderator", value=moderator.mention, inline=True)
         if duration:
