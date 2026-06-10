@@ -444,14 +444,14 @@ class AdminHelper(commands.Cog):
             discord.Status.idle: "🟡",
             discord.Status.dnd: "🔴",
             discord.Status.offline: "⚪",
-            discord.Status.invisible: "⚪",
         }.get(status, "⚪")
 
     @staticmethod
     def _status_text(member: discord.Member) -> str:
-        if member.raw_status == "offline":
+        status = str(member.status)
+        if status == "offline":
             return "Chilling in offline status"
-        return f"Chilling in {member.raw_status} status"
+        return f"Chilling in {status} status"
 
     @staticmethod
     def _member_number(guild: discord.Guild, member: discord.Member) -> int:
