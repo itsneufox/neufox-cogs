@@ -12,10 +12,12 @@ DEFAULT_REASON = "No reason provided."
 
 
 class ConfirmActionView(discord.ui.View):
-    def __init__(self, author_id: int, action_text: str):
+    def __init__(self, author_id: int, action_text: str, moderator_name: str, moderator_avatar_url: str):
         super().__init__(timeout=30)
         self.author_id = author_id
         self.action_text = action_text
+        self.moderator_name = moderator_name
+        self.moderator_avatar_url = moderator_avatar_url
         self.value: bool | None = None
         self.message: discord.Message | None = None
 
@@ -29,27 +31,51 @@ class ConfirmActionView(discord.ui.View):
     async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.value = True
         self._disable_buttons()
-        await interaction.response.edit_message(content=f"Confirmed: {self.action_text}.", view=self)
+        await interaction.response.edit_message(embed=self._result_embed("Confirmed", discord.Color.green()), view=self)
         self.stop()
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.value = False
         self._disable_buttons()
-        await interaction.response.edit_message(content=f"Cancelled. Did not {self.action_text}.", view=self)
+        await interaction.response.edit_message(embed=self._result_embed("Cancelled", discord.Color.light_grey()), view=self)
         self.stop()
 
     async def on_timeout(self):
         self._disable_buttons()
         if self.message is not None:
             try:
-                await self.message.edit(content=f"Confirmation expired. Did not {self.action_text}.", view=self)
+                await self.message.edit(embed=self._result_embed("Expired", discord.Color.light_grey()), view=self)
             except (discord.Forbidden, discord.HTTPException):
                 return
 
     def _disable_buttons(self):
         for child in self.children:
             child.disabled = True
+
+    def prompt_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="Confirm Moderation Action",
+            description=f"**Action**\n{self.action_text}",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="Moderator", value=self.moderator_name, inline=True)
+        embed.add_field(name="Expires", value="30 seconds", inline=True)
+        embed.set_footer(text="Use the buttons below to confirm or cancel.")
+        if self.moderator_avatar_url:
+            embed.set_thumbnail(url=self.moderator_avatar_url)
+        return embed
+
+    def _result_embed(self, status: str, color: discord.Color) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"Moderation Action {status}",
+            description=f"**Action**\n{self.action_text}",
+            color=color,
+        )
+        embed.add_field(name="Moderator", value=self.moderator_name, inline=True)
+        if self.moderator_avatar_url:
+            embed.set_thumbnail(url=self.moderator_avatar_url)
+        return embed
 
 
 class AdminHelper(commands.Cog):
@@ -596,8 +622,8 @@ class AdminHelper(commands.Cog):
             return False
 
     async def _confirm_action(self, ctx: commands.Context, action_text: str) -> bool:
-        view = ConfirmActionView(ctx.author.id, action_text)
-        view.message = await ctx.send(f"Confirm: {action_text}?", view=view)
+        view = ConfirmActionView(ctx.author.id, action_text, str(ctx.author), self._avatar_url(ctx.author))
+        view.message = await ctx.send(embed=view.prompt_embed(), view=view)
         await view.wait()
         return view.value is True
 
