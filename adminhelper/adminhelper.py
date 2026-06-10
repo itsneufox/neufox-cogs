@@ -40,7 +40,7 @@ class AdminHelper(commands.Cog):
         embed.add_field(name="Softban cleanup", value=f"{settings['softban_delete_message_days']} day(s)", inline=True)
         embed.add_field(
             name="Actions",
-            value="ban, hackban, unban, kick, softban, timeout, untimeout, warn, warnings, clearwarnings",
+            value="ban, hackban, unban, kick, softban, timeout, untimeout, warn, warnings, clearwarnings, userinfo",
             inline=False,
         )
         await ctx.send(embed=embed)
@@ -95,6 +95,69 @@ class AdminHelper(commands.Cog):
             await guild_cfg.softban_delete_message_days.set(softban_delete_message_days)
 
         await ctx.send("Cleanup settings updated.")
+
+    @commands.command(name="userinfo", aliases=["ui", "whois"])
+    @commands.admin_or_permissions(manage_messages=True)
+    @commands.guild_only()
+    async def userinfo_member(self, ctx: commands.Context, member: discord.Member | None = None):
+        """Show account, server, and moderation stats for a member."""
+        member = member or ctx.author
+        warnings = await self.config.member(member).warnings()
+        timeout_until = member.communication_disabled_until
+        timeout_text = None
+        if timeout_until and timeout_until > datetime.now(timezone.utc):
+            timeout_text = f"Timed out until {self._format_profile_timestamp(timeout_until)}"
+
+        roles = [role for role in member.roles if role != ctx.guild.default_role]
+        sorted_roles = sorted(roles, key=lambda role: role.position, reverse=True)
+        role_text = sorted_roles[0].mention if sorted_roles else "No roles"
+        if len(sorted_roles) > 1:
+            role_text += f" (+{len(sorted_roles) - 1} more)"
+        role_mentions = [role.mention for role in sorted_roles]
+        displayed_roles = ", ".join(role_mentions[:12]) if role_mentions else "None"
+        if len(role_mentions) > 12:
+            displayed_roles += f", +{len(role_mentions) - 12} more"
+
+        status_icon = self._status_icon(member.status)
+        status_text = self._status_text(member)
+        description_lines = [
+            f"{status_icon} **{member.display_name}**",
+            status_text,
+            "",
+            "**Joined Discord on**",
+            self._format_profile_timestamp(member.created_at),
+            "**Joined this server on**",
+            self._format_profile_timestamp(member.joined_at),
+            "**Role**",
+            role_text,
+            "**Previous Username**",
+            "Not tracked yet",
+            "**Previous Global Display Names**",
+            "Not tracked yet",
+            "**Previous Server Nicknames**",
+            "Not tracked yet",
+        ]
+        if timeout_text:
+            description_lines.extend(["**Moderation**", timeout_text])
+        if warnings:
+            description_lines.extend(["**Warnings**", str(len(warnings))])
+
+        embed = discord.Embed(description="\n".join(description_lines), color=member.color or DEFAULT_COLOR)
+        embed.set_author(name=str(member), icon_url=member.display_avatar.url)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="User", value=f"{member.mention}\n`{member.id}`", inline=True)
+        embed.add_field(name="Bot", value="Yes" if member.bot else "No", inline=True)
+        embed.add_field(name="Administrator", value="Yes" if member.guild_permissions.administrator else "No", inline=True)
+        embed.add_field(name="Boosting since", value=self._format_timestamp(member.premium_since), inline=True)
+        embed.add_field(name="Top role", value=member.top_role.mention, inline=True)
+        embed.add_field(name="Role count", value=str(len(roles)), inline=True)
+        embed.add_field(name="Timed out", value=timeout_text or "No", inline=True)
+        embed.add_field(name="Warnings", value=str(len(warnings)), inline=True)
+        embed.add_field(name="Display name", value=member.display_name, inline=True)
+        embed.add_field(name="Roles list", value=displayed_roles[:1024], inline=False)
+        member_number = self._member_number(ctx.guild, member)
+        embed.set_footer(text=f"Member #{member_number} | User ID: {member.id}")
+        await ctx.send(embed=embed)
 
     @commands.command(name="timeout", aliases=["mute"])
     @commands.admin_or_permissions(moderate_members=True)
@@ -362,6 +425,42 @@ class AdminHelper(commands.Cog):
             return await self.bot.is_owner(member)
         except Exception:
             return False
+
+    def _format_timestamp(self, value: datetime | None) -> str:
+        if value is None:
+            return "None"
+        return f"<t:{int(value.timestamp())}:F>\n<t:{int(value.timestamp())}:R>"
+
+    def _format_profile_timestamp(self, value: datetime | None) -> str:
+        if value is None:
+            return "Unknown"
+        timestamp = int(value.timestamp())
+        return f"<t:{timestamp}:f>\n<t:{timestamp}:R>"
+
+    @staticmethod
+    def _status_icon(status: discord.Status) -> str:
+        return {
+            discord.Status.online: "🟢",
+            discord.Status.idle: "🟡",
+            discord.Status.dnd: "🔴",
+            discord.Status.offline: "⚪",
+            discord.Status.invisible: "⚪",
+        }.get(status, "⚪")
+
+    @staticmethod
+    def _status_text(member: discord.Member) -> str:
+        if member.raw_status == "offline":
+            return "Chilling in offline status"
+        return f"Chilling in {member.raw_status} status"
+
+    @staticmethod
+    def _member_number(guild: discord.Guild, member: discord.Member) -> int:
+        members = [guild_member for guild_member in guild.members if guild_member.joined_at is not None]
+        members.sort(key=lambda guild_member: guild_member.joined_at)
+        try:
+            return members.index(member) + 1
+        except ValueError:
+            return 0
 
     def _audit_reason(self, moderator: discord.abc.User, reason: str) -> str:
         return f"{moderator} ({moderator.id}): {reason or DEFAULT_REASON}"[:512]

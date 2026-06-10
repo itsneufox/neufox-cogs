@@ -1,7 +1,7 @@
 {
     "name": "AdminHelper",
     "short": "Manual moderation action helper.",
-    "description": "Adds direct staff moderation commands for ban, hackban, unban, kick, softban, timeout, untimeout, warn, warning lookup, and warning clearing, with optional DM notices and mod-log embeds.",
+    "description": "Adds direct staff moderation commands for ban, hackban, unban, kick, softban, timeout, untimeout, warn, warning lookup, warning clearing, and user info, with optional DM notices and mod-log embeds.",
     "author": [
         "itsneufox"
     ],
