@@ -1,0 +1,11 @@
+{
+    "name": "MessageArchive",
+    "short": "Save all guild messages to local archive files.",
+    "description": "Stores each guild message in a local SQLite database for retention and recovery workflows.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.0",
+    "install_msg": "MessageArchive loaded. Use [p]messagearchive on/off and [p]messagearchive status. Use [p]messagearchive backfill to import existing channel history.",
+    "requirements": [],
+    "tags": ["archive", "messages", "utility"],
+    "end_user_data_statement": "This cog stores raw message content, author IDs, channel IDs, timestamps, and message metadata in a local SQLite file. This can include text, references, and attachments links. Guild administrators can disable or clear archives at any time with [p]messagearchive off and [p]messagearchive clear."
+}
