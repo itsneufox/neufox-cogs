@@ -82,7 +82,7 @@ class Reminders(commands.Cog):
                 [
                     "`[p]remindlist [member]` - list active reminders you created (mods/admins can filter by member)",
                     "`[p]remindcancel <id>` - cancel a pending reminder",
-                    "`[p]remindprotectedroles [roles...]` - show or replace roles that are protected from commoners",
+                    "`[p]remindprotectedroles [roles...]` - show or replace roles that are protected from non-staff users",
                     "`[p]reminderlimit [n]` - show or set per-target cap (0 = unlimited)",
                     "`[p]reminderunlimitedrole [role]` - set role threshold for bypassing cap (omit role to clear)",
                 ]
@@ -137,7 +137,7 @@ class Reminders(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def remind_protected_roles(self, ctx: commands.Context, *, roles: str | None = None):
-        """Show or set roles that are protected from commoner reminders."""
+        """Show or set roles that are protected from non-staff reminders."""
         guild_config = self.config.guild(ctx.guild)
 
         if not roles or not roles.strip():
