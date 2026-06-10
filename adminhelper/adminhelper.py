@@ -53,7 +53,7 @@ class AdminHelper(commands.Cog):
             name="Actions",
             value=(
                 "ban, hackban, unban, kick, softban, timeout, untimeout, warn, warnings, "
-                "clearwarnings, userinfo, case, cases, reason, modstats"
+                "clearwarnings, userinfo, adminhelper case/cases/reason/modstats"
             ),
             inline=False,
         )
@@ -418,7 +418,7 @@ class AdminHelper(commands.Cog):
         await self._log_action(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=extra, case_id=case_id)
         await ctx.send(f"Cleared {previous} warning(s) for {member.mention}.")
 
-    @commands.command(name="case")
+    @adminhelper.command(name="case")
     @commands.admin_or_permissions(manage_messages=True)
     @commands.guild_only()
     async def case_info(self, ctx: commands.Context, case_id: int):
@@ -429,7 +429,7 @@ class AdminHelper(commands.Cog):
             return
         await ctx.send(embed=self._case_embed(ctx.guild, case))
 
-    @commands.command(name="cases")
+    @adminhelper.command(name="cases")
     @commands.admin_or_permissions(manage_messages=True)
     @commands.guild_only()
     async def cases_member(self, ctx: commands.Context, member: discord.Member):
@@ -442,7 +442,7 @@ class AdminHelper(commands.Cog):
         lines = [self._format_case_line(case) for case in matches[-10:]]
         await ctx.send(f"Recent cases for {member.mention} ({len(matches)} total):\n" + "\n".join(lines))
 
-    @commands.command(name="reason")
+    @adminhelper.command(name="reason")
     @commands.admin_or_permissions(manage_messages=True)
     @commands.guild_only()
     async def reason_case(self, ctx: commands.Context, case_id: int, *, reason: str):
@@ -457,7 +457,7 @@ class AdminHelper(commands.Cog):
                     return
         await ctx.send(f"Case #{case_id} was not found.")
 
-    @commands.command(name="modstats")
+    @adminhelper.command(name="modstats")
     @commands.admin_or_permissions(manage_messages=True)
     @commands.guild_only()
     async def modstats_member(self, ctx: commands.Context, member: discord.Member):
