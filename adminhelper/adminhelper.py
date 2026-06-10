@@ -11,6 +11,47 @@ DEFAULT_COLOR = discord.Color.red()
 DEFAULT_REASON = "No reason provided."
 
 
+class ConfirmActionView(discord.ui.View):
+    def __init__(self, author_id: int, action_text: str):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.action_text = action_text
+        self.value: bool | None = None
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.author_id:
+            return True
+        await interaction.response.send_message("Only the moderator who ran this command can use this prompt.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = True
+        self._disable_buttons()
+        await interaction.response.edit_message(content=f"Confirmed: {self.action_text}.", view=self)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.value = False
+        self._disable_buttons()
+        await interaction.response.edit_message(content=f"Cancelled. Did not {self.action_text}.", view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        self._disable_buttons()
+        if self.message is not None:
+            try:
+                await self.message.edit(content=f"Confirmation expired. Did not {self.action_text}.", view=self)
+            except (discord.Forbidden, discord.HTTPException):
+                return
+
+    def _disable_buttons(self):
+        for child in self.children:
+            child.disabled = True
+
+
 class AdminHelper(commands.Cog):
     """Manual moderation actions for server staff."""
 
@@ -188,7 +229,7 @@ class AdminHelper(commands.Cog):
         embed.set_footer(text=f"Member #{member_number} | User ID: {member.id}")
         await ctx.send(embed=embed)
 
-    @commands.command(name="timeout", aliases=["mute"])
+    @commands.command(name="timeout", aliases=["to", "mute"])
     @commands.admin_or_permissions(moderate_members=True)
     @commands.guild_only()
     async def timeout_member(
@@ -256,6 +297,8 @@ class AdminHelper(commands.Cog):
         if not allowed:
             await ctx.send(f"Unable to kick {member.mention}: {failure}")
             return
+        if not await self._confirm_action(ctx, f"kick {member.mention}"):
+            return
 
         await self._maybe_dm(member, ctx.guild, "kick", reason)
         try:
@@ -279,6 +322,8 @@ class AdminHelper(commands.Cog):
             return
 
         delete_days = await self.config.guild(ctx.guild).ban_delete_message_days()
+        if not await self._confirm_action(ctx, f"ban {member.mention} and delete {delete_days} day(s) of messages"):
+            return
         await self._maybe_dm(member, ctx.guild, "ban", reason)
         try:
             await member.ban(delete_message_days=delete_days, reason=self._audit_reason(ctx.author, reason))
@@ -307,6 +352,8 @@ class AdminHelper(commands.Cog):
             return
 
         delete_days = await self.config.guild(ctx.guild).ban_delete_message_days()
+        if not await self._confirm_action(ctx, f"ban {user} and delete {delete_days} day(s) of messages"):
+            return
         try:
             await ctx.guild.ban(user, delete_message_days=delete_days, reason=self._audit_reason(ctx.author, reason))
         except (discord.Forbidden, discord.HTTPException):
@@ -347,6 +394,8 @@ class AdminHelper(commands.Cog):
             return
 
         delete_days = await self.config.guild(ctx.guild).softban_delete_message_days()
+        if not await self._confirm_action(ctx, f"softban {member.mention} and delete {delete_days} day(s) of messages"):
+            return
         audit_reason = self._audit_reason(ctx.author, f"Softban: {reason}")
         await self._maybe_dm(member, ctx.guild, "softban", reason, extra=f"Deleted {delete_days} day(s) of messages")
         try:
@@ -412,6 +461,8 @@ class AdminHelper(commands.Cog):
     async def clearwarnings_member(self, ctx: commands.Context, member: discord.Member, *, reason: str = DEFAULT_REASON):
         """Clear stored warnings for a member."""
         previous = len(await self.config.member(member).warnings())
+        if previous and not await self._confirm_action(ctx, f"clear {previous} warning(s) for {member.mention}"):
+            return
         await self.config.member(member).warnings.set([])
         extra = f"Cleared {previous} warning(s)"
         case_id = await self._create_case(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=extra)
@@ -543,6 +594,12 @@ class AdminHelper(commands.Cog):
             return await self.bot.is_owner(member)
         except Exception:
             return False
+
+    async def _confirm_action(self, ctx: commands.Context, action_text: str) -> bool:
+        view = ConfirmActionView(ctx.author.id, action_text)
+        view.message = await ctx.send(f"Confirm: {action_text}?", view=view)
+        await view.wait()
+        return view.value is True
 
     async def _create_case(
         self,
