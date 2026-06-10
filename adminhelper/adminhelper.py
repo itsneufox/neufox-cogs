@@ -192,6 +192,7 @@ class AdminHelper(commands.Cog):
         """Show account, server, and moderation stats for a member."""
         member = member or ctx.author
         warnings = await self.config.member(member).warnings()
+        antiabuse_warnings = await self._antiabuse_warning_count(member)
         timeout_until = getattr(member, "communication_disabled_until", None)
         timeout_text = None
         if timeout_until and timeout_until.timestamp() > datetime.now(timezone.utc).timestamp():
@@ -231,8 +232,13 @@ class AdminHelper(commands.Cog):
         ]
         if timeout_text:
             description_lines.extend(["**Moderation**", timeout_text])
-        if warnings:
-            description_lines.extend(["**Warnings**", str(len(warnings))])
+        if warnings or antiabuse_warnings:
+            description_lines.extend(
+                [
+                    "**Warnings**",
+                    f"Manual: {len(warnings)}\nAutoMod: {antiabuse_warnings}",
+                ]
+            )
 
         embed = discord.Embed(description="\n".join(description_lines), color=member.color or DEFAULT_COLOR)
         avatar_url = self._avatar_url(member)
@@ -248,7 +254,7 @@ class AdminHelper(commands.Cog):
         embed.add_field(name="Top role", value=member.top_role.mention, inline=True)
         embed.add_field(name="Role count", value=str(len(roles)), inline=True)
         embed.add_field(name="Timed out", value=timeout_text or "No", inline=True)
-        embed.add_field(name="Warnings", value=str(len(warnings)), inline=True)
+        embed.add_field(name="Warnings", value=f"Manual: {len(warnings)}\nAutoMod: {antiabuse_warnings}", inline=True)
         embed.add_field(name="Display name", value=member.display_name, inline=True)
         embed.add_field(name="Roles list", value=displayed_roles[:1024], inline=False)
         member_number = self._member_number(ctx.guild, member)
@@ -467,8 +473,15 @@ class AdminHelper(commands.Cog):
     async def warnings_member(self, ctx: commands.Context, member: discord.Member):
         """Show stored warnings for a member."""
         warnings = await self.config.member(member).warnings()
+        antiabuse_warnings = await self._antiabuse_warning_count(member)
         if not warnings:
-            await ctx.send(f"{member.mention} has no warnings.")
+            if antiabuse_warnings:
+                await ctx.send(
+                    f"{member.mention} has no manual AdminHelper warnings.\n"
+                    f"AutoMod warnings/strikes: {antiabuse_warnings}."
+                )
+                return
+            await ctx.send(f"{member.mention} has no manual AdminHelper warnings or AutoMod strikes.")
             return
 
         lines = []
@@ -479,7 +492,11 @@ class AdminHelper(commands.Cog):
             timestamp = f"<t:{created_at}:R>" if created_at else "unknown time"
             lines.append(f"`#{idx}` {timestamp} by {moderator_text}: {warning.get('reason', DEFAULT_REASON)}")
 
-        await ctx.send(f"Warnings for {member.mention} ({len(warnings)} total):\n" + "\n".join(lines))
+        await ctx.send(
+            f"Manual warnings for {member.mention} ({len(warnings)} total):\n"
+            + "\n".join(lines)
+            + f"\nAutoMod warnings/strikes: {antiabuse_warnings}."
+        )
 
     @commands.command(name="clearwarnings", aliases=["clearwarns"])
     @commands.admin_or_permissions(manage_messages=True)
@@ -620,6 +637,18 @@ class AdminHelper(commands.Cog):
             return await self.bot.is_owner(member)
         except Exception:
             return False
+
+    async def _antiabuse_warning_count(self, member: discord.Member) -> int:
+        antiabuse = self.bot.get_cog("AntiAbuse")
+        if antiabuse is None:
+            return 0
+        config = getattr(antiabuse, "config", None)
+        if config is None:
+            return 0
+        try:
+            return await config.member(member).warning_count()
+        except Exception:
+            return 0
 
     async def _confirm_action(self, ctx: commands.Context, action_text: str) -> bool:
         view = ConfirmActionView(ctx.author.id, action_text, str(ctx.author), self._avatar_url(ctx.author))

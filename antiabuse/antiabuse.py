@@ -16,7 +16,7 @@ URL_RE = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
 
 
 class AntiAbuse(commands.Cog):
-    """Automatic anti-abuse moderation helper."""
+    """Automatic moderation helper."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -68,31 +68,31 @@ class AntiAbuse(commands.Cog):
         self._command_buckets: dict[tuple[int, int], deque[float]] = defaultdict(deque)
         self._guild_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    @commands.group(name="antiabuse", aliases=["abuse"], invoke_without_command=True)
+    @commands.group(name="antiabuse", aliases=["abuse", "automod"], invoke_without_command=True)
     async def antiabuse(self, ctx: commands.Context):
-        """Show anti-abuse settings and current status."""
+        """Show AutoMod settings and current status."""
         await self._send_status(ctx)
 
     @antiabuse.command(name="status")
     async def antiabuse_status(self, ctx: commands.Context):
-        """Show anti-abuse status."""
+        """Show AutoMod status."""
         await self._send_status(ctx)
 
     @antiabuse.command(name="on")
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_on(self, ctx: commands.Context):
-        """Enable anti-abuse automation for this server."""
+        """Enable AutoMod automation for this server."""
         await self.config.guild(ctx.guild).antiabuse_enabled.set(True)
-        await ctx.send("Anti-abuse enforcement enabled.")
+        await ctx.send("AutoMod enforcement enabled.")
 
     @antiabuse.command(name="off")
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_off(self, ctx: commands.Context):
-        """Disable anti-abuse automation for this server."""
+        """Disable AutoMod automation for this server."""
         await self.config.guild(ctx.guild).antiabuse_enabled.set(False)
-        await ctx.send("Anti-abuse enforcement disabled.")
+        await ctx.send("AutoMod enforcement disabled.")
 
     @antiabuse.command(name="rate")
     @commands.admin_or_permissions(manage_guild=True)
@@ -366,7 +366,7 @@ class AntiAbuse(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_role(self, ctx: commands.Context):
-        """Show role-based anti-abuse profile overrides."""
+        """Show role-based AutoMod profile overrides."""
         role_profiles = await self.config.guild(ctx.guild).role_punishment_profiles()
         if not role_profiles:
             await ctx.send("No role overrides configured.")
@@ -438,7 +438,7 @@ class AntiAbuse(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_role_clear(self, ctx: commands.Context, role: discord.Role):
-        """Clear role-specific anti-abuse punishment overrides."""
+        """Clear role-specific AutoMod punishment overrides."""
         guild_cfg = self.config.guild(ctx.guild)
         current_profiles = await guild_cfg.role_punishment_profiles()
         current_profiles.pop(str(role.id), None)
@@ -476,7 +476,7 @@ class AntiAbuse(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_exempt(self, ctx: commands.Context):
-        """View exempt roles for anti-abuse checks."""
+        """View exempt roles for AutoMod checks."""
         exempt_ids = await self.config.guild(ctx.guild).exempt_role_ids()
         roles = [ctx.guild.get_role(role_id) for role_id in exempt_ids]
         roles = [role for role in roles if role is not None]
@@ -489,7 +489,7 @@ class AntiAbuse(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_exempt_add(self, ctx: commands.Context, role: discord.Role):
-        """Add a role that bypasses anti-abuse checks."""
+        """Add a role that bypasses AutoMod checks."""
         current = set(await self.config.guild(ctx.guild).exempt_role_ids())
         if role.id in current:
             await ctx.send(f"{role.mention} is already exempt.")
@@ -502,7 +502,7 @@ class AntiAbuse(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_exempt_remove(self, ctx: commands.Context, role: discord.Role):
-        """Remove a role from anti-abuse exemption."""
+        """Remove a role from AutoMod exemption."""
         current = set(await self.config.guild(ctx.guild).exempt_role_ids())
         if role.id not in current:
             await ctx.send(f"{role.mention} is not exempt.")
@@ -515,46 +515,46 @@ class AntiAbuse(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_logchannel(self, ctx: commands.Context, channel: discord.TextChannel | None = None):
-        """Set or clear log channel for anti-abuse actions."""
+        """Set or clear log channel for AutoMod actions."""
         channel_id = None if channel is None else channel.id
         await self.config.guild(ctx.guild).log_channel_id.set(channel_id)
         if channel is None:
-            await ctx.send("Anti-abuse log channel cleared.")
+            await ctx.send("AutoMod log channel cleared.")
         else:
-            await ctx.send(f"Anti-abuse actions will be logged in {channel.mention}.")
+            await ctx.send(f"AutoMod actions will be logged in {channel.mention}.")
 
     @antiabuse.command(name="ignorechannel")
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_ignorechannel(self, ctx: commands.Context, channel: discord.TextChannel | None = None):
-        """Toggle a channel ignored by anti-abuse checks."""
+        """Toggle a channel ignored by AutoMod checks."""
         channel = channel or ctx.channel
         ignored = set(await self.config.guild(ctx.guild).ignored_channel_ids())
         if channel.id in ignored:
             ignored.remove(channel.id)
             await self.config.guild(ctx.guild).ignored_channel_ids.set(sorted(ignored))
-            await ctx.send(f"{channel.mention} is no longer ignored by anti-abuse.")
+            await ctx.send(f"{channel.mention} is no longer ignored by AutoMod.")
             return
 
         ignored.add(channel.id)
         await self.config.guild(ctx.guild).ignored_channel_ids.set(sorted(ignored))
-        await ctx.send(f"{channel.mention} is now ignored by anti-abuse.")
+        await ctx.send(f"{channel.mention} is now ignored by AutoMod.")
 
     @antiabuse.command(name="ignorecategory")
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_ignorecategory(self, ctx: commands.Context, category: discord.CategoryChannel):
-        """Toggle a category ignored by anti-abuse checks."""
+        """Toggle a category ignored by AutoMod checks."""
         ignored = set(await self.config.guild(ctx.guild).ignored_category_ids())
         if category.id in ignored:
             ignored.remove(category.id)
             await self.config.guild(ctx.guild).ignored_category_ids.set(sorted(ignored))
-            await ctx.send(f"{category.name} is no longer ignored by anti-abuse.")
+            await ctx.send(f"{category.name} is no longer ignored by AutoMod.")
             return
 
         ignored.add(category.id)
         await self.config.guild(ctx.guild).ignored_category_ids.set(sorted(ignored))
-        await ctx.send(f"{category.name} is now ignored by anti-abuse.")
+        await ctx.send(f"{category.name} is now ignored by AutoMod.")
 
     @antiabuse.group(name="lockdown", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
@@ -579,9 +579,9 @@ class AntiAbuse(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_lockdown_stop(self, ctx: commands.Context):
-        """Stop any active anti-abuse lockdown."""
+        """Stop any active AutoMod lockdown."""
         await self._stop_lockdown(ctx.guild, force=True)
-        await ctx.send("Active anti-abuse lockdown stopped and permissions restored where possible.")
+        await ctx.send("Active AutoMod lockdown stopped and permissions restored where possible.")
 
     @antiabuse_lockdown.command(name="auto")
     @commands.admin_or_permissions(manage_guild=True)
@@ -619,7 +619,7 @@ class AntiAbuse(commands.Cog):
                 await self.config.member(target).warning_count.set(0)
                 await self.config.member(target).last_violation_at.set(0)
                 await self.config.member(target).last_action_at.set(0)
-            await ctx.send("All anti-abuse counters cleared for this server.")
+            await ctx.send("All AutoMod counters cleared for this server.")
             return
 
         await self.config.member(member).warning_count.set(0)
@@ -682,7 +682,7 @@ class AntiAbuse(commands.Cog):
         lockdown_until = settings.get("lockdown_until", 0)
         now = time.time()
 
-        embed = discord.Embed(title="Anti-Abuse Protection", color=DEFAULT_COLOR)
+        embed = discord.Embed(title="AutoMod Protection", color=DEFAULT_COLOR)
         embed.add_field(name="Enabled", value="Yes" if settings["antiabuse_enabled"] else "No", inline=True)
         embed.add_field(name="Rate limit", value=f"{settings['rate_threshold']} per {settings['rate_window_seconds']}s", inline=True)
         embed.add_field(
@@ -957,7 +957,7 @@ class AntiAbuse(commands.Cog):
             return
 
         if action == "short_timeout":
-            success = await self._timeout_member(member, timeout_minutes, "Anti-abuse short timeout")
+            success = await self._timeout_member(member, timeout_minutes, "AutoMod short timeout")
             if success:
                 await self._notify(message, member, violations, f"short timeout ({timeout_minutes}m)")
                 await member_cfg.last_action_at.set(now)
@@ -970,7 +970,7 @@ class AntiAbuse(commands.Cog):
             return
 
         if action == "long_timeout":
-            success = await self._timeout_member(member, timeout_minutes, "Anti-abuse long timeout")
+            success = await self._timeout_member(member, timeout_minutes, "AutoMod long timeout")
             if success:
                 await self._notify(message, member, violations, f"long timeout ({timeout_minutes}m)")
                 await member_cfg.last_action_at.set(now)
@@ -983,7 +983,7 @@ class AntiAbuse(commands.Cog):
             return
 
         if action == "kick":
-            success = await self._kick_member(member, reason="Anti-abuse auto kick")
+            success = await self._kick_member(member, reason="AutoMod auto kick")
             if success:
                 await self._notify(message, member, violations, "kick")
                 await member_cfg.last_action_at.set(now)
@@ -999,7 +999,7 @@ class AntiAbuse(commands.Cog):
             success = await self._ban_member(
                 member,
                 delete_message_days=punish_settings["ban_delete_message_days"],
-                reason="Anti-abuse auto ban",
+                reason="AutoMod auto ban",
             )
             if success:
                 await self._notify(message, member, violations, "ban")
@@ -1035,7 +1035,7 @@ class AntiAbuse(commands.Cog):
 
         reasons = ", ".join(violations)
         lines = [
-            f"{member.mention} Anti-abuse action: **{action}**",
+            f"{member.mention} AutoMod action: **{action}**",
             f"Triggered by: {reasons}",
             f"This is warning #{await self.config.member(member).warning_count()} for this user.",
         ]
@@ -1052,7 +1052,7 @@ class AntiAbuse(commands.Cog):
         if log_channel is None:
             return
 
-        embed = discord.Embed(title="Anti-Abuse Log", color=DEFAULT_COLOR)
+        embed = discord.Embed(title="AutoMod Log", color=DEFAULT_COLOR)
         embed.add_field(name="Member", value=member.mention, inline=True)
         embed.add_field(name="Warnings", value=str(warnings), inline=True)
         embed.add_field(name="Action", value=action, inline=True)
@@ -1335,7 +1335,7 @@ class AntiAbuse(commands.Cog):
 
                 overrides[str(channel.id)] = overwrite.send_messages
                 try:
-                    await channel.set_permissions(default_role, send_messages=False, reason=f"Anti-abuse lockdown ({trigger})")
+                    await channel.set_permissions(default_role, send_messages=False, reason=f"AutoMod lockdown ({trigger})")
                 except (discord.Forbidden, discord.HTTPException):
                     continue
 
