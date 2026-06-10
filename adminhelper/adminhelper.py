@@ -99,13 +99,13 @@ class AdminHelper(commands.Cog):
     @commands.command(name="userinfo", aliases=["ui", "whois"])
     @commands.admin_or_permissions(manage_messages=True)
     @commands.guild_only()
-    async def userinfo_member(self, ctx: commands.Context, member: discord.Member | None = None):
+    async def userinfo_member(self, ctx: commands.Context, member: discord.Member = None):
         """Show account, server, and moderation stats for a member."""
         member = member or ctx.author
         warnings = await self.config.member(member).warnings()
-        timeout_until = member.communication_disabled_until
+        timeout_until = getattr(member, "communication_disabled_until", None)
         timeout_text = None
-        if timeout_until and timeout_until > datetime.now(timezone.utc):
+        if timeout_until and timeout_until.timestamp() > datetime.now(timezone.utc).timestamp():
             timeout_text = f"Timed out until {self._format_profile_timestamp(timeout_until)}"
 
         roles = [role for role in member.roles if role != ctx.guild.default_role]
@@ -143,8 +143,12 @@ class AdminHelper(commands.Cog):
             description_lines.extend(["**Warnings**", str(len(warnings))])
 
         embed = discord.Embed(description="\n".join(description_lines), color=member.color or DEFAULT_COLOR)
-        embed.set_author(name=str(member), icon_url=member.display_avatar.url)
-        embed.set_thumbnail(url=member.display_avatar.url)
+        avatar_url = self._avatar_url(member)
+        if avatar_url:
+            embed.set_author(name=str(member), icon_url=avatar_url)
+            embed.set_thumbnail(url=avatar_url)
+        else:
+            embed.set_author(name=str(member))
         embed.add_field(name="User", value=f"{member.mention}\n`{member.id}`", inline=True)
         embed.add_field(name="Bot", value="Yes" if member.bot else "No", inline=True)
         embed.add_field(name="Administrator", value="Yes" if member.guild_permissions.administrator else "No", inline=True)
@@ -436,6 +440,19 @@ class AdminHelper(commands.Cog):
             return "Unknown"
         timestamp = int(value.timestamp())
         return f"<t:{timestamp}:f>\n<t:{timestamp}:R>"
+
+    @staticmethod
+    def _avatar_url(member: discord.Member) -> str:
+        display_avatar = getattr(member, "display_avatar", None)
+        if display_avatar is not None:
+            return str(display_avatar.url)
+        avatar_url = getattr(member, "avatar_url", None)
+        if avatar_url is not None:
+            return str(avatar_url)
+        default_avatar_url = getattr(member, "default_avatar_url", None)
+        if default_avatar_url is not None:
+            return str(default_avatar_url)
+        return ""
 
     @staticmethod
     def _status_icon(status: discord.Status) -> str:
