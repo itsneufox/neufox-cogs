@@ -111,6 +111,7 @@ class ActivityStats(commands.Cog):
             enabled=True,
             total_messages=0,
             user_messages={},
+            user_display_names={},
             channel_messages={},
             message_authors={},
             received_reactions={},
@@ -285,11 +286,12 @@ class ActivityStats(commands.Cog):
             key=lambda item: item[1],
             reverse=True,
         )
+        entries_with_names = await self._entries_with_names(guild, entries)
 
         return await self._leaderboard_embeds(
             guild=guild,
             title="Message Rankings",
-            entries=entries,
+            entries=entries_with_names,
             formatter=lambda page_entries, start: self._format_user_count_lines(
                 guild,
                 page_entries,
@@ -319,10 +321,11 @@ class ActivityStats(commands.Cog):
             key=lambda item: item[1],
             reverse=True,
         )
+        entries_with_names = await self._entries_with_names(guild, entries)
         return await self._leaderboard_embeds(
             guild=guild,
             title="Voice Time Rankings",
-            entries=entries,
+            entries=entries_with_names,
             formatter=lambda page_entries, start: self._format_voice_lines(guild, page_entries, start),
         )
 
@@ -486,10 +489,11 @@ class ActivityStats(commands.Cog):
                         entries.append((int(user_id), int(count), reaction))
 
         entries.sort(key=lambda item: item[1], reverse=True)
+        entries_with_names = await self._reaction_entries_with_names(guild, entries)
         return await self._leaderboard_embeds(
             guild=guild,
             title="Reaction Rankings",
-            entries=entries,
+            entries=entries_with_names,
             formatter=lambda page_entries, start: self._format_reaction_lines(
                 guild,
                 page_entries,
@@ -735,6 +739,7 @@ class ActivityStats(commands.Cog):
         user_id = str(message.author.id)
         channel_id = str(message.channel.id)
         message_id = str(message.id)
+        await self._cache_member_name(message.guild, message.author)
 
         await guild_conf.total_messages.set(await guild_conf.total_messages() + 1)
         async with guild_conf.user_messages() as user_messages:
@@ -748,6 +753,16 @@ class ActivityStats(commands.Cog):
                 "created_at": int(time.time()),
             }
         await self._maybe_sync_top_message_roles(message.guild)
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        await self._cache_member_name(member.guild, member)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        if before.display_name == after.display_name:
+            return
+        await self._cache_member_name(after.guild, after)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent):
@@ -828,6 +843,7 @@ class ActivityStats(commands.Cog):
         reaction_updates = 0
         new_authors: dict[str, dict[str, str | int]] = {}
         user_message_deltas: Counter[str] = Counter()
+        display_name_updates: dict[str, str] = {}
         channel_message_delta = 0
         reaction_deltas: list[tuple[str, str, int]] = []
         reaction_snapshots: dict[str, dict[str, int]] = {}
@@ -840,6 +856,7 @@ class ActivityStats(commands.Cog):
 
             message_id = str(message.id)
             author_id = str(message.author.id)
+            display_name_updates[author_id] = str(message.author.display_name)
             if message_id not in message_authors and message_id not in new_authors:
                 new_authors[message_id] = {
                     "author_id": author_id,
@@ -886,6 +903,10 @@ class ActivityStats(commands.Cog):
                         stored_reactions[message_id] = reaction_snapshots[message_id]
                     else:
                         stored_reactions.pop(message_id, None)
+
+        if display_name_updates:
+            async with guild_conf.user_display_names() as user_display_names:
+                user_display_names.update(display_name_updates)
 
         return scanned, added, reaction_updates
 
@@ -1302,7 +1323,7 @@ class ActivityStats(commands.Cog):
     async def _format_user_count_lines(
         self,
         guild: discord.Guild,
-        entries: list[tuple[int, int]],
+        entries: list[tuple[int, int, str]],
         label: str,
         start_rank: int = 1,
     ) -> str:
@@ -1310,15 +1331,15 @@ class ActivityStats(commands.Cog):
             return "There are no entries to display here."
 
         lines = []
-        for index, (user_id, count) in enumerate(entries, start=start_rank):
+        for index, (_, count, display_name) in enumerate(entries, start=start_rank):
             rank = RANK_PREFIXES.get(index, f"{index}.")
-            lines.append(f"{rank} **{await self._display_user(guild, user_id)}** - {count} {label}")
+            lines.append(f"{rank} **{display_name}** - {count} {label}")
         return "\n".join(lines)
 
     async def _format_reaction_lines(
         self,
         guild: discord.Guild,
-        entries: list[tuple[int, int, str]],
+        entries: list[tuple[int, int, str, str]],
         emoji: str | None,
         start_rank: int = 1,
     ) -> str:
@@ -1327,35 +1348,106 @@ class ActivityStats(commands.Cog):
             return f"{prefix}There are no entries to display here."
 
         lines = []
-        for index, (user_id, count, reaction) in enumerate(entries, start=start_rank):
-            user = await self._display_user(guild, user_id)
+        for index, (_, count, reaction, display_name) in enumerate(entries, start=start_rank):
             rank = RANK_PREFIXES.get(index, f"{index}.")
-            lines.append(f"{rank} **{user}** - {reaction} x {count}")
+            lines.append(f"{rank} **{display_name}** - {reaction} x {count}")
         return "\n".join(lines)
 
     async def _format_voice_lines(
         self,
         guild: discord.Guild,
-        entries: list[tuple[int, int]],
+        entries: list[tuple[int, int, str]],
         start_rank: int = 1,
     ) -> str:
         if not entries:
             return "There are no entries to display here."
 
         lines = []
-        for index, (user_id, seconds) in enumerate(entries, start=start_rank):
+        for index, (_, seconds, display_name) in enumerate(entries, start=start_rank):
             rank = RANK_PREFIXES.get(index, f"{index}.")
-            lines.append(f"{rank} **{await self._display_user(guild, user_id)}** - {self._format_duration(seconds)}")
+            lines.append(f"{rank} **{display_name}** - {self._format_duration(seconds)}")
         return "\n".join(lines)
 
-    async def _display_user(self, guild: discord.Guild, user_id: int) -> str:
+    async def _entries_with_names(self, guild: discord.Guild, entries: list[tuple[int, int]]) -> list[tuple[int, int, str]]:
+        user_display_names = await self.config.guild(guild).user_display_names()
+        updates: dict[str, str] = {}
+        entries_with_names = []
+
+        for user_id, count in entries:
+            user_key = str(user_id)
+            display_name = user_display_names.get(user_key)
+            if display_name is None:
+                member = guild.get_member(user_id)
+                if member is not None:
+                    display_name = member.display_name
+                    updates[user_key] = display_name
+                else:
+                    user = self.bot.get_user(user_id)
+                    if user is not None:
+                        display_name = user.name
+                        updates[user_key] = display_name
+            if display_name is not None:
+                entries_with_names.append((user_id, count, display_name))
+
+        if updates:
+            async with self.config.guild(guild).user_display_names() as user_display_names:
+                user_display_names.update(updates)
+
+        return entries_with_names
+
+    async def _reaction_entries_with_names(
+        self,
+        guild: discord.Guild,
+        entries: list[tuple[int, int, str]],
+    ) -> list[tuple[int, int, str, str]]:
+        user_display_names = await self.config.guild(guild).user_display_names()
+        updates: dict[str, str] = {}
+        entries_with_names: list[tuple[int, int, str, str]] = []
+
+        for user_id, count, reaction in entries:
+            user_key = str(user_id)
+            display_name = user_display_names.get(user_key)
+            if display_name is None:
+                member = guild.get_member(user_id)
+                if member is not None:
+                    display_name = member.display_name
+                    updates[user_key] = display_name
+                else:
+                    user = self.bot.get_user(user_id)
+                    if user is not None:
+                        display_name = user.name
+                        updates[user_key] = display_name
+            if display_name is not None:
+                entries_with_names.append((user_id, count, reaction, display_name))
+
+        if updates:
+            async with self.config.guild(guild).user_display_names() as user_display_names:
+                user_display_names.update(updates)
+
+        return entries_with_names
+
+    async def _cache_member_name(self, guild: discord.Guild, member: discord.Member):
+        async with self.config.guild(guild).user_display_names() as user_display_names:
+            user_display_names[str(member.id)] = member.display_name
+
+    async def _display_user(self, guild: discord.Guild, user_id: int, allow_unknown: bool = True) -> str | None:
+        cached_names = await self.config.guild(guild).user_display_names()
+        cached_name = cached_names.get(str(user_id))
+        if cached_name is not None:
+            return cached_name
+
         member = guild.get_member(user_id)
         if member:
+            await self._cache_member_name(guild, member)
             return member.display_name
         user = self.bot.get_user(user_id)
         if user:
+            async with self.config.guild(guild).user_display_names() as user_display_names:
+                user_display_names[str(user_id)] = user.name
             return user.name
-        return f"Unknown user ({user_id})"
+        if allow_unknown:
+            return f"Unknown user ({user_id})"
+        return None
 
     @staticmethod
     def _clean_limit(limit: int) -> int:
