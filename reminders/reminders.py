@@ -16,6 +16,7 @@ MAX_REMINDER_SECONDS = 366 * 24 * 60 * 60
 MAX_MESSAGE_LENGTH = 1000
 DEFAULT_MAX_REMINDERS_PER_PERSON = 2
 MENTION_RE = re.compile(r"@(everyone|here)|<@&\d+>")
+ROLE_MENTION_RE = re.compile(r"<@&(\d+)>")
 TIME_PART_RE = re.compile(r"(\d+)\s*([wdhms])", re.IGNORECASE)
 TIME_UNITS = {
     "w": 7 * 24 * 60 * 60,
@@ -135,11 +136,11 @@ class Reminders(commands.Cog):
     @commands.command(name="remindprotectedroles")
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
-    async def remind_protected_roles(self, ctx: commands.Context, *, roles: commands.Greedy[discord.Role]):
+    async def remind_protected_roles(self, ctx: commands.Context, *, roles: str | None = None):
         """Show or set roles that are protected from commoner reminders."""
         guild_config = self.config.guild(ctx.guild)
 
-        if not roles:
+        if not roles or not roles.strip():
             protected_role_ids = await guild_config.reminder_protected_role_ids()
             protected_roles = [ctx.guild.get_role(role_id) for role_id in protected_role_ids]
             role_names = [role.mention for role in protected_roles if role is not None]
@@ -149,8 +150,56 @@ class Reminders(commands.Cog):
                 await ctx.send("No protected roles configured.")
             return
 
-        await guild_config.reminder_protected_role_ids.set([role.id for role in roles])
-        await ctx.send(f"Protected roles updated: {', '.join(role.mention for role in roles)}.")
+        parsed_roles = self._parse_role_list(ctx.guild, roles)
+        if not parsed_roles:
+            await ctx.send(
+                "I could not parse any roles from that input. "
+                "Use role mentions, IDs, or comma-separated role names."
+            )
+            return
+
+        await guild_config.reminder_protected_role_ids.set([role.id for role in parsed_roles])
+        await ctx.send(
+            f"Protected roles updated: {', '.join(role.mention for role in parsed_roles)}.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @staticmethod
+    def _parse_role_list(guild: discord.Guild, raw: str) -> list[discord.Role]:
+        role_ids = {int(role_id) for role_id in ROLE_MENTION_RE.findall(raw)}
+        remaining = ROLE_MENTION_RE.sub(" ", raw).strip()
+        if remaining:
+            for chunk in re.split(r"[,\n;]+", remaining):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                if chunk.isdigit():
+                    role_ids.add(int(chunk))
+                    continue
+
+                if chunk.startswith("<@&") and chunk.endswith(">") and chunk[3:-1].isdigit():
+                    role_ids.add(int(chunk[3:-1]))
+                    continue
+
+                if chunk.startswith("@"):
+                    chunk = chunk[1:].strip()
+                if chunk.startswith("&"):
+                    chunk = chunk[1:].strip()
+                if not chunk:
+                    continue
+
+                lowered = chunk.lower()
+                matched = discord.utils.find(lambda r: r.name.lower() == lowered, guild.roles)
+                if matched is None:
+                    continue
+                role_ids.add(matched.id)
+
+        resolved: list[discord.Role] = []
+        for role_id in role_ids:
+            role = guild.get_role(role_id)
+            if role is not None:
+                resolved.append(role)
+        return resolved
 
     @commands.command(name="remindclearprotectedroles")
     @commands.admin_or_permissions(manage_guild=True)
