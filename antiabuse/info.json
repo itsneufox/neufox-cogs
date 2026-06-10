@@ -1,0 +1,11 @@
+{
+  "name": "AntiAbuse",
+  "short": "Advanced anti-abuse moderation helper.",
+  "description": "Automatically watches message rate, mention spam, all-caps messages and link spam. Escalates to warnings, timed timeouts, and optional guild lockdown.",
+  "author": ["itsneufox"],
+  "min_bot_version": "3.5.0",
+  "install_msg": "AntiAbuse loaded. Use `[p]antiabuse` to inspect settings and `[p]antiabuse on|off` to control enforcement.",
+  "requirements": [],
+  "tags": ["moderation", "security", "abuse", "admin"],
+  "end_user_data_statement": "This cog stores anti-abuse warning counts and timestamps per guild member and member-specific strike counters. It also stores guild-level configuration values and lockdown state metadata."
+}
