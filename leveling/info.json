@@ -1,11 +1,11 @@
 {
     "name": "Leveling",
     "short": "Chat and voice XP leveling.",
-    "description": "Tracks per-server chat and voice XP with MEE6/Ree6-style cooldowns, level commands, leaderboards, level-up announcements, level role rewards, and optional Economy cash rewards.",
+    "description": "Tracks per-server chat and voice XP with MEE6/Ree6-style cooldowns, level commands, leaderboards, level-up announcements, level role rewards, and optional Economy LWD coin rewards.",
     "author": ["itsneufox"],
     "min_bot_version": "3.5.0",
-    "install_msg": "Leveling loaded! Use `[p]level`, `[p]leaderboard`, `[p]levelrole`, `[p]levelcash`, and `[p]levelset`.",
+    "install_msg": "Leveling loaded! Use `[p]level`, `[p]leaderboard`, `[p]levelrole`, `[p]levelcoins`, and `[p]levelset`.",
     "requirements": [],
     "tags": ["leveling", "xp", "levels", "voice", "utility"],
-    "end_user_data_statement": "This cog stores Discord user IDs, display names, per-server chat XP, per-server voice XP, configured level roles, configured level cash rewards, ignored channel IDs, ignored role IDs, level-up channel IDs, and active voice session start timestamps. Administrators can disable tracking or adjust settings with `[p]levelset`."
+    "end_user_data_statement": "This cog stores Discord user IDs, display names, per-server chat XP, per-server voice XP, configured level roles, configured level LWD coin rewards, ignored channel IDs, ignored role IDs, level-up channel IDs, and active voice session start timestamps. Administrators can disable tracking or adjust settings with `[p]levelset`."
 }

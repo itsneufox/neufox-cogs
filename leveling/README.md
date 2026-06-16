@@ -7,7 +7,7 @@ Defaults are based on the Ree6 leveling behavior:
 - Chat XP: random 15-25 XP, once per user every 30 seconds.
 - Voice XP: random 5-10 XP per eligible connected minute.
 - Level roles: roles are awarded when a member reaches the configured chat or voice level.
-- Economy cash rewards: optional rewards can be configured per chat or voice level.
+- Economy LWD coin rewards: optional rewards can be configured per chat or voice level.
 
 ## Commands
 
@@ -16,9 +16,9 @@ Defaults are based on the Ree6 leveling behavior:
 - `[p]levelrole add <chat|voice> <level> <role>` - add or replace a level role.
 - `[p]levelrole remove <chat|voice> <level> [role]` - remove a level role.
 - `[p]levelrole list` - show configured level roles.
-- `[p]levelcash add <chat|voice> <level> <amount>` - add or replace an Economy cash reward.
-- `[p]levelcash remove <chat|voice> <level>` - remove an Economy cash reward.
-- `[p]levelcash list` - show configured cash rewards and Economy load status.
+- `[p]levelcoins add <chat|voice> <level> <amount>` - add or replace an Economy LWD coin reward.
+- `[p]levelcoins remove <chat|voice> <level>` - remove an Economy LWD coin reward.
+- `[p]levelcoins list` - show configured LWD coin rewards and Economy load status.
 - `[p]levelset` - show leveling settings.
 - `[p]levelset toggle` - enable or disable tracking.
 - `[p]levelset announce` - toggle level-up announcements.

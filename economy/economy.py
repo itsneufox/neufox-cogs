@@ -17,6 +17,8 @@ from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 log = logging.getLogger("red.neufox.economy")
 
 CASH = "cash"
+CURRENCY_NAME = "LWD coins"
+CURRENCY_FIELD_NAME = "LWD Coins"
 DEFAULT_API_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8787
 DEFAULT_DAILY_AMOUNT = 250
@@ -70,13 +72,11 @@ class ShopBuyButton(discord.ui.Button):
         self.guild_id = guild_id
         self.item_key = item_key
         price = int(item.get("price", 0))
-        label = f"{item.get('name', item_key)} ({price:,})"
-        if len(label) > 80:
-            label = label[:77] + "..."
+        label = f"Buy for {price:,} LWD coins"
         stock = item.get("stock")
         super().__init__(
             label=label,
-            style=discord.ButtonStyle.primary,
+            style=discord.ButtonStyle.success,
             custom_id=cog._shop_button_custom_id(guild_id, item_key),
             disabled=stock is not None and int(stock) <= 0,
         )
@@ -85,11 +85,10 @@ class ShopBuyButton(discord.ui.Button):
         await self.cog._shop_button_buy(interaction, self.guild_id, self.item_key)
 
 
-class ShopPanelView(discord.ui.View):
-    def __init__(self, cog: "Economy", guild_id: int, shop: dict[str, Any]):
+class ShopItemView(discord.ui.View):
+    def __init__(self, cog: "Economy", guild_id: int, item_key: str, item: dict[str, Any]):
         super().__init__(timeout=None)
-        for item_key, item in sorted(shop.items(), key=lambda entry: entry[0])[:25]:
-            self.add_item(ShopBuyButton(cog, guild_id, item_key, item))
+        self.add_item(ShopBuyButton(cog, guild_id, item_key, item))
 
 
 class Economy(commands.Cog):
@@ -146,7 +145,7 @@ class Economy(commands.Cog):
         prefix = ctx.clean_prefix
         embed = discord.Embed(
             title="Economy Help",
-            description="Global cash balances with claims, transfers, shop items, and API access.",
+            description="Global LWD coin balances with claims, transfers, shop items, and API access.",
             color=discord.Color.gold(),
         )
         embed.add_field(
@@ -155,11 +154,11 @@ class Economy(commands.Cog):
                 [
                     f"`{prefix}eco balance [member]` - show a balance",
                     f"`{prefix}eco pay <member> <amount>` - pay another member",
-                    f"`{prefix}eco daily` - claim daily cash",
-                    f"`{prefix}eco weekly` - claim weekly cash",
-                    f"`{prefix}eco monthly` - claim monthly cash",
-                    f"`{prefix}eco annual` - claim annual cash",
-                    f"`{prefix}eco work` - work for random cash",
+                    f"`{prefix}eco daily` - claim daily LWD coins",
+                    f"`{prefix}eco weekly` - claim weekly LWD coins",
+                    f"`{prefix}eco monthly` - claim monthly LWD coins",
+                    f"`{prefix}eco annual` - claim annual LWD coins",
+                    f"`{prefix}eco work` - work for random LWD coins",
                     f"`{prefix}eco top` - show the leaderboard",
                     f"`{prefix}eco shop` - view the server shop",
                     f"`{prefix}eco buy <item> [quantity]` - buy a shop item",
@@ -177,12 +176,12 @@ class Economy(commands.Cog):
         member = member or ctx.author
         balances = await self.get_balance(member.id)
         embed = discord.Embed(title=f"{member.display_name}'s Balance", color=discord.Color.gold())
-        embed.add_field(name="Cash", value=f"{balances[CASH]:,}", inline=True)
+        embed.add_field(name=CURRENCY_FIELD_NAME, value=f"{balances[CASH]:,}", inline=True)
         await ctx.send(embed=embed)
 
     @economy.command(name="pay")
     async def economy_pay(self, ctx: commands.Context, member: discord.Member, amount: int):
-        """Pay cash to another member."""
+        """Pay LWD coins to another member."""
         if member.bot:
             await ctx.send("You cannot pay bots.")
             return
@@ -206,37 +205,40 @@ class Economy(commands.Cog):
             await ctx.send(str(error))
             return
 
-        await ctx.send(f"Paid {member.mention} {amount:,} cash.", allowed_mentions=discord.AllowedMentions(users=True))
+        await ctx.send(
+            f"Paid {member.mention} {amount:,} {CURRENCY_NAME}.",
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     @economy.command(name="daily")
     async def economy_daily(self, ctx: commands.Context):
-        """Claim your daily cash."""
+        """Claim your daily LWD coins."""
         await self._claim_reward(ctx, "daily")
 
     @economy.command(name="weekly")
     async def economy_weekly(self, ctx: commands.Context):
-        """Claim your weekly cash."""
+        """Claim your weekly LWD coins."""
         await self._claim_reward(ctx, "weekly")
 
     @economy.command(name="monthly", aliases=["month"])
     async def economy_monthly(self, ctx: commands.Context):
-        """Claim your monthly cash."""
+        """Claim your monthly LWD coins."""
         await self._claim_reward(ctx, "monthly")
 
     @economy.command(name="annual", aliases=["yearly", "year"])
     async def economy_annual(self, ctx: commands.Context):
-        """Claim your annual cash."""
+        """Claim your annual LWD coins."""
         await self._claim_reward(ctx, "annual")
 
     @economy.command(name="work")
     async def economy_work(self, ctx: commands.Context):
-        """Work for some cash."""
+        """Work for some LWD coins."""
         await self._claim_reward(ctx, "work")
 
     @economy.command(name="shop")
     @commands.guild_only()
     async def economy_shop(self, ctx: commands.Context):
-        """Show this server's cash shop."""
+        """Show this server's LWD coin shop."""
         pages = await self._shop_embeds(ctx.guild, prefix=ctx.clean_prefix, panel=False)
         if len(pages) == 1:
             await ctx.send(embed=pages[0])
@@ -320,7 +322,7 @@ class Economy(commands.Cog):
 
     @economy.command(name="top", aliases=["leaderboard"])
     async def economy_top(self, ctx: commands.Context):
-        """Show the cash leaderboard."""
+        """Show the LWD coin leaderboard."""
         balances = await self.config.balances()
         entries = sorted(
             (
@@ -337,9 +339,9 @@ class Economy(commands.Cog):
 
         lines = []
         for rank, (user_id, amount) in enumerate(entries, start=1):
-            lines.append(f"{rank}. **{await self._display_user(ctx.guild, user_id)}** - {amount:,} cash")
+            lines.append(f"{rank}. **{await self._display_user(ctx.guild, user_id)}** - {amount:,} {CURRENCY_NAME}")
         embed = discord.Embed(
-            title="Cash Leaderboard",
+            title="LWD Coins Leaderboard",
             description="\n".join(lines),
             color=discord.Color.gold(),
         )
@@ -431,7 +433,7 @@ class Economy(commands.Cog):
         *,
         reason: str = "owner adjustment",
     ):
-        """Add cash to a user."""
+        """Add LWD coins to a user."""
         await self._owner_adjust(ctx, member, amount, "add", reason)
 
     @economy_admin.command(name="remove")
@@ -444,7 +446,7 @@ class Economy(commands.Cog):
         *,
         reason: str = "owner adjustment",
     ):
-        """Remove cash from a user."""
+        """Remove LWD coins from a user."""
         await self._owner_adjust(ctx, member, amount, "remove", reason)
 
     @economy_admin.command(name="set")
@@ -457,7 +459,7 @@ class Economy(commands.Cog):
         *,
         reason: str = "owner set",
     ):
-        """Set a user's cash balance."""
+        """Set a user's LWD coin balance."""
         await self._owner_adjust(ctx, member, amount, "set", reason)
 
     @economy_admin.group(name="claim", invoke_without_command=True)
@@ -475,11 +477,11 @@ class Economy(commands.Cog):
         work_cooldown = await self.config.work_cooldown()
         await ctx.send(
             "Claim rewards:\n"
-            f"Daily: {daily_amount:,} cash every {self._format_duration(daily_cooldown)}\n"
-            f"Weekly: {await self.config.weekly_amount():,} cash every {self._format_duration(await self.config.weekly_cooldown())}\n"
-            f"Monthly: {await self.config.monthly_amount():,} cash every {self._format_duration(await self.config.monthly_cooldown())}\n"
-            f"Annual: {await self.config.annual_amount():,} cash every {self._format_duration(await self.config.annual_cooldown())}\n"
-            f"Work: {await self.config.work_min():,}-{await self.config.work_max():,} cash every {self._format_duration(work_cooldown)}"
+            f"Daily: {daily_amount:,} {CURRENCY_NAME} every {self._format_duration(daily_cooldown)}\n"
+            f"Weekly: {await self.config.weekly_amount():,} {CURRENCY_NAME} every {self._format_duration(await self.config.weekly_cooldown())}\n"
+            f"Monthly: {await self.config.monthly_amount():,} {CURRENCY_NAME} every {self._format_duration(await self.config.monthly_cooldown())}\n"
+            f"Annual: {await self.config.annual_amount():,} {CURRENCY_NAME} every {self._format_duration(await self.config.annual_cooldown())}\n"
+            f"Work: {await self.config.work_min():,}-{await self.config.work_max():,} {CURRENCY_NAME} every {self._format_duration(work_cooldown)}"
         )
 
     @economy_admin_claim.command(name="daily")
@@ -591,7 +593,7 @@ class Economy(commands.Cog):
             item_name=name,
             item_quantity=stock if stock != -1 else None,
         )
-        await ctx.send(f"Added **{name}** to the shop for {price:,} cash.")
+        await ctx.send(f"Added **{name}** to the shop for {price:,} {CURRENCY_NAME}.")
         await self._refresh_shop_panel(ctx.guild)
 
     @economy_admin_shop.command(name="remove")
@@ -680,7 +682,7 @@ class Economy(commands.Cog):
         ctx: commands.Context,
         channel: discord.TextChannel | None = None,
     ):
-        """Set the dedicated shop channel and post the shop panel."""
+        """Set the dedicated shop channel and post item messages."""
         channel = channel or ctx.channel
         if not isinstance(channel, discord.TextChannel):
             await ctx.send("Shop channel must be a text channel.")
@@ -690,12 +692,12 @@ class Economy(commands.Cog):
             channels[str(ctx.guild.id)] = channel.id
 
         try:
-            message = await self._post_or_update_shop_panel(ctx.guild, channel, prefix=ctx.clean_prefix)
+            count = await self._post_or_update_shop_panel(ctx.guild, channel, prefix=ctx.clean_prefix)
         except discord.HTTPException:
-            await ctx.send(f"I could not post the shop panel in {channel.mention}. Check my permissions there.")
+            await ctx.send(f"I could not post the shop messages in {channel.mention}. Check my permissions there.")
             return
 
-        await ctx.send(f"Shop channel set to {channel.mention}. Panel message: {message.jump_url}")
+        await ctx.send(f"Shop channel set to {channel.mention}. Synced {count:,} item messages.")
 
     @economy_admin_shop.command(name="post", aliases=["refresh"])
     @commands.is_owner()
@@ -705,7 +707,7 @@ class Economy(commands.Cog):
         ctx: commands.Context,
         channel: discord.TextChannel | None = None,
     ):
-        """Post or refresh the dedicated shop panel."""
+        """Post or refresh the dedicated shop item messages."""
         channel = channel or await self._configured_shop_channel(ctx.guild) or ctx.channel
         if not isinstance(channel, discord.TextChannel):
             await ctx.send("Shop channel must be a text channel.")
@@ -715,18 +717,18 @@ class Economy(commands.Cog):
             channels[str(ctx.guild.id)] = channel.id
 
         try:
-            message = await self._post_or_update_shop_panel(ctx.guild, channel, prefix=ctx.clean_prefix)
+            count = await self._post_or_update_shop_panel(ctx.guild, channel, prefix=ctx.clean_prefix)
         except discord.HTTPException:
-            await ctx.send(f"I could not post the shop panel in {channel.mention}. Check my permissions there.")
+            await ctx.send(f"I could not post the shop messages in {channel.mention}. Check my permissions there.")
             return
 
-        await ctx.send(f"Shop panel refreshed in {channel.mention}: {message.jump_url}")
+        await ctx.send(f"Shop messages refreshed in {channel.mention}. Synced {count:,} item messages.")
 
     @economy_admin_shop.command(name="clearchannel")
     @commands.is_owner()
     @commands.guild_only()
     async def economy_admin_shop_clear_channel(self, ctx: commands.Context):
-        """Clear the dedicated shop channel and remove the stored panel if possible."""
+        """Clear the dedicated shop channel and remove stored item messages if possible."""
         await self._delete_shop_panel(ctx.guild)
         async with self.config.shop_channels() as channels:
             channels.pop(str(ctx.guild.id), None)
@@ -846,7 +848,10 @@ class Economy(commands.Cog):
             await ctx.send(str(error))
             return
 
-        await ctx.send(f"{member.mention} now has {balances[CASH]:,} cash.", allowed_mentions=discord.AllowedMentions(users=True))
+        await ctx.send(
+            f"{member.mention} now has {balances[CASH]:,} {CURRENCY_NAME}.",
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     async def _claim_reward(self, ctx: commands.Context, claim_type: str):
         if claim_type == "work":
@@ -875,7 +880,7 @@ class Economy(commands.Cog):
             guild_id=ctx.guild.id if ctx.guild else None,
             reason=f"{claim_type} claim",
         )
-        await ctx.send(f"You claimed {amount:,} cash. Balance: {balances[CASH]:,} cash.")
+        await ctx.send(f"You claimed {amount:,} {CURRENCY_NAME}. Balance: {balances[CASH]:,} {CURRENCY_NAME}.")
 
     async def _set_claim_settings(self, ctx: commands.Context, claim_type: str, amount: int, cooldown_seconds: int):
         if amount < 0:
@@ -890,7 +895,7 @@ class Economy(commands.Cog):
         await getattr(self.config, f"{claim_type}_amount").set(amount)
         await getattr(self.config, f"{claim_type}_cooldown").set(cooldown_seconds)
         await ctx.send(
-            f"{claim_type.title()} claim set to {amount:,} cash every {self._format_duration(cooldown_seconds)}."
+            f"{claim_type.title()} claim set to {amount:,} {CURRENCY_NAME} every {self._format_duration(cooldown_seconds)}."
         )
 
     async def _set_work_range(self, ctx: commands.Context, minimum: int, maximum: int, cooldown_seconds: int):
@@ -911,7 +916,7 @@ class Economy(commands.Cog):
         await self.config.work_amount.set(maximum)
         await self.config.work_cooldown.set(cooldown_seconds)
         await ctx.send(
-            f"Work claim set to {minimum:,}-{maximum:,} cash every {self._format_duration(cooldown_seconds)}."
+            f"Work claim set to {minimum:,}-{maximum:,} {CURRENCY_NAME} every {self._format_duration(cooldown_seconds)}."
         )
 
     async def _complete_purchase(
@@ -958,8 +963,8 @@ class Economy(commands.Cog):
 
         note_text = " " + " ".join(notes) if notes else ""
         content = (
-            f"Bought {quantity:,}x **{item_display}** for {total:,} cash.\n"
-            f"Balance: {balances[CASH]:,} cash.{note_text}"
+            f"Bought {quantity:,}x **{item_display}** for {total:,} {CURRENCY_NAME}.\n"
+            f"Balance: {balances[CASH]:,} {CURRENCY_NAME}.{note_text}"
         )
         return content, view
 
@@ -1000,7 +1005,7 @@ class Economy(commands.Cog):
         guild_id: int | None = None,
         reason: str = "api add",
     ) -> dict[str, int]:
-        """Public cog API: add cash to a user."""
+        """Public cog API: add LWD coins to a user."""
         return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="add")
 
     async def remove_balance(
@@ -1012,7 +1017,7 @@ class Economy(commands.Cog):
         guild_id: int | None = None,
         reason: str = "api remove",
     ) -> dict[str, int]:
-        """Public cog API: remove cash from a user."""
+        """Public cog API: remove LWD coins from a user."""
         return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="remove")
 
     async def set_balance(
@@ -1024,7 +1029,7 @@ class Economy(commands.Cog):
         guild_id: int | None = None,
         reason: str = "api set",
     ) -> dict[str, int]:
-        """Public cog API: set a user's cash balance."""
+        """Public cog API: set a user's LWD coin balance."""
         return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="set")
 
     async def transfer_balance(
@@ -1037,7 +1042,7 @@ class Economy(commands.Cog):
         guild_id: int | None = None,
         reason: str = "api transfer",
     ) -> dict[str, dict[str, int]]:
-        """Public cog API: transfer cash between users."""
+        """Public cog API: transfer LWD coins between users."""
         amount = self._require_amount(amount, allow_zero=False)
         async with self._lock:
             async with self.config.balances() as balances:
@@ -1217,7 +1222,7 @@ class Economy(commands.Cog):
         items = sorted(shop.items(), key=lambda item: item[0])
         if not items:
             embed = discord.Embed(
-                title="Cash Shop",
+                title="LWD Coin Shop",
                 description="No shop items are available right now.",
                 color=discord.Color.gold(),
             )
@@ -1234,7 +1239,7 @@ class Economy(commands.Cog):
             )
             if panel:
                 embed.description = (
-                    "Use the buttons below to buy one item. "
+                    "Use each item's button to buy one item. "
                     "For multiple quantities, use the buy command shown on each item."
                 )
             else:
@@ -1260,7 +1265,7 @@ class Economy(commands.Cog):
             stock_text = "Sold out"
         else:
             stock_text = f"{int(stock):,} left"
-        return f"{item.get('name', 'Item')} - {price:,} cash | {stock_text}"
+        return f"{item.get('name', 'Item')} - {price:,} {CURRENCY_NAME} | {stock_text}"
 
     def _shop_item_value(self, key: str, item: dict[str, Any], *, prefix: str | None) -> str:
         delivery = ["Inventory"]
@@ -1293,18 +1298,33 @@ class Economy(commands.Cog):
         channel: discord.TextChannel,
         *,
         prefix: str | None = None,
-    ) -> discord.Message:
-        embeds = await self._shop_embeds(guild, prefix=prefix, panel=True)
-        view = await self._shop_panel_view(guild)
-        stored_message = await self._stored_shop_panel_message(guild, channel)
-        if stored_message is not None:
-            await stored_message.edit(content=None, embeds=embeds[:10], view=view)
-            return stored_message
+    ) -> int:
+        shop = await self._get_shop(guild.id)
+        stored_messages = await self._stored_shop_item_messages(guild, channel)
+        synced = 0
+        next_messages: dict[str, dict[str, int]] = {}
 
-        message = await channel.send(embeds=embeds[:10], view=view)
+        for item_key, item in sorted(shop.items(), key=lambda entry: entry[0]):
+            embed = self._shop_item_embed(guild, item_key, item, prefix=prefix)
+            view = ShopItemView(self, guild.id, item_key, item)
+            stored_message = stored_messages.pop(item_key, None)
+            if stored_message is not None:
+                await stored_message.edit(content=None, embed=embed, view=view)
+                message = stored_message
+            else:
+                message = await channel.send(embed=embed, view=view)
+            next_messages[item_key] = {"channel_id": channel.id, "message_id": message.id}
+            synced += 1
+
+        for stale_message in stored_messages.values():
+            try:
+                await stale_message.delete()
+            except discord.HTTPException:
+                pass
+
         async with self.config.shop_messages() as messages:
-            messages[str(guild.id)] = {"channel_id": channel.id, "message_id": message.id}
-        return message
+            messages[str(guild.id)] = next_messages
+        return synced
 
     async def _refresh_shop_panel(self, guild: discord.Guild):
         channel = await self._configured_shop_channel(guild)
@@ -1313,40 +1333,87 @@ class Economy(commands.Cog):
         try:
             await self._post_or_update_shop_panel(guild, channel)
         except discord.HTTPException:
-            log.exception("Could not refresh shop panel in guild %s", guild.id)
+            log.exception("Could not refresh shop messages in guild %s", guild.id)
 
     async def _delete_shop_panel(self, guild: discord.Guild):
         messages = await self.config.shop_messages()
-        entry = messages.get(str(guild.id), {})
-        channel = guild.get_channel(int(entry.get("channel_id", 0))) if entry else None
-        if not isinstance(channel, discord.TextChannel):
-            return
-        try:
-            message = await channel.fetch_message(int(entry.get("message_id", 0)))
-            await message.delete()
-        except discord.HTTPException:
-            pass
+        guild_messages = messages.get(str(guild.id), {})
+        for _, entry in self._iter_shop_message_entries(guild_messages):
+            channel = guild.get_channel(int(entry.get("channel_id", 0)))
+            if not isinstance(channel, discord.TextChannel):
+                continue
+            try:
+                message = await channel.fetch_message(int(entry.get("message_id", 0)))
+                await message.delete()
+            except discord.HTTPException:
+                pass
 
-    async def _stored_shop_panel_message(
+    async def _stored_shop_item_messages(
         self,
         guild: discord.Guild,
         channel: discord.TextChannel,
-    ) -> discord.Message | None:
+    ) -> dict[str, discord.Message]:
         messages = await self.config.shop_messages()
-        entry = messages.get(str(guild.id), {})
-        if int(entry.get("channel_id", 0)) != channel.id:
-            return None
-        try:
-            return await channel.fetch_message(int(entry.get("message_id", 0)))
-        except discord.HTTPException:
-            return None
+        guild_messages = messages.get(str(guild.id), {})
+        resolved: dict[str, discord.Message] = {}
+        for item_key, entry in self._iter_shop_message_entries(guild_messages):
+            if int(entry.get("channel_id", 0)) != channel.id:
+                continue
+            try:
+                resolved[item_key] = await channel.fetch_message(int(entry.get("message_id", 0)))
+            except discord.HTTPException:
+                continue
+        return resolved
 
-    async def _shop_panel_view(self, guild: discord.Guild) -> discord.ui.View | None:
-        shop = await self._get_shop(guild.id)
-        if not shop:
-            return None
-        view = ShopPanelView(self, guild.id, shop)
-        return view if view.children else None
+    def _shop_item_embed(
+        self,
+        guild: discord.Guild,
+        item_key: str,
+        item: dict[str, Any],
+        *,
+        prefix: str | None = None,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title=str(item.get("name", item_key)),
+            description=str(item.get("description") or "No description.")[:1000],
+            color=discord.Color.gold(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Price", value=f"{int(item.get('price', 0)):,} {CURRENCY_NAME}", inline=True)
+        embed.add_field(name="Stock", value=self._stock_text(item.get("stock")), inline=True)
+        embed.add_field(name="Delivery", value=self._delivery_text(item), inline=True)
+        command_prefix = prefix if prefix is not None else "[prefix]"
+        name = str(item.get("name", item_key)).replace('"', '\\"')
+        embed.add_field(name="Multi-Buy", value=f"`{command_prefix}eco buy \"{name}\" <quantity>`", inline=False)
+        embed.set_footer(text="Buttons buy one item per click.")
+        return embed
+
+    def _stock_text(self, stock: Any) -> str:
+        if stock is None:
+            return "Unlimited"
+        if int(stock) <= 0:
+            return "Sold out"
+        return f"{int(stock):,} left"
+
+    def _delivery_text(self, item: dict[str, Any]) -> str:
+        delivery = ["Inventory"]
+        role_id = item.get("role_id")
+        if role_id:
+            delivery.append(f"Role <@&{role_id}>")
+        if item.get("redeem_code_enabled"):
+            delivery.append("Redeem code")
+        return "\n".join(delivery)
+
+    def _iter_shop_message_entries(self, guild_messages: Any):
+        if not isinstance(guild_messages, dict):
+            return []
+        if "message_id" in guild_messages:
+            return [("__legacy_panel__", guild_messages)]
+        return [
+            (str(item_key), entry)
+            for item_key, entry in guild_messages.items()
+            if isinstance(entry, dict)
+        ]
 
     @staticmethod
     def _shop_button_custom_id(guild_id: int, item_key: str) -> str:
@@ -1452,7 +1519,11 @@ class Economy(commands.Cog):
             return
         embed = discord.Embed(title="Economy Log", color=discord.Color.gold(), timestamp=discord.utils.utcnow())
         embed.add_field(name="Action", value=action, inline=True)
-        embed.add_field(name="Amount", value=f"{amount:,} cash" if amount is not None else "N/A", inline=True)
+        embed.add_field(
+            name="Amount",
+            value=f"{amount:,} {CURRENCY_NAME}" if amount is not None else "N/A",
+            inline=True,
+        )
         if actor_id:
             embed.add_field(name="Executor", value=f"<@{actor_id}>", inline=True)
         if target_id:
@@ -1477,17 +1548,20 @@ class Economy(commands.Cog):
     async def _restore_shop_panel_views(self):
         messages = await self.config.shop_messages()
         shops = await self.config.shops()
-        for guild_id, entry in messages.items():
+        for guild_id, guild_messages in messages.items():
             shop = shops.get(str(guild_id), {})
             if not shop:
                 continue
-            try:
-                message_id = int(entry.get("message_id", 0))
-                view = ShopPanelView(self, int(guild_id), shop)
-                if view.children:
+            for item_key, entry in self._iter_shop_message_entries(guild_messages):
+                item = shop.get(item_key)
+                if not item:
+                    continue
+                try:
+                    message_id = int(entry.get("message_id", 0))
+                    view = ShopItemView(self, int(guild_id), item_key, item)
                     self.bot.add_view(view, message_id=message_id)
-            except (AttributeError, TypeError, ValueError):
-                log.exception("Could not restore shop panel view for guild %s", guild_id)
+                except (AttributeError, TypeError, ValueError):
+                    log.exception("Could not restore shop item view for guild %s item %s", guild_id, item_key)
 
     async def _restart_api(self, host: str, port: int):
         await self._stop_api()

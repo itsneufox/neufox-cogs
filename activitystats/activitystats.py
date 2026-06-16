@@ -28,6 +28,7 @@ DEFAULT_REWARD_AMOUNTS = {
     "voice": {"1": 100, "2": 50, "3": 25},
     "reactions": {"1": 100, "2": 50, "3": 25},
 }
+CURRENCY_NAME = "LWD coins"
 
 
 class LeaderboardView(discord.ui.View):
@@ -560,7 +561,7 @@ class ActivityStats(commands.Cog):
         for category in REWARD_CATEGORIES:
             lines = []
             for rank, amount in sorted(amounts[category].items(), key=lambda item: int(item[0])):
-                lines.append(f"#{rank}: {amount:,} cash")
+                lines.append(f"#{rank}: {amount:,} {CURRENCY_NAME}")
             paid_at = int(last_paid.get(category, 0))
             if paid_at:
                 lines.append(f"Last paid: <t:{paid_at}:R>")
@@ -630,7 +631,7 @@ class ActivityStats(commands.Cog):
                 amounts[category].pop(str(rank), None)
             stored_amounts.clear()
             stored_amounts.update(amounts)
-        await ctx.send(f"{category.title()} reward for rank #{rank} set to {amount:,} cash.")
+        await ctx.send(f"{category.title()} reward for rank #{rank} set to {amount:,} {CURRENCY_NAME}.")
 
     @activitystats_rewards.command(name="run")
     @commands.admin_or_permissions(manage_guild=True)
@@ -1190,7 +1191,7 @@ class ActivityStats(commands.Cog):
                 )
             except Exception:
                 continue
-            paid_lines.append(f"#{rank} {await self._display_user(guild, user_id)}: {amount:,} cash")
+            paid_lines.append(f"#{rank} {await self._display_user(guild, user_id)}: {amount:,} {CURRENCY_NAME}")
 
         if not paid_lines:
             return None

@@ -21,6 +21,7 @@ LEADERBOARD_PAGE_SIZE = 10
 PROGRESS_BAR_WIDTH = 18
 LEVEL_KINDS = ("chat", "voice")
 LEVEL_CASH_REWARD_LIMIT = 10**12
+CURRENCY_NAME = "LWD coins"
 KIND_ALIASES = {
     "chat": "chat",
     "text": "chat",
@@ -169,17 +170,17 @@ class Leveling(commands.Cog):
             )
         await ctx.send(embed=embed)
 
-    @commands.group(name="levelcash", aliases=["levelmoney"], invoke_without_command=True)
+    @commands.group(name="levelcoins", aliases=["levelcash", "levelmoney"], invoke_without_command=True)
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
     async def levelcash(self, ctx: commands.Context):
-        """Manage Economy cash rewards for levels."""
+        """Manage Economy LWD coin rewards for levels."""
         await ctx.invoke(self.levelcash_list)
 
     @levelcash.command(name="add", aliases=["set"])
     @commands.admin_or_permissions(manage_guild=True)
     async def levelcash_add(self, ctx: commands.Context, kind: str, level: int, amount: int):
-        """Add or replace a cash reward for a level."""
+        """Add or replace an LWD coin reward for a level."""
         normalized = self._normalize_kind(kind)
         if normalized is None:
             await ctx.send("Type must be `chat` or `voice`.")
@@ -199,12 +200,12 @@ class Leveling(commands.Cog):
                 kind_rewards.pop(str(level), None)
 
         economy_note = "" if self._economy_cog() is not None else " Load Economy before members level up for payouts."
-        await ctx.send(f"{normalized.title()} level {level} cash reward set to {amount:,}.{economy_note}")
+        await ctx.send(f"{normalized.title()} level {level} LWD coin reward set to {amount:,}.{economy_note}")
 
     @levelcash.command(name="remove", aliases=["delete"])
     @commands.admin_or_permissions(manage_guild=True)
     async def levelcash_remove(self, ctx: commands.Context, kind: str, level: int):
-        """Remove a cash reward for a level."""
+        """Remove an LWD coin reward for a level."""
         normalized = self._normalize_kind(kind)
         if normalized is None:
             await ctx.send("Type must be `chat` or `voice`.")
@@ -218,25 +219,25 @@ class Leveling(commands.Cog):
             removed = kind_rewards.pop(str(level), None)
 
         if removed is None:
-            await ctx.send(f"No {normalized} cash reward is configured for level {level}.")
+            await ctx.send(f"No {normalized} LWD coin reward is configured for level {level}.")
         else:
-            await ctx.send(f"Removed the {removed:,} cash reward from {normalized} level {level}.")
+            await ctx.send(f"Removed the {removed:,} LWD coin reward from {normalized} level {level}.")
 
     @levelcash.command(name="list")
     @commands.admin_or_permissions(manage_guild=True)
     async def levelcash_list(self, ctx: commands.Context):
-        """List configured level cash rewards."""
+        """List configured level LWD coin rewards."""
         rewards = await self.config.guild(ctx.guild).level_cash_rewards()
-        embed = discord.Embed(title="Level Cash Rewards", color=DEFAULT_COLOR)
+        embed = discord.Embed(title="Level LWD Coin Rewards", color=DEFAULT_COLOR)
         embed.description = "Economy cog: loaded" if self._economy_cog() is not None else "Economy cog: not loaded"
         for kind in LEVEL_KINDS:
             lines = []
             kind_rewards = rewards.get(kind, {})
             for level, amount in sorted(kind_rewards.items(), key=lambda item: int(item[0])):
-                lines.append(f"Level {level}: {int(amount):,} cash")
+                lines.append(f"Level {level}: {int(amount):,} {CURRENCY_NAME}")
             embed.add_field(
                 name=kind.title(),
-                value="\n".join(lines) if lines else "No cash rewards configured.",
+                value="\n".join(lines) if lines else "No LWD coin rewards configured.",
                 inline=False,
             )
         await ctx.send(embed=embed)
@@ -782,7 +783,7 @@ class Leveling(commands.Cog):
             return
 
         try:
-            cash_text = f" and earned **{cash_paid:,}** cash" if cash_paid else ""
+            cash_text = f" and earned **{cash_paid:,}** {CURRENCY_NAME}" if cash_paid else ""
             await channel.send(f"{member.mention} reached {kind} level **{level}**{cash_text}!")
         except discord.HTTPException:
             pass
