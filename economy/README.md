@@ -1,18 +1,18 @@
 # Economy
 
-Global LWD coins economy cog with API access for other bots or future SA-MP integration.
+Global LWD$ economy cog with API access for other bots or future SA-MP integration.
 
 ## User commands
 
-- `[p]eco balance [member]` - show a user's LWD coin balance.
+- `[p]eco balance [member]` - show a user's LWD$ balance.
 - `[p]eco help` - show user economy commands.
-- `[p]eco pay <member> <amount>` - transfer LWD coins to another member.
-- `[p]eco daily` - claim daily LWD coins.
-- `[p]eco weekly` - claim weekly LWD coins.
-- `[p]eco monthly` - claim monthly LWD coins.
-- `[p]eco annual` - claim annual LWD coins.
-- `[p]eco work` - claim hourly LWD coins from a configurable random range.
-- `[p]eco top` - show the LWD coins leaderboard.
+- `[p]eco pay <member> <amount>` - transfer LWD$ to another member.
+- `[p]eco daily` - claim daily LWD$.
+- `[p]eco weekly` - claim weekly LWD$.
+- `[p]eco monthly` - claim monthly LWD$.
+- `[p]eco annual` - claim annual LWD$.
+- `[p]eco work` - claim hourly LWD$ from a configurable random range.
+- `[p]eco top` - show the LWD$ leaderboard.
 - `[p]eco shop` - show the server shop.
 - `[p]eco buy <item> [quantity]` - buy from the server shop. Dedicated shop item messages also have one-click buy buttons.
 - `[p]eco inventory [member]` - show inventory items.
@@ -42,7 +42,7 @@ Global LWD coins economy cog with API access for other bots or future SA-MP inte
 - `[p]eco admin shop post [channel]`
 - `[p]eco admin shop clearchannel`
 
-Use `stock -1` for unlimited stock. Shop items are server-local because role rewards and log channels are server-local, but user LWD coin balances stay global.
+Use `stock -1` for unlimited stock. Shop items are server-local because role rewards and log channels are server-local, but user LWD$ balances stay global.
 
 `shop channel` creates or updates one dedicated shop message per item, each with a buy button. Each button buys one item. Use the text command for larger quantities:
 
@@ -128,7 +128,7 @@ balances = await economy.get_balance(user_id)
 
 ## ActivityStats integration
 
-The `activitystats` cog can automatically pay LWD coin rewards through this cog for these leaderboards:
+The `activitystats` cog can automatically pay LWD$ rewards through this cog for these leaderboards:
 
 - `/topmessages` or `[p]activitystats messages`
 - `/topvoice` or `[p]activitystats voice`
@@ -136,9 +136,9 @@ The `activitystats` cog can automatically pay LWD coin rewards through this cog 
 
 The reward loop checks once per hour. Default rewards are paid once every 24 hours per server and category:
 
-- 1st place: 100 LWD coins
-- 2nd place: 50 LWD coins
-- 3rd place: 25 LWD coins
+- 1st place: 100 LWD$
+- 2nd place: 50 LWD$
+- 3rd place: 25 LWD$
 
 Manage them with:
 

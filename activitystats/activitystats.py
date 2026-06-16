@@ -28,7 +28,7 @@ DEFAULT_REWARD_AMOUNTS = {
     "voice": {"1": 100, "2": 50, "3": 25},
     "reactions": {"1": 100, "2": 50, "3": 25},
 }
-CURRENCY_NAME = "LWD coins"
+CURRENCY_NAME = "LWD$"
 
 
 class LeaderboardView(discord.ui.View):

@@ -17,8 +17,8 @@ from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 log = logging.getLogger("red.neufox.economy")
 
 CASH = "cash"
-CURRENCY_NAME = "LWD coins"
-CURRENCY_FIELD_NAME = "LWD Coins"
+CURRENCY_NAME = "LWD$"
+CURRENCY_FIELD_NAME = "LWD$"
 DEFAULT_API_HOST = "127.0.0.1"
 DEFAULT_API_PORT = 8787
 DEFAULT_DAILY_AMOUNT = 250
@@ -72,7 +72,7 @@ class ShopBuyButton(discord.ui.Button):
         self.guild_id = guild_id
         self.item_key = item_key
         price = int(item.get("price", 0))
-        label = f"Buy for {price:,} LWD coins"
+        label = f"Buy for {price:,} {CURRENCY_NAME}"
         stock = item.get("stock")
         super().__init__(
             label=label,
@@ -145,7 +145,7 @@ class Economy(commands.Cog):
         prefix = ctx.clean_prefix
         embed = discord.Embed(
             title="Economy Help",
-            description="Global LWD coin balances with claims, transfers, shop items, and API access.",
+            description="Global LWD$ balances with claims, transfers, shop items, and API access.",
             color=discord.Color.gold(),
         )
         embed.add_field(
@@ -154,11 +154,11 @@ class Economy(commands.Cog):
                 [
                     f"`{prefix}eco balance [member]` - show a balance",
                     f"`{prefix}eco pay <member> <amount>` - pay another member",
-                    f"`{prefix}eco daily` - claim daily LWD coins",
-                    f"`{prefix}eco weekly` - claim weekly LWD coins",
-                    f"`{prefix}eco monthly` - claim monthly LWD coins",
-                    f"`{prefix}eco annual` - claim annual LWD coins",
-                    f"`{prefix}eco work` - work for random LWD coins",
+                    f"`{prefix}eco daily` - claim daily LWD$",
+                    f"`{prefix}eco weekly` - claim weekly LWD$",
+                    f"`{prefix}eco monthly` - claim monthly LWD$",
+                    f"`{prefix}eco annual` - claim annual LWD$",
+                    f"`{prefix}eco work` - work for random LWD$",
                     f"`{prefix}eco top` - show the leaderboard",
                     f"`{prefix}eco shop` - view the server shop",
                     f"`{prefix}eco buy <item> [quantity]` - buy a shop item",
@@ -181,7 +181,7 @@ class Economy(commands.Cog):
 
     @economy.command(name="pay")
     async def economy_pay(self, ctx: commands.Context, member: discord.Member, amount: int):
-        """Pay LWD coins to another member."""
+        """Pay LWD$ to another member."""
         if member.bot:
             await ctx.send("You cannot pay bots.")
             return
@@ -212,33 +212,33 @@ class Economy(commands.Cog):
 
     @economy.command(name="daily")
     async def economy_daily(self, ctx: commands.Context):
-        """Claim your daily LWD coins."""
+        """Claim your daily LWD$."""
         await self._claim_reward(ctx, "daily")
 
     @economy.command(name="weekly")
     async def economy_weekly(self, ctx: commands.Context):
-        """Claim your weekly LWD coins."""
+        """Claim your weekly LWD$."""
         await self._claim_reward(ctx, "weekly")
 
     @economy.command(name="monthly", aliases=["month"])
     async def economy_monthly(self, ctx: commands.Context):
-        """Claim your monthly LWD coins."""
+        """Claim your monthly LWD$."""
         await self._claim_reward(ctx, "monthly")
 
     @economy.command(name="annual", aliases=["yearly", "year"])
     async def economy_annual(self, ctx: commands.Context):
-        """Claim your annual LWD coins."""
+        """Claim your annual LWD$."""
         await self._claim_reward(ctx, "annual")
 
     @economy.command(name="work")
     async def economy_work(self, ctx: commands.Context):
-        """Work for some LWD coins."""
+        """Work for some LWD$."""
         await self._claim_reward(ctx, "work")
 
     @economy.command(name="shop")
     @commands.guild_only()
     async def economy_shop(self, ctx: commands.Context):
-        """Show this server's LWD coin shop."""
+        """Show this server's LWD$ shop."""
         pages = await self._shop_embeds(ctx.guild, prefix=ctx.clean_prefix, panel=False)
         if len(pages) == 1:
             await ctx.send(embed=pages[0])
@@ -322,7 +322,7 @@ class Economy(commands.Cog):
 
     @economy.command(name="top", aliases=["leaderboard"])
     async def economy_top(self, ctx: commands.Context):
-        """Show the LWD coin leaderboard."""
+        """Show the LWD$ leaderboard."""
         balances = await self.config.balances()
         entries = sorted(
             (
@@ -341,7 +341,7 @@ class Economy(commands.Cog):
         for rank, (user_id, amount) in enumerate(entries, start=1):
             lines.append(f"{rank}. **{await self._display_user(ctx.guild, user_id)}** - {amount:,} {CURRENCY_NAME}")
         embed = discord.Embed(
-            title="LWD Coins Leaderboard",
+            title="LWD$ Leaderboard",
             description="\n".join(lines),
             color=discord.Color.gold(),
         )
@@ -433,7 +433,7 @@ class Economy(commands.Cog):
         *,
         reason: str = "owner adjustment",
     ):
-        """Add LWD coins to a user."""
+        """Add LWD$ to a user."""
         await self._owner_adjust(ctx, member, amount, "add", reason)
 
     @economy_admin.command(name="remove")
@@ -446,7 +446,7 @@ class Economy(commands.Cog):
         *,
         reason: str = "owner adjustment",
     ):
-        """Remove LWD coins from a user."""
+        """Remove LWD$ from a user."""
         await self._owner_adjust(ctx, member, amount, "remove", reason)
 
     @economy_admin.command(name="set")
@@ -459,7 +459,7 @@ class Economy(commands.Cog):
         *,
         reason: str = "owner set",
     ):
-        """Set a user's LWD coin balance."""
+        """Set a user's LWD$ balance."""
         await self._owner_adjust(ctx, member, amount, "set", reason)
 
     @economy_admin.group(name="claim", invoke_without_command=True)
@@ -1005,7 +1005,7 @@ class Economy(commands.Cog):
         guild_id: int | None = None,
         reason: str = "api add",
     ) -> dict[str, int]:
-        """Public cog API: add LWD coins to a user."""
+        """Public cog API: add LWD$ to a user."""
         return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="add")
 
     async def remove_balance(
@@ -1017,7 +1017,7 @@ class Economy(commands.Cog):
         guild_id: int | None = None,
         reason: str = "api remove",
     ) -> dict[str, int]:
-        """Public cog API: remove LWD coins from a user."""
+        """Public cog API: remove LWD$ from a user."""
         return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="remove")
 
     async def set_balance(
@@ -1029,7 +1029,7 @@ class Economy(commands.Cog):
         guild_id: int | None = None,
         reason: str = "api set",
     ) -> dict[str, int]:
-        """Public cog API: set a user's LWD coin balance."""
+        """Public cog API: set a user's LWD$ balance."""
         return await self._adjust_balance(user_id, amount, actor_id=actor_id, guild_id=guild_id, reason=reason, operation="set")
 
     async def transfer_balance(
@@ -1042,7 +1042,7 @@ class Economy(commands.Cog):
         guild_id: int | None = None,
         reason: str = "api transfer",
     ) -> dict[str, dict[str, int]]:
-        """Public cog API: transfer LWD coins between users."""
+        """Public cog API: transfer LWD$ between users."""
         amount = self._require_amount(amount, allow_zero=False)
         async with self._lock:
             async with self.config.balances() as balances:
