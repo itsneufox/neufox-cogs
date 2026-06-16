@@ -19,6 +19,8 @@ FFMPEG_OPTIONS = {
     "options": "-vn",
 }
 STATUS_POLL_SECONDS = 30
+AUTO_SYNC_DELAY_SECONDS = 3
+AUTO_LEAVE_GRACE_SECONDS = 10
 RADIO_SHOWS = (
     {"name": "Early Haul", "start": 6, "end": 12},
     {"name": "Midday Cruise", "start": 12, "end": 16},
@@ -45,10 +47,13 @@ class Radio(commands.Cog):
         )
         self._manual_stop: set[int] = set()
         self._auto_leave: set[int] = set()
+        self._auto_sync_tasks: dict[int, asyncio.Task] = {}
         self._reconnect_tasks: dict[int, asyncio.Task] = {}
         self._status_task = self.bot.loop.create_task(self._status_loop())
 
     def cog_unload(self):
+        for task in self._auto_sync_tasks.values():
+            task.cancel()
         for task in self._reconnect_tasks.values():
             task.cancel()
         self._status_task.cancel()
@@ -264,12 +269,11 @@ class Radio(commands.Cog):
         if not data.get("auto_play") or not data.get("voice_channel_id"):
             return
         channel_id = int(data["voice_channel_id"])
-        if before.channel and before.channel.id == channel_id:
-            self.bot.loop.create_task(self._sync_auto_play_soon(member.guild.id))
-            return
-        if after.channel and after.channel.id == channel_id:
-            self.bot.loop.create_task(self._sync_auto_play_soon(member.guild.id))
-            return
+        if (
+            (before.channel and before.channel.id == channel_id)
+            or (after.channel and after.channel.id == channel_id)
+        ):
+            self._schedule_auto_sync(member.guild.id)
 
     async def _ensure_voice_client(
         self,
@@ -352,13 +356,30 @@ class Radio(commands.Cog):
         if task is not None:
             task.cancel()
 
-    async def _sync_auto_play_soon(self, guild_id: int):
-        await asyncio.sleep(1)
-        guild = self.bot.get_guild(guild_id)
-        if guild is not None:
-            await self._sync_auto_play(guild)
+    def _schedule_auto_sync(self, guild_id: int):
+        task = self._auto_sync_tasks.pop(guild_id, None)
+        if task is not None:
+            task.cancel()
+        self._auto_sync_tasks[guild_id] = self.bot.loop.create_task(self._sync_auto_play_soon(guild_id))
 
-    async def _sync_auto_play(self, guild: discord.Guild, data: dict | None = None):
+    async def _sync_auto_play_soon(self, guild_id: int):
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(AUTO_SYNC_DELAY_SECONDS)
+            guild = self.bot.get_guild(guild_id)
+            if guild is not None:
+                await self._sync_auto_play(guild, debounce_leave=True)
+        finally:
+            if self._auto_sync_tasks.get(guild_id) is current_task:
+                self._auto_sync_tasks.pop(guild_id, None)
+
+    async def _sync_auto_play(
+        self,
+        guild: discord.Guild,
+        data: dict | None = None,
+        *,
+        debounce_leave: bool = False,
+    ):
         data = data or await self.config.guild(guild).all()
         if not data.get("auto_play") or not data.get("stream_url") or not data.get("voice_channel_id"):
             return
@@ -371,6 +392,17 @@ class Radio(commands.Cog):
         has_listener = self._has_human_listener(channel)
 
         if not has_listener:
+            if debounce_leave:
+                await asyncio.sleep(AUTO_LEAVE_GRACE_SECONDS)
+                data = await self.config.guild(guild).all()
+                if not data.get("auto_play") or not data.get("voice_channel_id"):
+                    return
+                channel = guild.get_channel(int(data["voice_channel_id"]))
+                if not isinstance(channel, discord.VoiceChannel):
+                    return
+                voice_client = guild.voice_client
+                if self._has_human_listener(channel):
+                    return
             if voice_client and voice_client.channel and voice_client.channel.id == channel.id:
                 self._auto_leave.add(guild.id)
                 self._cancel_reconnect(guild.id)
