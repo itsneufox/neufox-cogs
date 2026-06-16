@@ -13,6 +13,8 @@ Defaults are based on the Ree6 leveling behavior:
 
 - `[p]level [chat|voice] [member]` - show a member's level card.
 - `[p]leaderboard [chat|voice]` - show the XP leaderboard.
+- `/xp [member] [kind]` - show a member's level card.
+- `/topxp [kind]` - show the XP leaderboard.
 - `[p]levelrole add <chat|voice> <level> <role>` - add or replace a level role.
 - `[p]levelrole remove <chat|voice> <level> [role]` - remove a level role.
 - `[p]levelrole list` - show configured level roles.

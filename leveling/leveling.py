@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 import discord
-from redbot.core import Config, commands
+from redbot.core import Config, app_commands, commands
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 
@@ -18,6 +18,7 @@ DEFAULT_CHAT_COOLDOWN = 30
 DEFAULT_VOICE_XP_MIN = 5
 DEFAULT_VOICE_XP_MAX = 10
 LEADERBOARD_PAGE_SIZE = 10
+PAGINATION_TIMEOUT = 120
 PROGRESS_BAR_WIDTH = 18
 LEVEL_KINDS = ("chat", "voice")
 LEVEL_CASH_REWARD_LIMIT = 10**12
@@ -32,6 +33,68 @@ KIND_ALIASES = {
 }
 
 log = logging.getLogger("red.neufox.leveling")
+
+
+class LevelingLeaderboardView(discord.ui.View):
+    def __init__(self, owner_id: int, embeds: list[discord.Embed]):
+        super().__init__(timeout=PAGINATION_TIMEOUT)
+        self.owner_id = owner_id
+        self.embeds = embeds
+        self.message: discord.Message | None = None
+        self.page = 0
+        self._update_buttons()
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message("This leaderboard is not yours to control.", ephemeral=True)
+        return False
+
+    @discord.ui.button(label="First", style=discord.ButtonStyle.secondary)
+    async def first_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = 0
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
+    @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = max(0, self.page - 1)
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = min(len(self.embeds) - 1, self.page + 1)
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
+    @discord.ui.button(label="Last", style=discord.ButtonStyle.secondary)
+    async def last_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page = len(self.embeds) - 1
+        self._update_buttons()
+        await interaction.response.edit_message(embed=self.embeds[self.page], view=self)
+
+    async def on_timeout(self):
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        if self.message is not None:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    def _update_buttons(self):
+        disabled = len(self.embeds) <= 1
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = disabled
+        if disabled:
+            return
+        self.first_page.disabled = self.page == 0
+        self.previous_page.disabled = self.page == 0
+        self.next_page.disabled = self.page >= len(self.embeds) - 1
+        self.last_page.disabled = self.page >= len(self.embeds) - 1
 
 
 class Leveling(commands.Cog):
@@ -73,6 +136,36 @@ class Leveling(commands.Cog):
         member = member or ctx.author
         await ctx.send(embed=await self._rank_embed(ctx.guild, member, kind))
 
+    @app_commands.command(name="xp", description="Show your XP level and rank.")
+    @app_commands.describe(
+        member="The member to show XP for.",
+        kind="Choose chat or voice XP.",
+    )
+    @app_commands.choices(
+        kind=[
+            app_commands.Choice(name="Chat", value="chat"),
+            app_commands.Choice(name="Voice", value="voice"),
+        ]
+    )
+    @app_commands.guild_only()
+    async def xp(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member | None = None,
+        kind: str = "chat",
+    ):
+        """Show your XP level and rank."""
+        await interaction.response.defer()
+        normalized = self._normalize_kind(kind)
+        if normalized is None:
+            await self._send_interaction_message(interaction, "Type must be `chat` or `voice`.", ephemeral=True)
+            return
+        target = member or interaction.user
+        if not isinstance(target, discord.Member):
+            await self._send_interaction_message(interaction, "This command must be used in a server.", ephemeral=True)
+            return
+        await self._send_interaction_embed(interaction, await self._rank_embed(interaction.guild, target, normalized))
+
     @commands.command(name="leaderboard", aliases=["lb", "levels"])
     @commands.guild_only()
     async def leveling_leaderboard(self, ctx: commands.Context, kind: str = "chat"):
@@ -87,6 +180,25 @@ class Leveling(commands.Cog):
             await ctx.send(embed=embeds[0])
         else:
             await menu(ctx, embeds, DEFAULT_CONTROLS)
+
+    @app_commands.command(name="topxp", description="Show the XP leaderboard.")
+    @app_commands.describe(kind="Choose chat or voice XP.")
+    @app_commands.choices(
+        kind=[
+            app_commands.Choice(name="Chat", value="chat"),
+            app_commands.Choice(name="Voice", value="voice"),
+        ]
+    )
+    @app_commands.guild_only()
+    async def topxp(self, interaction: discord.Interaction, kind: str = "chat"):
+        """Show the chat or voice XP leaderboard."""
+        await interaction.response.defer()
+        normalized = self._normalize_kind(kind)
+        if normalized is None:
+            await self._send_interaction_message(interaction, "Type must be `chat` or `voice`.", ephemeral=True)
+            return
+        embeds = await self._leaderboard_embeds(interaction.guild, normalized)
+        await self._send_paginated_interaction(interaction, embeds)
 
     @commands.group(name="levelrole", invoke_without_command=True)
     @commands.guild_only()
@@ -570,6 +682,44 @@ class Leveling(commands.Cog):
             embed.set_footer(text=f"Page {len(pages) + 1}/{total_pages}")
             pages.append(embed)
         return pages
+
+    async def _send_paginated_interaction(
+        self,
+        interaction: discord.Interaction,
+        embeds: list[discord.Embed],
+    ):
+        if len(embeds) <= 1:
+            await self._send_interaction_embed(interaction, embeds[0])
+            return
+
+        view = LevelingLeaderboardView(interaction.user.id, embeds)
+        if interaction.response.is_done():
+            view.message = await interaction.followup.send(embed=embeds[0], view=view, wait=True)
+            return
+        await interaction.response.send_message(embed=embeds[0], view=view)
+        view.message = await interaction.original_response()
+
+    async def _send_interaction_embed(
+        self,
+        interaction: discord.Interaction,
+        embed: discord.Embed,
+    ):
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed)
+        else:
+            await interaction.response.send_message(embed=embed)
+
+    async def _send_interaction_message(
+        self,
+        interaction: discord.Interaction,
+        content: str,
+        *,
+        ephemeral: bool = False,
+    ):
+        if interaction.response.is_done():
+            await interaction.followup.send(content, ephemeral=ephemeral)
+        else:
+            await interaction.response.send_message(content, ephemeral=ephemeral)
 
     async def _message_can_earn_xp(self, message: discord.Message) -> bool:
         if message.author.bot or message.guild is None:
