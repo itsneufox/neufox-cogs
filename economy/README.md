@@ -15,8 +15,21 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco top` - show the LWD$ leaderboard.
 - `[p]eco shop` - show the server shop.
 - `[p]eco buy <item> [quantity]` - buy from the server shop. Dedicated shop item messages also have one-click buy buttons.
+- `[p]eco gift <member> <item> [quantity]` - gift an allowed inventory item.
 - `[p]eco inventory [member]` - show inventory items.
 - `[p]eco codes` - DM your unredeemed in-game item codes.
+
+Shortcut commands are also available for common user actions:
+
+- `[p]balance [member]` / `[p]bal [member]`
+- `[p]pay <member> <amount>`
+- `[p]daily`, `[p]weekly`, `[p]monthly`, `[p]annual`, `[p]work`
+- `[p]shop`
+- `[p]buy <item> [quantity]`
+- `[p]gift <member> <item> [quantity]`
+- `[p]inventory [member]` / `[p]inv [member]`
+- `[p]codes`
+- `[p]ecotop`
 
 ## Owner commands
 
@@ -38,11 +51,14 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco admin shop role <name> [role]`
 - `[p]eco admin shop code <name> [true|false]`
 - `[p]eco admin shop stock <name> <stock>`
+- `[p]eco admin shop limit <name> <limit>`
+- `[p]eco admin shop giftable <name> [true|false]`
 - `[p]eco admin shop channel [channel]`
 - `[p]eco admin shop post [channel]`
 - `[p]eco admin shop clearchannel`
 
-Use `stock -1` for unlimited stock. Shop items are server-local because role rewards and log channels are server-local, but user LWD$ balances stay global.
+Use `stock -1` for unlimited stock and `limit -1` for unlimited purchases per member. Shop items are server-local because role rewards and log channels are server-local, but user LWD$ balances stay global.
+Code-generated, non-role items become giftable by default. Role reward items are locked and cannot be gifted.
 
 `shop channel` creates or updates one dedicated shop message per item, each with a buy button. Each button buys one item. Use the text command for larger quantities:
 

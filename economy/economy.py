@@ -162,13 +162,105 @@ class Economy(commands.Cog):
                     f"`{prefix}eco top` - show the leaderboard",
                     f"`{prefix}eco shop` - view the server shop",
                     f"`{prefix}eco buy <item> [quantity]` - buy a shop item",
+                    f"`{prefix}eco gift <member> <item> [quantity]` - gift an inventory item",
                     f"`{prefix}eco inventory [member]` - show inventory",
                     f"`{prefix}eco codes` - DM your unredeemed in-game item codes",
                 ]
             ),
             inline=False,
         )
+        embed.add_field(
+            name="Shortcuts",
+            value="\n".join(
+                [
+                    f"`{prefix}balance [member]`, `{prefix}bal [member]`",
+                    f"`{prefix}pay <member> <amount>`",
+                    f"`{prefix}daily`, `{prefix}weekly`, `{prefix}monthly`, `{prefix}annual`, `{prefix}work`",
+                    f"`{prefix}shop`, `{prefix}buy <item> [quantity]`",
+                    f"`{prefix}inventory [member]`, `{prefix}inv [member]`",
+                    f"`{prefix}gift <member> <item> [quantity]`",
+                    f"`{prefix}codes`, `{prefix}ecotop`",
+                ]
+            ),
+            inline=False,
+        )
         await ctx.send(embed=embed)
+
+    @commands.command(name="balance", aliases=["bal"])
+    async def economy_balance_short(self, ctx: commands.Context, member: discord.Member | None = None):
+        """Shortcut for eco balance."""
+        await ctx.invoke(self.economy_balance, member=member)
+
+    @commands.command(name="pay")
+    async def economy_pay_short(self, ctx: commands.Context, member: discord.Member, amount: int):
+        """Shortcut for eco pay."""
+        await ctx.invoke(self.economy_pay, member=member, amount=amount)
+
+    @commands.command(name="daily")
+    async def economy_daily_short(self, ctx: commands.Context):
+        """Shortcut for eco daily."""
+        await ctx.invoke(self.economy_daily)
+
+    @commands.command(name="weekly")
+    async def economy_weekly_short(self, ctx: commands.Context):
+        """Shortcut for eco weekly."""
+        await ctx.invoke(self.economy_weekly)
+
+    @commands.command(name="monthly", aliases=["month"])
+    async def economy_monthly_short(self, ctx: commands.Context):
+        """Shortcut for eco monthly."""
+        await ctx.invoke(self.economy_monthly)
+
+    @commands.command(name="annual", aliases=["yearly", "year"])
+    async def economy_annual_short(self, ctx: commands.Context):
+        """Shortcut for eco annual."""
+        await ctx.invoke(self.economy_annual)
+
+    @commands.command(name="work")
+    async def economy_work_short(self, ctx: commands.Context):
+        """Shortcut for eco work."""
+        await ctx.invoke(self.economy_work)
+
+    @commands.command(name="shop")
+    @commands.guild_only()
+    async def economy_shop_short(self, ctx: commands.Context):
+        """Shortcut for eco shop."""
+        await ctx.invoke(self.economy_shop)
+
+    @commands.command(name="buy")
+    @commands.guild_only()
+    async def economy_buy_short(self, ctx: commands.Context, item_name: str, quantity: int = 1):
+        """Shortcut for eco buy."""
+        await ctx.invoke(self.economy_buy, item_name=item_name, quantity=quantity)
+
+    @commands.command(name="gift", aliases=["giveitem"])
+    @commands.guild_only()
+    async def economy_gift_short(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+        item_name: str,
+        quantity: int = 1,
+    ):
+        """Shortcut for eco gift."""
+        await ctx.invoke(self.economy_gift, member=member, item_name=item_name, quantity=quantity)
+
+    @commands.command(name="codes", aliases=["redeemcodes"])
+    @commands.guild_only()
+    async def economy_codes_short(self, ctx: commands.Context):
+        """Shortcut for eco codes."""
+        await ctx.invoke(self.economy_codes)
+
+    @commands.command(name="inventory", aliases=["inv"])
+    @commands.guild_only()
+    async def economy_inventory_short(self, ctx: commands.Context, member: discord.Member | None = None):
+        """Shortcut for eco inventory."""
+        await ctx.invoke(self.economy_inventory, member=member)
+
+    @commands.command(name="ecotop", aliases=["richtop"])
+    async def economy_top_short(self, ctx: commands.Context):
+        """Shortcut for eco top."""
+        await ctx.invoke(self.economy_top)
 
     @economy.command(name="balance", aliases=["bal"])
     async def economy_balance(self, ctx: commands.Context, member: discord.Member | None = None):
@@ -274,6 +366,43 @@ class Economy(commands.Cog):
             view=view,
         )
         await self._refresh_shop_panel(ctx.guild)
+
+    @economy.command(name="gift", aliases=["giveitem"])
+    @commands.guild_only()
+    async def economy_gift(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+        item_name: str,
+        quantity: int = 1,
+    ):
+        """Gift an allowed inventory item to another member."""
+        if member.bot:
+            await ctx.send("You cannot gift items to bots.")
+            return
+        if member.id == ctx.author.id:
+            await ctx.send("You cannot gift items to yourself.")
+            return
+        if quantity <= 0:
+            await ctx.send("Quantity must be positive.")
+            return
+        if quantity > 1000:
+            await ctx.send("Quantity cannot exceed 1,000.")
+            return
+
+        try:
+            result = await self.gift_item(ctx.guild, ctx.author, member, item_name, quantity)
+        except EconomyError as error:
+            await ctx.send(str(error))
+            return
+
+        code_note = ""
+        if result["codes_transferred"]:
+            code_note = f" Transferred {result['codes_transferred']:,} redeem code(s) too; they can run `{ctx.clean_prefix}eco codes`."
+        await ctx.send(
+            f"Gifted {quantity:,}x **{result['item_name']}** to {member.mention}.{code_note}",
+            allowed_mentions=discord.AllowedMentions(users=True),
+        )
 
     @economy.command(name="codes", aliases=["redeemcodes"])
     @commands.guild_only()
@@ -400,10 +529,12 @@ class Economy(commands.Cog):
                     f"`{prefix}eco admin shop role <name> [role]`",
                     f"`{prefix}eco admin shop code <name> [true|false]`",
                     f"`{prefix}eco admin shop stock <name> <stock>`",
+                    f"`{prefix}eco admin shop limit <name> <limit>`",
+                    f"`{prefix}eco admin shop giftable <name> [true|false]`",
                     f"`{prefix}eco admin shop channel [channel]`",
                     f"`{prefix}eco admin shop post [channel]`",
                     f"`{prefix}eco admin shop clearchannel`",
-                    "`stock -1` means unlimited.",
+                    "`stock -1` and `limit -1` mean unlimited.",
                 ]
             ),
             inline=False,
@@ -579,6 +710,8 @@ class Economy(commands.Cog):
             "description": str(description or "No description.")[:500],
             "role_id": None,
             "redeem_code_enabled": False,
+            "max_per_user": None,
+            "giftable": False,
         }
         async with self.config.shops() as shops:
             shop = shops.setdefault(str(ctx.guild.id), {})
@@ -634,6 +767,8 @@ class Economy(commands.Cog):
                 await ctx.send("That item is not in the shop.")
                 return
             item["role_id"] = role.id if role else None
+            if role:
+                item["giftable"] = False
         await ctx.send(f"Role reward for **{item.get('name', name)}** {'set to ' + role.mention if role else 'cleared'}.")
         await self._refresh_shop_panel(ctx.guild)
 
@@ -650,6 +785,8 @@ class Economy(commands.Cog):
                 await ctx.send("That item is not in the shop.")
                 return
             item["redeem_code_enabled"] = bool(enabled)
+            if enabled and not item.get("role_id"):
+                item["giftable"] = True
         await ctx.send(
             f"Redeem codes for **{item.get('name', name)}** are now {'enabled' if enabled else 'disabled'}."
         )
@@ -672,6 +809,49 @@ class Economy(commands.Cog):
                 return
             item["stock"] = None if stock == -1 else int(stock)
         await ctx.send(f"Stock for **{item.get('name', name)}** set to {'unlimited' if stock == -1 else f'{stock:,}'}.")
+        await self._refresh_shop_panel(ctx.guild)
+
+    @economy_admin_shop.command(name="limit")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_shop_limit(self, ctx: commands.Context, name: str, limit: int):
+        """Set the maximum quantity a member can buy. Use -1 for unlimited."""
+        if limit < -1 or limit == 0:
+            await ctx.send("Limit must be -1 for unlimited or a positive number.")
+            return
+        key = self._shop_key(name)
+        async with self.config.shops() as shops:
+            shop = shops.setdefault(str(ctx.guild.id), {})
+            item = shop.get(key)
+            if not item:
+                await ctx.send("That item is not in the shop.")
+                return
+            item["max_per_user"] = None if limit == -1 else int(limit)
+        await ctx.send(
+            f"Purchase limit for **{item.get('name', name)}** set to "
+            f"{'unlimited' if limit == -1 else f'{limit:,} per member'}."
+        )
+        await self._refresh_shop_panel(ctx.guild)
+
+    @economy_admin_shop.command(name="giftable")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_shop_giftable(self, ctx: commands.Context, name: str, enabled: bool = True):
+        """Set whether an inventory item can be gifted."""
+        key = self._shop_key(name)
+        async with self.config.shops() as shops:
+            shop = shops.setdefault(str(ctx.guild.id), {})
+            item = shop.get(key)
+            if not item:
+                await ctx.send("That item is not in the shop.")
+                return
+            if enabled and item.get("role_id"):
+                await ctx.send("Role reward items cannot be giftable. Use a redeem-code item for giftable VIP.")
+                return
+            item["giftable"] = bool(enabled)
+        await ctx.send(
+            f"**{item.get('name', name)}** is now {'giftable' if enabled else 'not giftable'}."
+        )
         await self._refresh_shop_panel(ctx.guild)
 
     @economy_admin_shop.command(name="channel")
@@ -1166,19 +1346,26 @@ class Economy(commands.Cog):
                 total = price * quantity
                 if total > MAX_AMOUNT:
                     raise EconomyError(f"Amount cannot exceed {MAX_AMOUNT:,}.")
-                async with self.config.balances() as balances:
-                    account = self._account_from_mapping(balances, member.id)
-                    if account[CASH] < total:
-                        raise EconomyError("Insufficient funds.")
-                    account[CASH] -= total
-                    balances[str(member.id)] = account
-                if stock is not None:
-                    item["stock"] = int(stock) - quantity
-                    shop[key] = item
-            async with self.config.inventories() as inventories:
-                guild_inventory = inventories.setdefault(str(guild.id), {})
-                inventory = guild_inventory.setdefault(str(member.id), {})
-                inventory[item.get("name", key)] = int(inventory.get(item.get("name", key), 0)) + quantity
+                item_inventory_name = str(item.get("name", key))
+                max_per_user = item.get("max_per_user")
+                async with self.config.inventories() as inventories:
+                    guild_inventory = inventories.setdefault(str(guild.id), {})
+                    inventory = guild_inventory.setdefault(str(member.id), {})
+                    current_quantity = int(inventory.get(item_inventory_name, 0))
+                    if max_per_user is not None and current_quantity + quantity > int(max_per_user):
+                        raise EconomyError(
+                            f"You can only buy {int(max_per_user):,}x **{item_inventory_name}**."
+                        )
+                    async with self.config.balances() as balances:
+                        account = self._account_from_mapping(balances, member.id)
+                        if account[CASH] < total:
+                            raise EconomyError("Insufficient funds.")
+                        account[CASH] -= total
+                        balances[str(member.id)] = account
+                    if stock is not None:
+                        item["stock"] = int(stock) - quantity
+                        shop[key] = item
+                    inventory[item_inventory_name] = current_quantity + quantity
             await self._append_ledger(
                 "buy",
                 from_user_id=member.id,
@@ -1201,6 +1388,88 @@ class Economy(commands.Cog):
         )
         return item, account
 
+    async def gift_item(
+        self,
+        guild: discord.Guild,
+        sender: discord.Member,
+        recipient: discord.Member,
+        item_name: str,
+        quantity: int = 1,
+    ) -> dict[str, Any]:
+        """Public cog API: gift a giftable inventory item to another member."""
+        quantity = self._require_amount(quantity, allow_zero=False)
+        if sender.id == recipient.id:
+            raise EconomyError("You cannot gift items to yourself.")
+
+        async with self._lock:
+            shops = await self.config.shops()
+            item_key, item = self._find_shop_item(shops.get(str(guild.id), {}), item_name)
+            if item is None or item_key is None:
+                raise EconomyError("That item is not in this server's shop.")
+            if item.get("role_id"):
+                raise EconomyError("That item is locked and cannot be gifted.")
+            if not self._item_is_giftable(item):
+                raise EconomyError("That item cannot be gifted.")
+
+            inventory_name = str(item.get("name", item_key))
+            codes_transferred = 0
+            async with self.config.inventories() as inventories:
+                guild_inventory = inventories.setdefault(str(guild.id), {})
+                sender_inventory = guild_inventory.setdefault(str(sender.id), {})
+                recipient_inventory = guild_inventory.setdefault(str(recipient.id), {})
+
+                current_quantity = int(sender_inventory.get(inventory_name, 0))
+                if current_quantity < quantity:
+                    raise EconomyError(f"You do not have {quantity:,}x **{inventory_name}**.")
+
+                if item.get("redeem_code_enabled"):
+                    async with self.config.redeem_codes() as codes:
+                        transferred_codes = self._transfer_unredeemed_codes(
+                            codes,
+                            guild_id=guild.id,
+                            from_user_id=sender.id,
+                            to_user_id=recipient.id,
+                            item_name=inventory_name,
+                            quantity=quantity,
+                        )
+                    codes_transferred = len(transferred_codes)
+
+                remaining = current_quantity - quantity
+                if remaining:
+                    sender_inventory[inventory_name] = remaining
+                else:
+                    sender_inventory.pop(inventory_name, None)
+                recipient_inventory[inventory_name] = int(recipient_inventory.get(inventory_name, 0)) + quantity
+                if not sender_inventory:
+                    guild_inventory.pop(str(sender.id), None)
+
+            await self._append_ledger(
+                "gift",
+                from_user_id=sender.id,
+                to_user_id=recipient.id,
+                amount=0,
+                actor_id=sender.id,
+                guild_id=guild.id,
+                reason=f"gifted {quantity}x {inventory_name}",
+                log_to_channel=False,
+            )
+
+        await self._send_economy_log(
+            guild,
+            "item gifted",
+            amount=None,
+            actor_id=sender.id,
+            target_id=recipient.id,
+            reason="gift",
+            item_name=inventory_name,
+            item_quantity=quantity,
+        )
+        return {
+            "item_name": inventory_name,
+            "quantity": quantity,
+            "codes_transferred": codes_transferred,
+        }
+
     async def _get_shop(self, guild_id: int) -> dict[str, Any]:
         shops = await self.config.shops()
         return dict(shops.get(str(guild_id), {}))
@@ -1210,6 +1479,99 @@ class Economy(commands.Cog):
         guild_inventory = inventories.get(str(guild_id), {})
         inventory = guild_inventory.get(str(user_id), {})
         return {str(name): int(quantity) for name, quantity in inventory.items()}
+
+    def _find_shop_item(
+        self,
+        shop: dict[str, Any],
+        item_name: str,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        key = self._shop_key(item_name)
+        direct = shop.get(key)
+        if isinstance(direct, dict):
+            return key, dict(direct)
+        for item_key, item in shop.items():
+            if not isinstance(item, dict):
+                continue
+            if self._shop_key(item.get("name", item_key)) == key:
+                return str(item_key), dict(item)
+        return None, None
+
+    @staticmethod
+    def _item_is_giftable(item: dict[str, Any]) -> bool:
+        if item.get("role_id"):
+            return False
+        if "giftable" in item:
+            return bool(item.get("giftable"))
+        return bool(item.get("redeem_code_enabled"))
+
+    def _transfer_unredeemed_codes(
+        self,
+        codes: dict[str, Any],
+        *,
+        guild_id: int,
+        from_user_id: int,
+        to_user_id: int,
+        item_name: str,
+        quantity: int,
+    ) -> list[str]:
+        candidates: list[tuple[str, dict[str, Any], int]] = []
+        for code, entry in codes.items():
+            if not isinstance(entry, dict):
+                continue
+            if int(entry.get("guild_id", 0)) != int(guild_id):
+                continue
+            if int(entry.get("user_id", 0)) != int(from_user_id):
+                continue
+            if entry.get("redeemed_at"):
+                continue
+            if str(entry.get("item_name", "")) != str(item_name):
+                continue
+            entry_quantity = int(entry.get("quantity", 1))
+            if entry_quantity > 0:
+                candidates.append((str(code), dict(entry), entry_quantity))
+
+        candidates.sort(key=lambda candidate: int(candidate[1].get("created_at", 0)))
+        if sum(entry_quantity for _, _, entry_quantity in candidates) < quantity:
+            raise EconomyError(f"You do not have enough unredeemed codes for **{item_name}**.")
+
+        remaining = quantity
+        now = int(time.time())
+        transferred_codes: list[str] = []
+        for code, entry, entry_quantity in candidates:
+            if remaining <= 0:
+                break
+            if entry_quantity <= remaining:
+                new_code = self._new_unique_redeem_code(codes)
+                gift_entry = dict(entry)
+                gift_entry["user_id"] = int(to_user_id)
+                gift_entry["created_at"] = now
+                gift_entry["gifted_by"] = int(from_user_id)
+                gift_entry["gifted_at"] = now
+                gift_entry["split_from"] = code
+                codes.pop(code, None)
+                codes[new_code] = gift_entry
+                transferred_codes.append(new_code)
+                remaining -= entry_quantity
+                continue
+
+            gift_quantity = remaining
+            new_code = self._new_unique_redeem_code(codes)
+            source_entry = dict(entry)
+            source_entry["quantity"] = entry_quantity - gift_quantity
+            codes[code] = source_entry
+
+            gift_entry = dict(entry)
+            gift_entry["quantity"] = gift_quantity
+            gift_entry["user_id"] = int(to_user_id)
+            gift_entry["created_at"] = now
+            gift_entry["gifted_by"] = int(from_user_id)
+            gift_entry["gifted_at"] = now
+            gift_entry["split_from"] = code
+            codes[new_code] = gift_entry
+            transferred_codes.append(new_code)
+            remaining = 0
+
+        return transferred_codes
 
     async def _shop_embeds(
         self,
@@ -1222,7 +1584,7 @@ class Economy(commands.Cog):
         items = sorted(shop.items(), key=lambda item: item[0])
         if not items:
             embed = discord.Embed(
-                title="LWD Coin Shop",
+                title="LWD$ Shop",
                 description="No shop items are available right now.",
                 color=discord.Color.gold(),
             )
@@ -1281,6 +1643,8 @@ class Economy(commands.Cog):
         return (
             f"{description}\n"
             f"Delivery: {', '.join(delivery)}\n"
+            f"Limit: {self._limit_text(item.get('max_per_user'))}\n"
+            f"Giftable: {self._giftable_text(item)}\n"
             f"Buy: `{command_prefix}eco buy \"{name}\"`"
         )
 
@@ -1381,6 +1745,8 @@ class Economy(commands.Cog):
         )
         embed.add_field(name="Price", value=f"{int(item.get('price', 0)):,} {CURRENCY_NAME}", inline=True)
         embed.add_field(name="Stock", value=self._stock_text(item.get("stock")), inline=True)
+        embed.add_field(name="Limit", value=self._limit_text(item.get("max_per_user")), inline=True)
+        embed.add_field(name="Giftable", value=self._giftable_text(item), inline=True)
         embed.add_field(name="Delivery", value=self._delivery_text(item), inline=True)
         command_prefix = prefix if prefix is not None else "[prefix]"
         name = str(item.get("name", item_key)).replace('"', '\\"')
@@ -1394,6 +1760,19 @@ class Economy(commands.Cog):
         if int(stock) <= 0:
             return "Sold out"
         return f"{int(stock):,} left"
+
+    def _limit_text(self, limit: Any) -> str:
+        if limit is None:
+            return "Unlimited"
+        limit = int(limit)
+        if limit <= 0:
+            return "Unlimited"
+        if limit == 1:
+            return "1 per member"
+        return f"{limit:,} per member"
+
+    def _giftable_text(self, item: dict[str, Any]) -> str:
+        return "Yes" if self._item_is_giftable(item) else "No"
 
     def _delivery_text(self, item: dict[str, Any]) -> str:
         delivery = ["Inventory"]
@@ -1706,6 +2085,13 @@ class Economy(commands.Cog):
         for _ in range(REDEEM_CODE_GROUPS):
             groups.append("".join(secrets.choice(REDEEM_CODE_ALPHABET) for _ in range(REDEEM_CODE_GROUP_SIZE)))
         return "-".join(groups)
+
+    def _new_unique_redeem_code(self, existing_codes: dict[str, Any]) -> str:
+        for _ in range(20):
+            code = self._new_redeem_code()
+            if code not in existing_codes:
+                return code
+        raise EconomyError("Could not generate a unique redeem code.")
 
     @staticmethod
     def _normalize_redeem_code(code: str) -> str:

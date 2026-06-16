@@ -7,5 +7,5 @@
     "install_msg": "Economy loaded! Use `[p]eco daily`, `[p]eco weekly`, `[p]eco monthly`, `[p]eco annual`, `[p]eco work`, `[p]eco shop`, `[p]eco balance`, `[p]eco pay`, and owner-only `[p]eco admin` / `[p]eco api` commands.",
     "requirements": ["aiohttp>=3.8.0"],
     "tags": ["economy", "coins", "api", "shop"],
-    "end_user_data_statement": "This cog stores Discord user IDs, global LWD$ balances, claim timestamps, server shop items, inventory quantities, one-time redeem codes for in-game item fulfillment, shop channel/message IDs, economy log channel IDs, and a capped transaction ledger containing user IDs, guild IDs, amounts, reasons, actor IDs, and timestamps."
+    "end_user_data_statement": "This cog stores Discord user IDs, global LWD$ balances, claim timestamps, server shop items, inventory quantities, one-time redeem codes for in-game item fulfillment, code gift metadata, shop channel/message IDs, economy log channel IDs, and a capped transaction ledger containing user IDs, guild IDs, amounts, reasons, actor IDs, and timestamps."
 }
