@@ -52,9 +52,18 @@ API_FIELD_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 class AppealActionsView(discord.ui.View):
-    def __init__(self, cog: "BanAppeals"):
+    def __init__(self, cog: "BanAppeals", log_url: str | None = None):
         super().__init__(timeout=None)
         self.cog = cog
+        if log_url:
+            self.add_item(
+                discord.ui.Button(
+                    label="Staff Log",
+                    style=discord.ButtonStyle.link,
+                    url=log_url,
+                    row=2,
+                )
+            )
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, custom_id="banappeals:accept")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -315,21 +324,25 @@ class BanAppeals(commands.Cog):
 
         public_message = await self._apply_status_side_effects(interaction, record, settings, status)
 
-        async with self.config.guild(interaction.guild).appeals() as appeals:
-            appeals[record_id] = record
-
-        try:
-            await interaction.message.edit(embed=self._appeal_panel_embed(interaction.guild, record), view=AppealActionsView(self))
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-
-        await self._send_log(
+        log_message = await self._send_log(
             interaction.guild,
             f"Appeal {VALID_STATUSES.get(status, status)}",
             record,
             moderator=interaction.user,
             extra=public_message,
         )
+        self._store_log_reference(record, log_message)
+
+        async with self.config.guild(interaction.guild).appeals() as appeals:
+            appeals[record_id] = record
+
+        try:
+            await interaction.message.edit(
+                embed=self._appeal_panel_embed(interaction.guild, record),
+                view=self._appeal_actions_view(record),
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
         await interaction.followup.send(f"Appeal marked as {VALID_STATUSES.get(status, status)}.", ephemeral=True)
 
     async def _apply_status_side_effects(
@@ -461,15 +474,19 @@ class BanAppeals(commands.Cog):
             panel_message = await self._send_new_appeal_messages(message, guild, record)
             if panel_message is not None:
                 record["panel_message_id"] = panel_message.id
+            log_message = await self._send_log(guild, "New Ban Appeal", record)
+            self._store_log_reference(record, log_message)
             async with self.config.guild(guild).appeals() as stored_appeals:
                 stored_appeals[record_id] = record
-            await self._send_log(guild, "New Ban Appeal", record)
+            if log_message is not None:
+                await self._update_panel_message(guild, record)
             return
 
+        log_message = await self._send_log(guild, "Ban Appeal Updated", record)
+        self._store_log_reference(record, log_message)
         async with self.config.guild(guild).appeals() as stored_appeals:
             stored_appeals[record_id] = record
         await self._update_panel_message(guild, record)
-        await self._send_log(guild, "Ban Appeal Updated", record)
 
     async def _send_new_appeal_messages(
         self,
@@ -494,7 +511,7 @@ class BanAppeals(commands.Cog):
         try:
             return await channel.send(
                 embed=self._appeal_panel_embed(guild, record),
-                view=AppealActionsView(self),
+                view=self._appeal_actions_view(record),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
         except (discord.Forbidden, discord.HTTPException):
@@ -510,7 +527,10 @@ class BanAppeals(commands.Cog):
             return
         try:
             panel_message = await channel.fetch_message(message_id)
-            await panel_message.edit(embed=self._appeal_panel_embed(guild, record), view=AppealActionsView(self))
+            await panel_message.edit(
+                embed=self._appeal_panel_embed(guild, record),
+                view=self._appeal_actions_view(record),
+            )
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             return
 
@@ -774,20 +794,13 @@ class BanAppeals(commands.Cog):
         ban_id = fields.get("ban_id") or "your Ban ID"
         lines = []
         if include_intro:
-            lines.append(f"{moderator.mention} offered one final chance for this cheating/hacking ban appeal.")
-            lines.append("")
+            lines.append(f"{moderator.mention} offered one final chance for this appeal.")
         lines.extend(
             [
-                f'Write the following sentence by hand {count} times on one sheet of paper:',
-                "",
-                '"I WILL NOT CHEAT ANYMORE ON LWD"',
-                "",
-                "The same page must also include:",
-                f"- In-game name: {name}",
-                f"- Ban ID: {ban_id}",
-                "",
-                "Attach a clear photo where the entire page is visible and readable.",
-                "AI-generated, edited, copied, printed, traced, or otherwise fake submissions may be denied by staff.",
+                f'Handwrite `"I WILL NOT CHEAT ANYMORE ON LWD"` **{count} times** on one sheet of paper.',
+                f"Include your in-game name, **{name}**, and Ban ID, **{ban_id}**, on the same page.",
+                "Attach one clear photo showing the full readable page.",
+                "Fake, edited, copied, printed, traced, or AI-generated submissions may be denied.",
             ]
         )
         return "\n".join(lines)
@@ -834,39 +847,117 @@ class BanAppeals(commands.Cog):
         await ctx.send(embed=embed)
 
     def _validation_embed(self, record: dict[str, typing.Any]) -> discord.Embed:
+        warnings = record.get("warnings", [])
+        issue_text = self._shorten("; ".join(warnings), 700) if warnings else "The appeal is missing required details."
         embed = discord.Embed(
-            title="Appeal Needs Attention",
-            description="Please edit the original appeal post so it follows the required format.",
+            title="Please Edit Your Appeal",
+            description=(
+                f"{issue_text}\n\n"
+                "Keep the first post in the required format and make sure **Ban ID** is filled in."
+            ),
             color=discord.Color.orange(),
         )
-        embed.add_field(name="Issue(s)", value=self._list_lines(record.get("warnings", [])), inline=False)
-        embed.add_field(
-            name="Required Format",
-            value=(
-                "**Your ingame name:**\n"
-                "**Date of Ban (DD/MM/YYYY):**\n"
-                "**Ban reason:**\n"
-                "**Admin who banned you:**\n"
-                "**Ban ID:**\n"
-                "**Why should you be unbanned?:**"
-            ),
-            inline=False,
-        )
         return embed
+
+    def _appeal_actions_view(self, record: dict[str, typing.Any]) -> AppealActionsView:
+        return AppealActionsView(self, record.get("last_log_url"))
+
+    @staticmethod
+    def _store_log_reference(record: dict[str, typing.Any], message: discord.Message | None) -> None:
+        if message is None:
+            return
+        record["last_log_url"] = message.jump_url
+        record["last_log_message_id"] = message.id
+        record["last_log_channel_id"] = message.channel.id
 
     def _appeal_panel_embed(self, guild: discord.Guild, record: dict[str, typing.Any]) -> discord.Embed:
         fields = record.get("fields", {})
         status = record.get("status", "pending")
-        color = {
-            "accepted": discord.Color.green(),
-            "denied": discord.Color.red(),
-            "needs_info": discord.Color.gold(),
-            "final_chance": discord.Color.orange(),
-            "fake_evidence": discord.Color.dark_red(),
-            "closed": discord.Color.light_grey(),
-        }.get(status, DEFAULT_COLOR)
+        color = self._status_color(status)
+        author_id = record.get("author_id")
+        author_text = f"<@{author_id}>" if author_id else record.get("author_name", "Unknown")
+        ban_id = fields.get("ban_id") or "Missing"
+        ingame_name = fields.get("ingame_name") or "Missing"
 
-        embed = discord.Embed(title="Ban Appeal Review", color=color)
+        embed = discord.Embed(
+            title="Appeal Review",
+            description=(
+                f"**{VALID_STATUSES.get(status, status)}**\n"
+                f"{author_text} | Ban ID: `{self._shorten(ban_id, 80)}` | IGN: `{self._shorten(ingame_name, 80)}`"
+            ),
+            color=color,
+        )
+        embed.add_field(name="Appeal", value=self._compact_appeal_text(record), inline=False)
+        embed.add_field(name="Checks", value=self._compact_checks_text(record), inline=False)
+
+        footer_parts = []
+        if record.get("challenge_count"):
+            footer_parts.append(f"Challenge: {record['challenge_count']}")
+        if record.get("handler_name"):
+            footer_parts.append(f"Handled by {record['handler_name']}")
+        if record.get("jump_url"):
+            embed.add_field(name="Post", value=f"[Open appeal]({record['jump_url']})", inline=True)
+        embed.set_footer(text=" | ".join(footer_parts) if footer_parts else guild.name)
+        return embed
+
+    def _compact_appeal_text(self, record: dict[str, typing.Any]) -> str:
+        fields = record.get("fields", {})
+        reason = fields.get("ban_reason") or "Missing"
+        why = fields.get("why") or "Missing"
+        details = []
+        if fields.get("ban_date"):
+            details.append(f"Date: {self._shorten(fields['ban_date'], 40)}")
+        if fields.get("admin"):
+            details.append(f"Admin: {self._shorten(fields['admin'], 80)}")
+
+        lines = [
+            f"**Reason:** {self._shorten(reason, 180)}",
+            f"**Why:** {self._shorten(why, 420)}",
+        ]
+        if details:
+            lines.append(" | ".join(details))
+        return self._shorten("\n".join(lines), 1024)
+
+    def _compact_checks_text(self, record: dict[str, typing.Any]) -> str:
+        fields = record.get("fields", {})
+        warnings = record.get("warnings") or []
+        checks = []
+        if warnings:
+            checks.append(f"{len(warnings)} issue(s): {self._shorten('; '.join(warnings), 520)}")
+        else:
+            checks.append("Format complete.")
+
+        api_text = self._compact_api_text(record.get("api_result"))
+        if api_text:
+            checks.append(api_text)
+
+        reason = fields.get("ban_reason", "").lower()
+        if any(word in reason for word in CHEAT_WORDS):
+            checks.append("Cheating/hacking keyword detected.")
+
+        return self._shorten("\n".join(f"- {check}" for check in checks), 1024)
+
+    def _compact_api_text(self, api_result: dict[str, typing.Any] | None) -> str | None:
+        if not api_result:
+            return None
+        if not api_result.get("found"):
+            return f"Ban API: {api_result.get('error') or 'no usable result'}"
+        fields = api_result.get("fields") or {}
+        bits = [
+            f"{label}: {fields[label]}"
+            for label in ("Player", "Reason", "Active")
+            if fields.get(label)
+        ]
+        if not bits:
+            return "Ban API: matched."
+        return "Ban API: matched - " + self._shorten(" | ".join(bits), 420)
+
+    def _appeal_detail_embed(self, guild: discord.Guild, record: dict[str, typing.Any]) -> discord.Embed:
+        fields = record.get("fields", {})
+        status = record.get("status", "pending")
+        color = self._status_color(status)
+
+        embed = discord.Embed(title="Ban Appeal Details", color=color)
         author_id = record.get("author_id")
         author_text = f"<@{author_id}>" if author_id else record.get("author_name", "Unknown")
         embed.add_field(name="Status", value=VALID_STATUSES.get(status, status), inline=True)
@@ -900,6 +991,17 @@ class BanAppeals(commands.Cog):
         embed.set_footer(text=f"Guild: {guild.name}")
         return embed
 
+    @staticmethod
+    def _status_color(status: str) -> discord.Color:
+        return {
+            "accepted": discord.Color.green(),
+            "denied": discord.Color.red(),
+            "needs_info": discord.Color.gold(),
+            "final_chance": discord.Color.orange(),
+            "fake_evidence": discord.Color.dark_red(),
+            "closed": discord.Color.light_grey(),
+        }.get(status, DEFAULT_COLOR)
+
     def _add_api_fields(self, embed: discord.Embed, api_result: dict[str, typing.Any] | None) -> None:
         if not api_result:
             embed.add_field(name="Ban API", value="Not checked.", inline=False)
@@ -922,24 +1024,83 @@ class BanAppeals(commands.Cog):
         *,
         moderator: discord.abc.User | None = None,
         extra: str | None = None,
-    ) -> None:
+    ) -> discord.Message | None:
         settings = await self.config.guild(guild).all()
         channel_id = settings.get("log_channel_id")
         if not channel_id:
-            return
+            return None
         channel = guild.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
-            return
-        embed = self._appeal_panel_embed(guild, record)
+            return None
+        target = await self._get_or_create_log_thread(guild, channel, record)
+        if target is None:
+            target = channel
+        embed = self._appeal_detail_embed(guild, record)
         embed.title = title
         if moderator is not None:
             embed.add_field(name="Moderator", value=f"{moderator} ({moderator.id})", inline=False)
         if extra:
             embed.add_field(name="Action note", value=self._shorten(extra, 1024), inline=False)
         try:
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            return await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except (discord.Forbidden, discord.HTTPException):
-            return
+            return None
+
+    async def _get_or_create_log_thread(
+        self,
+        guild: discord.Guild,
+        channel: discord.TextChannel,
+        record: dict[str, typing.Any],
+    ) -> discord.Thread | None:
+        thread_id = record.get("log_thread_id")
+        if thread_id:
+            try:
+                thread_id = int(thread_id)
+            except (TypeError, ValueError):
+                thread_id = None
+        if thread_id:
+            thread = guild.get_channel_or_thread(thread_id)
+            if thread is None:
+                thread = channel.get_thread(thread_id)
+            if isinstance(thread, discord.Thread):
+                try:
+                    if thread.archived:
+                        await thread.edit(archived=False, reason="Ban appeal log updated")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                return thread
+
+        try:
+            thread = await channel.create_thread(
+                name=self._log_thread_name(record),
+                type=discord.ChannelType.public_thread,
+                auto_archive_duration=10080,
+                reason="Ban appeal staff log",
+            )
+        except TypeError:
+            try:
+                thread = await channel.create_thread(
+                    name=self._log_thread_name(record),
+                    auto_archive_duration=10080,
+                    reason="Ban appeal staff log",
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                return None
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+
+        record["log_thread_id"] = thread.id
+        record["log_thread_parent_id"] = channel.id
+        return thread
+
+    def _log_thread_name(self, record: dict[str, typing.Any]) -> str:
+        fields = record.get("fields", {})
+        ban_id = fields.get("ban_id") or record.get("record_id") or "unknown"
+        ingame_name = fields.get("ingame_name") or record.get("author_name") or "unknown"
+        name = f"Appeal {ban_id} - {ingame_name}"
+        name = re.sub(r"[\r\n\t]+", " ", name)
+        name = re.sub(r"\s+", " ", name).strip()
+        return self._shorten(name or "Ban appeal log", 95)
 
     @staticmethod
     def _now() -> int:
