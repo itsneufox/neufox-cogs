@@ -14,7 +14,7 @@ Global cash economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco work` - claim hourly cash from a configurable random range.
 - `[p]eco top` - show the cash leaderboard.
 - `[p]eco shop` - show the server shop.
-- `[p]eco buy <item> [quantity]` - buy from the server shop.
+- `[p]eco buy <item> [quantity]` - buy from the server shop. Dedicated shop panels also have one-click buy buttons.
 - `[p]eco inventory [member]` - show inventory items.
 - `[p]eco codes` - DM your unredeemed in-game item codes.
 
@@ -38,8 +38,18 @@ Global cash economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco admin shop role <name> [role]`
 - `[p]eco admin shop code <name> [true|false]`
 - `[p]eco admin shop stock <name> <stock>`
+- `[p]eco admin shop channel [channel]`
+- `[p]eco admin shop post [channel]`
+- `[p]eco admin shop clearchannel`
 
 Use `stock -1` for unlimited stock. Shop items are server-local because role rewards and log channels are server-local, but user cash balances stay global.
+
+`shop channel` creates or updates a dedicated shop panel with buy buttons. Each button buys one item. Use the text command for larger quantities:
+
+```text
+[p]eco admin shop channel #shop
+[p]eco buy "1 Week VIP" 3
+```
 
 ## API commands
 
