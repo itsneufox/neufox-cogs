@@ -9,44 +9,6 @@ from redbot.core import Config, commands
 
 DEFAULT_COLOR = discord.Color.red()
 DEFAULT_REASON = "No reason provided."
-DISPATCH_LINES = {
-    "purge": (
-        "Dispatch has the broom signed out. Confirm the channel and count before cleanup.",
-        "Cleanup route is ready. Dispatch wants the number checked before sweeping.",
-        "The channel ledger is open. Confirm before these messages leave the route.",
-        "Dispatch is holding the dustpan. Make sure this is the right cleanup job.",
-    ),
-    "ban": (
-        "Dispatch has this marked as a no-return route. Confirm if the paperwork matches.",
-        "Dispatch is holding the gate. Check the name, reason, and cleanup before departure.",
-        "The route sheet says ban. Dispatch wants one final look at the destination.",
-        "Dispatch has the clipboard ready. Confirm when the manifest looks right.",
-    ),
-    "kick": (
-        "Dispatch queued a short trip out of the server. Confirm if the route is correct.",
-        "The door crew is on standby. Dispatch is asking for one final name check.",
-        "Dispatch logged this as a temporary exit. Confirm if that is the plan.",
-        "Short-route paperwork is ready. Make sure the passenger and reason match.",
-    ),
-    "softban": (
-        "Dispatch scheduled an out-and-back cleanup route. Confirm if the sweep is intentional.",
-        "The cleanup crew is staged. Check the passenger, days, and reason before rollout.",
-        "Dispatch has a quick detour planned: out, clean, back. Confirm the route sheet.",
-        "Message cleanup is on the manifest. Dispatch wants the details double-checked.",
-    ),
-    "clear": (
-        "Records desk has the folder open. Confirm before Dispatch files the clean slate.",
-        "Dispatch found the eraser. Check the member and reason before it touches paper.",
-        "The warning log is on the counter. Dispatch is waiting for your final stamp.",
-        "Fresh-slate paperwork is ready. Confirm if this record should be cleared.",
-    ),
-    "default": (
-        "Dispatch has the clipboard out. Confirm when the details line up.",
-        "Dispatch is checking the route sheet: action, target, reason.",
-        "The manifest is almost filed. Give the details one final pass.",
-        "Dispatch is standing by for your final stamp.",
-    ),
-}
 WARNING_PUNISHMENT_ACTIONS = {
     "timeout": "Timeout",
     "addrole": "Add role",
@@ -71,7 +33,6 @@ class ConfirmActionView(discord.ui.View):
         self.reason = reason or DEFAULT_REASON
         self.moderator_name = moderator_name
         self.thumbnail_url = thumbnail_url
-        self.dispatch_line = self._pick_dispatch_line(self.action_text, self.reason)
         self.value: bool | None = None
         self.message: discord.Message | None = None
 
@@ -115,7 +76,6 @@ class ConfirmActionView(discord.ui.View):
         )
         embed.add_field(name="Action", value=self._embed_value(self.action_text), inline=False)
         embed.add_field(name="Reason", value=self._embed_value(self.reason), inline=False)
-        embed.add_field(name="Dispatch", value=self.dispatch_line, inline=False)
         embed.add_field(name="Moderator", value=self.moderator_name, inline=True)
         embed.add_field(name="Expires", value="30 seconds", inline=True)
         embed.set_footer(text="Confirm runs it. Cancel keeps the paperwork clean.")
@@ -146,26 +106,6 @@ class ConfirmActionView(discord.ui.View):
         if len(value) <= 1024:
             return value
         return value[:1021] + "..."
-
-    @staticmethod
-    def _pick_dispatch_line(action_text: str, reason: str) -> str:
-        action_key = "default"
-        lowered_action = action_text.lower()
-        if lowered_action.startswith("softban "):
-            action_key = "softban"
-        elif lowered_action.startswith("purge "):
-            action_key = "purge"
-        elif lowered_action.startswith("ban "):
-            action_key = "ban"
-        elif lowered_action.startswith("kick "):
-            action_key = "kick"
-        elif lowered_action.startswith("clear "):
-            action_key = "clear"
-
-        lines = DISPATCH_LINES[action_key]
-        seed_text = f"{action_text}:{reason}"
-        index = sum(ord(character) for character in seed_text) % len(lines)
-        return lines[index]
 
 
 class AdminHelper(commands.Cog):
@@ -214,10 +154,55 @@ class AdminHelper(commands.Cog):
             name="Actions",
             value=(
                 "ban, hackban, unban, kick, softban, timeout, untimeout, warn, warnings, "
-                "clearwarnings, purge, userinfo, adminhelper case/cases/reason/modstats/warnpunish"
+                "clearwarnings, purge, userinfo, adminhelper modcommands/case/cases/reason/modstats/warnpunish"
             ),
             inline=False,
         )
+        await ctx.send(embed=embed)
+
+    @adminhelper.command(name="modcommands", aliases=["commands", "cheatsheet", "reference"])
+    @commands.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    async def adminhelper_modcommands(self, ctx: commands.Context):
+        """Post a moderator-facing command reference."""
+        prefix = await self._prefix(ctx)
+        embed = discord.Embed(
+            title="Moderator Commands",
+            description="Quick reference for day-to-day moderation actions.",
+            color=DEFAULT_COLOR,
+        )
+        embed.add_field(
+            name="Member Actions",
+            value=(
+                f"`{prefix}warn @user <reason>` - add a manual warning\n"
+                f"`{prefix}timeout @user <minutes> <reason>` - timeout a member\n"
+                f"`{prefix}kick @user <reason>` - kick a member\n"
+                f"`{prefix}ban @user [0-7 days] <reason>` - ban with optional message cleanup override\n"
+                f"`{prefix}softban @user <reason>` - ban/unban to clean recent messages\n"
+                f"`{prefix}unban <user id/name> <reason>` - unban a user"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Message Cleanup",
+            value=(
+                f"`{prefix}purge <1-200> [@user]` - delete recent messages in this channel"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Lookup",
+            value=(
+                f"`{prefix}userinfo [@user]` - account, role, warning, and name-history summary\n"
+                f"`{prefix}warnings @user` - list manual warnings\n"
+                f"`{prefix}clearwarnings @user <reason>` - clear manual warnings\n"
+                f"`{prefix}ah case <id>` - show a case\n"
+                f"`{prefix}ah cases @user` - show recent cases for a member\n"
+                f"`{prefix}ah modstats @user` - show actions performed/received"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Destructive actions ask for confirmation when needed.")
         await ctx.send(embed=embed)
 
     @adminhelper.command(name="logchannel")
@@ -496,13 +481,18 @@ class AdminHelper(commands.Cog):
     @commands.admin_or_permissions(ban_members=True)
     @commands.guild_only()
     async def ban_member(self, ctx: commands.Context, member: discord.Member, *, reason: str = DEFAULT_REASON):
-        """Ban a member."""
+        """Ban a member. Optionally start the reason with 0-7 delete days."""
         allowed, failure = await self._can_moderate_member(ctx.guild, member, "ban", actor=ctx.author)
         if not allowed:
             await ctx.send(f"Unable to ban {member.mention}: {failure}")
             return
 
-        delete_days = await self.config.guild(ctx.guild).ban_delete_message_days()
+        default_delete_days = await self.config.guild(ctx.guild).ban_delete_message_days()
+        parsed = self._parse_delete_days_reason(reason, default_delete_days)
+        if isinstance(parsed, str):
+            await ctx.send(parsed)
+            return
+        delete_days, reason = parsed
         if not await self._confirm_action(
             ctx,
             f"ban {member.mention} and delete {delete_days} day(s) of messages",
@@ -526,7 +516,7 @@ class AdminHelper(commands.Cog):
     @commands.admin_or_permissions(ban_members=True)
     @commands.guild_only()
     async def hackban_user(self, ctx: commands.Context, user: discord.User, *, reason: str = DEFAULT_REASON):
-        """Ban a user by ID or mention, even if they are not in the server."""
+        """Ban a user by ID or mention. Optionally start the reason with 0-7 delete days."""
         member = ctx.guild.get_member(user.id)
         if member is not None:
             allowed, failure = await self._can_moderate_member(ctx.guild, member, "ban", actor=ctx.author)
@@ -537,7 +527,12 @@ class AdminHelper(commands.Cog):
             await ctx.send("Unable to ban: I am missing the `ban_members` permission.")
             return
 
-        delete_days = await self.config.guild(ctx.guild).ban_delete_message_days()
+        default_delete_days = await self.config.guild(ctx.guild).ban_delete_message_days()
+        parsed = self._parse_delete_days_reason(reason, default_delete_days)
+        if isinstance(parsed, str):
+            await ctx.send(parsed)
+            return
+        delete_days, reason = parsed
         if not await self._confirm_action(
             ctx,
             f"ban {user} and delete {delete_days} day(s) of messages",
@@ -1281,6 +1276,21 @@ class AdminHelper(commands.Cog):
             return f"{value} {reason}"
         return value
 
+    @staticmethod
+    def _parse_delete_days_reason(raw_reason: str, default_delete_days: int) -> tuple[int, str] | str:
+        text = (raw_reason or "").strip()
+        if not text or text == DEFAULT_REASON:
+            return default_delete_days, DEFAULT_REASON
+
+        first_word, _, rest = text.partition(" ")
+        if first_word.lstrip("+-").isdigit():
+            delete_days = int(first_word)
+            if delete_days < 0 or delete_days > 7:
+                return "Ban delete days must be between 0 and 7."
+            return delete_days, rest.strip() or DEFAULT_REASON
+
+        return default_delete_days, text
+
     def _format_warning_punishment(self, guild: discord.Guild, punishment: dict[str, Any]) -> str:
         punishment_id = punishment.get("id", "?")
         warnings = punishment.get("warnings", "?")
@@ -1435,6 +1445,27 @@ class AdminHelper(commands.Cog):
 
     def _audit_reason(self, moderator: discord.abc.User, reason: str) -> str:
         return f"{moderator} ({moderator.id}): {reason or DEFAULT_REASON}"[:512]
+
+    async def _prefix(self, ctx: commands.Context) -> str:
+        clean_prefix = getattr(ctx, "clean_prefix", None)
+        if clean_prefix:
+            return str(clean_prefix)
+
+        prefixes = []
+        get_valid_prefixes = getattr(self.bot, "get_valid_prefixes", None)
+        if get_valid_prefixes is not None:
+            try:
+                maybe_prefixes = get_valid_prefixes(ctx.guild)
+                if hasattr(maybe_prefixes, "__await__"):
+                    maybe_prefixes = await maybe_prefixes
+                prefixes = list(maybe_prefixes)
+            except Exception:
+                prefixes = []
+
+        for prefix in prefixes:
+            if isinstance(prefix, str) and prefix:
+                return prefix
+        return "[p]"
 
     async def _maybe_dm(
         self,
