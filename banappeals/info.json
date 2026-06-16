@@ -1,0 +1,20 @@
+{
+    "name": "BanAppeals",
+    "short": "Moderate ban appeals in a forum or text channel.",
+    "description": "Validates ban appeal posts, requires Ban ID, adds staff action buttons, tracks denial cooldowns, manages final-chance handwritten challenge counts, and can optionally enrich appeals from a read-only ban API by Ban ID.",
+    "author": [
+        "itsneufox"
+    ],
+    "min_bot_version": "3.5.0",
+    "install_msg": "BanAppeals loaded. Use `[p]appealset` to configure the appeal forum/text channel, logs, cooldown, challenge count, and optional Ban ID API lookup.",
+    "requirements": [
+        "aiohttp>=3.8.0"
+    ],
+    "tags": [
+        "moderation",
+        "appeals",
+        "bans",
+        "forums"
+    ],
+    "end_user_data_statement": "This cog stores guild-level appeal settings, optional API endpoint settings, staff role IDs, per-user denial cooldown timestamps, and appeal records containing Discord user IDs/names, message/thread/channel IDs, parsed appeal fields, validation warnings, staff action status, handler IDs/names, timestamps, and final-chance challenge counts. It does not store full appeal message content beyond the parsed appeal fields."
+}
