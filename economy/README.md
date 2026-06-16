@@ -9,11 +9,14 @@ Global cash economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco pay <member> <amount>` - transfer cash to another member.
 - `[p]eco daily` - claim daily cash.
 - `[p]eco weekly` - claim weekly cash.
+- `[p]eco monthly` - claim monthly cash.
+- `[p]eco annual` - claim annual cash.
 - `[p]eco work` - claim hourly cash from a configurable random range.
 - `[p]eco top` - show the cash leaderboard.
 - `[p]eco shop` - show the server shop.
 - `[p]eco buy <item> [quantity]` - buy from the server shop.
 - `[p]eco inventory [member]` - show inventory items.
+- `[p]eco codes` - DM your unredeemed in-game item codes.
 
 ## Owner commands
 
@@ -24,6 +27,8 @@ Global cash economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco admin claim show`
 - `[p]eco admin claim daily <amount> [cooldown_seconds]`
 - `[p]eco admin claim weekly <amount> [cooldown_seconds]`
+- `[p]eco admin claim monthly <amount> [cooldown_seconds]`
+- `[p]eco admin claim annual <amount> [cooldown_seconds]`
 - `[p]eco admin claim work <amount> [cooldown_seconds]`
 - `[p]eco admin claim workrange <minimum> <maximum> [cooldown_seconds]`
 - `[p]eco admin logchannel [channel]`
@@ -31,6 +36,7 @@ Global cash economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco admin shop add <name> <price> [stock] [description]`
 - `[p]eco admin shop remove <name>`
 - `[p]eco admin shop role <name> [role]`
+- `[p]eco admin shop code <name> [true|false]`
 - `[p]eco admin shop stock <name> <stock>`
 
 Use `stock -1` for unlimited stock. Shop items are server-local because role rewards and log channels are server-local, but user cash balances stay global.
@@ -62,6 +68,7 @@ Endpoints:
 - `POST /balance/{discord_user_id}/remove`
 - `POST /balance/{discord_user_id}/set`
 - `POST /transfer`
+- `POST /redeem-code`
 
 Adjustment body:
 
@@ -81,6 +88,24 @@ Transfer body:
   "amount": 500,
   "reason": "external transfer"
 }
+```
+
+Redeem-code body, for game servers granting purchased in-game items:
+
+```json
+{
+  "code": "ABCD-EFGH-JKLM",
+  "redeemed_by": "samp-server-1"
+}
+```
+
+Successful redemption returns the Discord user ID, guild ID, item name, quantity, creation timestamp, and redemption timestamp. A code can only be redeemed once.
+
+To make a shop item generate codes after purchase:
+
+```text
+[p]eco admin shop add NitroBoost 500 -1 In-game boost item
+[p]eco admin shop code NitroBoost true
 ```
 
 Other Red cogs can call the internal API directly:

@@ -22,6 +22,10 @@ DEFAULT_DAILY_AMOUNT = 250
 DEFAULT_DAILY_COOLDOWN = 86400
 DEFAULT_WEEKLY_AMOUNT = 1000
 DEFAULT_WEEKLY_COOLDOWN = 604800
+DEFAULT_MONTHLY_AMOUNT = 2500
+DEFAULT_MONTHLY_COOLDOWN = 2592000
+DEFAULT_ANNUAL_AMOUNT = 12000
+DEFAULT_ANNUAL_COOLDOWN = 31536000
 DEFAULT_WORK_AMOUNT = 75
 DEFAULT_WORK_MIN = 25
 DEFAULT_WORK_MAX = 100
@@ -30,6 +34,33 @@ MAX_LEDGER_ENTRIES = 500
 MAX_AMOUNT = 10**15
 TOP_LIMIT = 10
 SHOP_PAGE_SIZE = 8
+REDEEM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+REDEEM_CODE_GROUPS = 3
+REDEEM_CODE_GROUP_SIZE = 4
+
+
+class CodeRevealView(discord.ui.View):
+    def __init__(self, owner_id: int, title: str, lines: list[str]):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.title = title
+        self.lines = lines
+
+    @discord.ui.button(label="View privately", style=discord.ButtonStyle.primary)
+    async def view_code(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("These codes are not yours.", ephemeral=True)
+            return
+
+        content = self._content()
+        await interaction.response.send_message(content, ephemeral=True)
+
+    def _content(self) -> str:
+        content = f"**{self.title}**\n" + "\n".join(self.lines)
+        if len(content) <= 1900:
+            return content
+        truncated = content[:1850].rsplit("\n", 1)[0]
+        return f"{truncated}\n...truncated. Run the command again for the full list."
 
 
 class Economy(commands.Cog):
@@ -50,6 +81,10 @@ class Economy(commands.Cog):
             daily_cooldown=DEFAULT_DAILY_COOLDOWN,
             weekly_amount=DEFAULT_WEEKLY_AMOUNT,
             weekly_cooldown=DEFAULT_WEEKLY_COOLDOWN,
+            monthly_amount=DEFAULT_MONTHLY_AMOUNT,
+            monthly_cooldown=DEFAULT_MONTHLY_COOLDOWN,
+            annual_amount=DEFAULT_ANNUAL_AMOUNT,
+            annual_cooldown=DEFAULT_ANNUAL_COOLDOWN,
             work_amount=DEFAULT_WORK_AMOUNT,
             work_min=DEFAULT_WORK_MIN,
             work_max=DEFAULT_WORK_MAX,
@@ -57,6 +92,7 @@ class Economy(commands.Cog):
             claims={},
             shops={},
             inventories={},
+            redeem_codes={},
             log_channels={},
         )
         self._lock = asyncio.Lock()
@@ -90,11 +126,14 @@ class Economy(commands.Cog):
                     f"`{prefix}eco pay <member> <amount>` - pay another member",
                     f"`{prefix}eco daily` - claim daily cash",
                     f"`{prefix}eco weekly` - claim weekly cash",
+                    f"`{prefix}eco monthly` - claim monthly cash",
+                    f"`{prefix}eco annual` - claim annual cash",
                     f"`{prefix}eco work` - work for random cash",
                     f"`{prefix}eco top` - show the leaderboard",
                     f"`{prefix}eco shop` - view the server shop",
                     f"`{prefix}eco buy <item> [quantity]` - buy a shop item",
                     f"`{prefix}eco inventory [member]` - show inventory",
+                    f"`{prefix}eco codes` - DM your unredeemed in-game item codes",
                 ]
             ),
             inline=False,
@@ -148,6 +187,16 @@ class Economy(commands.Cog):
         """Claim your weekly cash."""
         await self._claim_reward(ctx, "weekly")
 
+    @economy.command(name="monthly", aliases=["month"])
+    async def economy_monthly(self, ctx: commands.Context):
+        """Claim your monthly cash."""
+        await self._claim_reward(ctx, "monthly")
+
+    @economy.command(name="annual", aliases=["yearly", "year"])
+    async def economy_annual(self, ctx: commands.Context):
+        """Claim your annual cash."""
+        await self._claim_reward(ctx, "annual")
+
     @economy.command(name="work")
     async def economy_work(self, ctx: commands.Context):
         """Work for some cash."""
@@ -173,9 +222,10 @@ class Economy(commands.Cog):
                 role_id = item.get("role_id")
                 if role_id:
                     role_text = f" | role: <@&{role_id}>"
+                code_text = " | code" if item.get("redeem_code_enabled") else ""
                 description = item.get("description") or "No description."
                 lines.append(
-                    f"**{item.get('name', key)}** - {int(item.get('price', 0)):,} cash ({stock_text}){role_text}\n"
+                    f"**{item.get('name', key)}** - {int(item.get('price', 0)):,} cash ({stock_text}){role_text}{code_text}\n"
                     f"{description}"
                 )
             embed = discord.Embed(
@@ -220,12 +270,59 @@ class Economy(commands.Cog):
                 except discord.HTTPException:
                     role_note = " Role assignment failed."
 
+        code_note = ""
+        code_view = None
+        if item.get("redeem_code_enabled"):
+            code = await self._create_redeem_code(
+                ctx.guild.id,
+                ctx.author.id,
+                item.get("name", item_name),
+                quantity,
+            )
+            code_lines = [f"`{code}` - **{item.get('name', item_name)}** x{quantity:,}"]
+            code_note = " Redeem code generated; check your DMs."
+            try:
+                await ctx.author.send(
+                    f"Redeem code for **{item.get('name', item_name)}** x{quantity:,} in **{ctx.guild.name}**:\n"
+                    f"`{code}`"
+                )
+            except discord.HTTPException:
+                code_note = " Redeem code generated. Use the button below to view it privately."
+                code_view = CodeRevealView(ctx.author.id, f"Redeem code for {ctx.guild.name}", code_lines)
+
         total = int(item.get("price", 0)) * quantity
         await ctx.send(
             f"Bought {quantity:,}x **{item.get('name', item_name)}** for {total:,} cash. "
-            f"Balance: {balances[CASH]:,} cash.{role_note}",
+            f"Balance: {balances[CASH]:,} cash.{role_note}{code_note}",
             allowed_mentions=discord.AllowedMentions(roles=False),
+            view=code_view,
         )
+
+    @economy.command(name="codes", aliases=["redeemcodes"])
+    @commands.guild_only()
+    async def economy_codes(self, ctx: commands.Context):
+        """DM your unredeemed in-game item codes for this server."""
+        codes = await self._get_unredeemed_codes(ctx.guild.id, ctx.author.id)
+        if not codes:
+            await ctx.send("You do not have any unredeemed codes in this server.")
+            return
+
+        lines = []
+        for code, entry in codes:
+            lines.append(
+                f"`{code}` - **{entry.get('item_name', 'Unknown item')}** x{int(entry.get('quantity', 1)):,} "
+                f"(created <t:{int(entry.get('created_at', 0))}:R>)"
+            )
+        message = f"Unredeemed codes for **{ctx.guild.name}**:\n" + "\n".join(lines)
+        try:
+            await ctx.author.send(message)
+        except discord.HTTPException:
+            await ctx.send(
+                "I could not DM your codes. Use the button below to view them privately.",
+                view=CodeRevealView(ctx.author.id, f"Unredeemed codes for {ctx.guild.name}", lines),
+            )
+            return
+        await ctx.send("I sent your unredeemed codes in DMs.")
 
     @economy.command(name="inventory", aliases=["inv"])
     @commands.guild_only()
@@ -307,6 +404,8 @@ class Economy(commands.Cog):
                     f"`{prefix}eco admin claim show`",
                     f"`{prefix}eco admin claim daily <amount> [cooldown_seconds]`",
                     f"`{prefix}eco admin claim weekly <amount> [cooldown_seconds]`",
+                    f"`{prefix}eco admin claim monthly <amount> [cooldown_seconds]`",
+                    f"`{prefix}eco admin claim annual <amount> [cooldown_seconds]`",
                     f"`{prefix}eco admin claim work <amount> [cooldown_seconds]`",
                     f"`{prefix}eco admin claim workrange <min> <max> [cooldown_seconds]`",
                     f"`{prefix}eco admin logchannel [channel]`",
@@ -322,6 +421,7 @@ class Economy(commands.Cog):
                     f"`{prefix}eco admin shop add <name> <price> [stock] [description]`",
                     f"`{prefix}eco admin shop remove <name>`",
                     f"`{prefix}eco admin shop role <name> [role]`",
+                    f"`{prefix}eco admin shop code <name> [true|false]`",
                     f"`{prefix}eco admin shop stock <name> <stock>`",
                     "`stock -1` means unlimited.",
                 ]
@@ -394,12 +494,13 @@ class Economy(commands.Cog):
         """Show claim reward settings."""
         daily_amount = await self.config.daily_amount()
         daily_cooldown = await self.config.daily_cooldown()
-        work_amount = await self.config.work_amount()
         work_cooldown = await self.config.work_cooldown()
         await ctx.send(
             "Claim rewards:\n"
             f"Daily: {daily_amount:,} cash every {self._format_duration(daily_cooldown)}\n"
             f"Weekly: {await self.config.weekly_amount():,} cash every {self._format_duration(await self.config.weekly_cooldown())}\n"
+            f"Monthly: {await self.config.monthly_amount():,} cash every {self._format_duration(await self.config.monthly_cooldown())}\n"
+            f"Annual: {await self.config.annual_amount():,} cash every {self._format_duration(await self.config.annual_cooldown())}\n"
             f"Work: {await self.config.work_min():,}-{await self.config.work_max():,} cash every {self._format_duration(work_cooldown)}"
         )
 
@@ -414,6 +515,18 @@ class Economy(commands.Cog):
     async def economy_admin_claim_weekly(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_WEEKLY_COOLDOWN):
         """Set weekly amount and cooldown."""
         await self._set_claim_settings(ctx, "weekly", amount, cooldown_seconds)
+
+    @economy_admin_claim.command(name="monthly")
+    @commands.is_owner()
+    async def economy_admin_claim_monthly(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_MONTHLY_COOLDOWN):
+        """Set monthly amount and cooldown."""
+        await self._set_claim_settings(ctx, "monthly", amount, cooldown_seconds)
+
+    @economy_admin_claim.command(name="annual", aliases=["yearly"])
+    @commands.is_owner()
+    async def economy_admin_claim_annual(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_ANNUAL_COOLDOWN):
+        """Set annual amount and cooldown."""
+        await self._set_claim_settings(ctx, "annual", amount, cooldown_seconds)
 
     @economy_admin_claim.command(name="work")
     @commands.is_owner()
@@ -485,6 +598,7 @@ class Economy(commands.Cog):
             "stock": None if stock == -1 else int(stock),
             "description": str(description or "No description.")[:500],
             "role_id": None,
+            "redeem_code_enabled": False,
         }
         async with self.config.shops() as shops:
             shop = shops.setdefault(str(ctx.guild.id), {})
@@ -539,6 +653,23 @@ class Economy(commands.Cog):
                 return
             item["role_id"] = role.id if role else None
         await ctx.send(f"Role reward for **{item.get('name', name)}** {'set to ' + role.mention if role else 'cleared'}.")
+
+    @economy_admin_shop.command(name="code")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_shop_code(self, ctx: commands.Context, name: str, enabled: bool = True):
+        """Toggle one-time redeem code generation for a shop item."""
+        key = self._shop_key(name)
+        async with self.config.shops() as shops:
+            shop = shops.setdefault(str(ctx.guild.id), {})
+            item = shop.get(key)
+            if not item:
+                await ctx.send("That item is not in the shop.")
+                return
+            item["redeem_code_enabled"] = bool(enabled)
+        await ctx.send(
+            f"Redeem codes for **{item.get('name', name)}** are now {'enabled' if enabled else 'disabled'}."
+        )
 
     @economy_admin_shop.command(name="stock")
     @commands.is_owner()
@@ -958,6 +1089,84 @@ class Economy(commands.Cog):
         inventory = guild_inventory.get(str(user_id), {})
         return {str(name): int(quantity) for name, quantity in inventory.items()}
 
+    async def _create_redeem_code(self, guild_id: int, user_id: int, item_name: str, quantity: int) -> str:
+        quantity = self._require_amount(quantity, allow_zero=False)
+        item_name = str(item_name or "Unknown item")[:100]
+        for _ in range(20):
+            code = self._new_redeem_code()
+            async with self._lock:
+                async with self.config.redeem_codes() as codes:
+                    if code in codes:
+                        continue
+                    codes[code] = {
+                        "guild_id": int(guild_id),
+                        "user_id": int(user_id),
+                        "item_name": item_name,
+                        "quantity": quantity,
+                        "created_at": int(time.time()),
+                        "redeemed_at": None,
+                        "redeemed_by": None,
+                    }
+                    return code
+        raise EconomyError("Could not generate a unique redeem code.")
+
+    async def _get_unredeemed_codes(self, guild_id: int, user_id: int) -> list[tuple[str, dict[str, Any]]]:
+        codes = await self.config.redeem_codes()
+        entries = []
+        for code, entry in codes.items():
+            if int(entry.get("guild_id", 0)) != int(guild_id):
+                continue
+            if int(entry.get("user_id", 0)) != int(user_id):
+                continue
+            if entry.get("redeemed_at"):
+                continue
+            entries.append((code, dict(entry)))
+        entries.sort(key=lambda item: int(item[1].get("created_at", 0)), reverse=True)
+        return entries
+
+    async def redeem_code(self, code: str, *, redeemed_by: str = "api") -> dict[str, Any]:
+        """Public cog API: redeem a one-time in-game item code."""
+        normalized = self._normalize_redeem_code(code)
+        if not normalized:
+            raise EconomyError("Invalid code.")
+
+        async with self._lock:
+            async with self.config.redeem_codes() as codes:
+                entry = codes.get(normalized)
+                if entry is None:
+                    raise EconomyCodeNotFound("Code not found.")
+                if entry.get("redeemed_at"):
+                    raise EconomyCodeRedeemed("Code has already been redeemed.")
+
+                entry = dict(entry)
+                entry["redeemed_at"] = int(time.time())
+                entry["redeemed_by"] = str(redeemed_by or "api")[:100]
+                codes[normalized] = entry
+
+            await self._consume_inventory_item(
+                int(entry["guild_id"]),
+                int(entry["user_id"]),
+                str(entry["item_name"]),
+                int(entry["quantity"]),
+            )
+
+        result = dict(entry)
+        result["code"] = normalized
+        return result
+
+    async def _consume_inventory_item(self, guild_id: int, user_id: int, item_name: str, quantity: int):
+        async with self.config.inventories() as inventories:
+            guild_inventory = inventories.setdefault(str(guild_id), {})
+            inventory = guild_inventory.setdefault(str(user_id), {})
+            current = int(inventory.get(item_name, 0))
+            remaining = current - int(quantity)
+            if remaining > 0:
+                inventory[item_name] = remaining
+            else:
+                inventory.pop(item_name, None)
+            if not inventory:
+                guild_inventory.pop(str(user_id), None)
+
     async def _send_economy_log(
         self,
         guild: discord.Guild,
@@ -1011,6 +1220,7 @@ class Economy(commands.Cog):
                 web.post("/balance/{user_id}/remove", self._api_remove_balance),
                 web.post("/balance/{user_id}/set", self._api_set_balance),
                 web.post("/transfer", self._api_transfer),
+                web.post("/redeem-code", self._api_redeem_code),
             ]
         )
         self._runner = web.AppRunner(app)
@@ -1085,6 +1295,29 @@ class Economy(commands.Cog):
             return web.json_response({"error": str(error)}, status=400)
         return web.json_response(result)
 
+    async def _api_redeem_code(self, request: web.Request) -> web.Response:
+        if not await self._authorized(request):
+            return self._unauthorized()
+        payload = await self._json_payload(request)
+        if payload is None:
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        code = payload.get("code")
+        if not code:
+            return web.json_response({"error": "code is required"}, status=400)
+        try:
+            entry = await self.redeem_code(
+                str(code),
+                redeemed_by=str(payload.get("redeemed_by", "api"))[:100],
+            )
+        except EconomyCodeNotFound as error:
+            return web.json_response({"error": str(error)}, status=404)
+        except EconomyCodeRedeemed as error:
+            return web.json_response({"error": str(error)}, status=409)
+        except EconomyError as error:
+            return web.json_response({"error": str(error)}, status=400)
+        return web.json_response(entry)
+
     async def _authorized(self, request: web.Request) -> bool:
         header = request.headers.get("Authorization", "")
         if not header.startswith("Bearer "):
@@ -1112,6 +1345,26 @@ class Economy(commands.Cog):
         except (TypeError, ValueError):
             return None
         return user_id if user_id > 0 else None
+
+    @staticmethod
+    def _new_redeem_code() -> str:
+        groups = []
+        for _ in range(REDEEM_CODE_GROUPS):
+            groups.append("".join(secrets.choice(REDEEM_CODE_ALPHABET) for _ in range(REDEEM_CODE_GROUP_SIZE)))
+        return "-".join(groups)
+
+    @staticmethod
+    def _normalize_redeem_code(code: str) -> str:
+        code = str(code or "").strip().upper().replace(" ", "-")
+        compact = code.replace("-", "")
+        if len(compact) != REDEEM_CODE_GROUPS * REDEEM_CODE_GROUP_SIZE:
+            return ""
+        if any(character not in REDEEM_CODE_ALPHABET for character in compact):
+            return ""
+        return "-".join(
+            compact[index : index + REDEEM_CODE_GROUP_SIZE]
+            for index in range(0, len(compact), REDEEM_CODE_GROUP_SIZE)
+        )
 
     @staticmethod
     def _shop_key(name: str) -> str:
@@ -1165,4 +1418,12 @@ class Economy(commands.Cog):
 
 
 class EconomyError(Exception):
+    pass
+
+
+class EconomyCodeNotFound(EconomyError):
+    pass
+
+
+class EconomyCodeRedeemed(EconomyError):
     pass
