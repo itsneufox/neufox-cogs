@@ -64,7 +64,7 @@ Code-generated, non-role items become giftable by default. Role reward items are
 
 ```text
 [p]eco admin shop channel #shop
-[p]eco buy "1 Week VIP" 3
+[p]buy "1 Week VIP" 3
 ```
 
 ## API commands

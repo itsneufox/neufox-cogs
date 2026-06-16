@@ -1637,15 +1637,19 @@ class Economy(commands.Cog):
         if item.get("redeem_code_enabled"):
             delivery.append("Redeem code")
 
-        command_prefix = prefix if prefix is not None else "[prefix]"
-        name = str(item.get("name", key)).replace('"', '\\"')
         description = str(item.get("description") or "No description.")[:250]
+        multi_buy = self._can_multi_buy(item)
+        buy_line = (
+            f"Multi-Buy: {self._buy_command_text(key, item, prefix=prefix, include_quantity=True)}"
+            if multi_buy
+            else f"Buy: {self._buy_command_text(key, item, prefix=prefix, include_quantity=False)}"
+        )
         return (
             f"{description}\n"
             f"Delivery: {', '.join(delivery)}\n"
             f"Limit: {self._limit_text(item.get('max_per_user'))}\n"
             f"Giftable: {self._giftable_text(item)}\n"
-            f"Buy: `{command_prefix}eco buy \"{name}\"`"
+            f"{buy_line}"
         )
 
     async def _configured_shop_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
@@ -1748,10 +1752,17 @@ class Economy(commands.Cog):
         embed.add_field(name="Limit", value=self._limit_text(item.get("max_per_user")), inline=True)
         embed.add_field(name="Giftable", value=self._giftable_text(item), inline=True)
         embed.add_field(name="Delivery", value=self._delivery_text(item), inline=True)
-        command_prefix = prefix if prefix is not None else "[prefix]"
-        name = str(item.get("name", item_key)).replace('"', '\\"')
-        embed.add_field(name="Multi-Buy", value=f"`{command_prefix}eco buy \"{name}\" <quantity>`", inline=False)
-        embed.set_footer(text="Buttons buy one item per click.")
+        multi_buy = self._can_multi_buy(item)
+        embed.add_field(
+            name="Multi-Buy" if multi_buy else "Buy",
+            value=self._buy_command_text(item_key, item, prefix=prefix, include_quantity=multi_buy),
+            inline=False,
+        )
+        embed.set_footer(
+            text="Buttons buy one item per click."
+            if multi_buy
+            else "Use the button or buy command once."
+        )
         return embed
 
     def _stock_text(self, stock: Any) -> str:
@@ -1773,6 +1784,28 @@ class Economy(commands.Cog):
 
     def _giftable_text(self, item: dict[str, Any]) -> str:
         return "Yes" if self._item_is_giftable(item) else "No"
+
+    def _can_multi_buy(self, item: dict[str, Any]) -> bool:
+        stock = item.get("stock")
+        if stock is not None and int(stock) <= 1:
+            return False
+        limit = item.get("max_per_user")
+        if limit is not None and int(limit) <= 1:
+            return False
+        return True
+
+    def _buy_command_text(
+        self,
+        item_key: str,
+        item: dict[str, Any],
+        *,
+        prefix: str | None,
+        include_quantity: bool,
+    ) -> str:
+        command_prefix = prefix if prefix is not None else "[prefix]"
+        name = str(item.get("name", item_key)).replace('"', '\\"')
+        quantity_text = " <quantity>" if include_quantity else ""
+        return f"`{command_prefix}buy \"{name}\"{quantity_text}`"
 
     def _delivery_text(self, item: dict[str, Any]) -> str:
         delivery = ["Inventory"]
