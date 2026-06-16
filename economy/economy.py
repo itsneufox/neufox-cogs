@@ -1802,7 +1802,7 @@ class Economy(commands.Cog):
         prefix: str | None,
         include_quantity: bool,
     ) -> str:
-        command_prefix = prefix if prefix is not None else "[prefix]"
+        command_prefix = prefix if prefix is not None else "."
         name = str(item.get("name", item_key)).replace('"', '\\"')
         quantity_text = " <quantity>" if include_quantity else ""
         return f"`{command_prefix}buy \"{name}\"{quantity_text}`"
