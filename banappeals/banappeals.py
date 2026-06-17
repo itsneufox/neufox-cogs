@@ -30,6 +30,14 @@ FIELD_DEFS: tuple[tuple[str, str], ...] = (
     ("ban_id", "Ban ID"),
     ("why", "Why should you be unbanned?"),
 )
+FIELD_SHORT_LABELS = {
+    "ingame_name": "in-game name",
+    "ban_date": "ban date",
+    "ban_reason": "ban reason",
+    "admin": "banning admin",
+    "ban_id": "Ban ID",
+    "why": "explanation",
+}
 LOW_EFFORT_WHY = {
     "i didnt do it",
     "i didn't do it",
@@ -425,16 +433,33 @@ class BanAppeals(commands.Cog):
         if guild is None:
             return
         settings = await self.config.guild(guild).all()
-        record_id = self._record_id_for_message(message, settings, allow_existing=is_edit)
+        record_id = self._record_id_for_message(message, settings, allow_existing=True)
         if record_id is None:
             return
 
         appeals = settings.get("appeals", {})
         existing = appeals.get(record_id)
-        if existing is not None and not is_edit:
+        primary_message_id = int(existing.get("message_id", 0) or 0) if existing else message.id
+        is_primary_message = existing is None or message.id == primary_message_id
+        if existing is not None and not is_edit and is_primary_message:
             return
 
-        fields = self._parse_appeal_fields(message.content or "")
+        parsed_fields = self._parse_appeal_fields(message.content or "")
+        if existing is not None and not is_primary_message and not any(parsed_fields.values()):
+            return
+        if existing is None:
+            primary_fields = parsed_fields
+            supplemental_fields = {}
+            fields = parsed_fields
+        elif is_primary_message:
+            primary_fields = parsed_fields
+            supplemental_fields = existing.get("supplemental_fields", {})
+            fields = self._merge_fields(primary_fields, supplemental_fields)
+        else:
+            primary_fields = existing.get("primary_fields") or existing.get("fields", {})
+            supplemental_fields = self._merge_fields(existing.get("supplemental_fields", {}), parsed_fields)
+            fields = self._merge_fields(primary_fields, supplemental_fields)
+
         warnings = self._validate_fields(fields)
         cooldown_warning = await self._cooldown_warning(guild, message.author.id)
         if cooldown_warning:
@@ -454,21 +479,36 @@ class BanAppeals(commands.Cog):
             {
                 "record_id": record_id,
                 "guild_id": guild.id,
-                "channel_id": message.channel.id,
-                "thread_id": message.channel.id if isinstance(message.channel, discord.Thread) else None,
-                "parent_channel_id": getattr(message.channel, "parent_id", None),
-                "message_id": message.id,
-                "jump_url": message.jump_url,
-                "author_id": message.author.id,
-                "author_name": str(message.author),
-                "created_at": int(message.created_at.replace(tzinfo=timezone.utc).timestamp()),
                 "updated_at": now,
                 "status": record.get("status", "pending"),
+                "primary_fields": primary_fields,
+                "supplemental_fields": supplemental_fields,
                 "fields": fields,
                 "warnings": warnings,
                 "api_result": api_result,
             }
         )
+        if is_primary_message:
+            record.update(
+                {
+                    "channel_id": message.channel.id,
+                    "thread_id": message.channel.id if isinstance(message.channel, discord.Thread) else None,
+                    "parent_channel_id": getattr(message.channel, "parent_id", None),
+                    "message_id": message.id,
+                    "jump_url": message.jump_url,
+                    "author_id": message.author.id,
+                    "author_name": str(message.author),
+                    "created_at": int(message.created_at.replace(tzinfo=timezone.utc).timestamp()),
+                }
+            )
+        else:
+            record.update(
+                {
+                    "last_supplement_message_id": message.id,
+                    "last_supplement_url": message.jump_url,
+                    "last_supplement_at": int(message.created_at.replace(tzinfo=timezone.utc).timestamp()),
+                }
+            )
 
         if existing is None:
             panel_message = await self._send_new_appeal_messages(message, guild, record)
@@ -482,6 +522,7 @@ class BanAppeals(commands.Cog):
                 await self._update_panel_message(guild, record)
             return
 
+        await self._sync_validation_message(guild, record)
         log_message = await self._send_log(guild, "Ban Appeal Updated", record)
         self._store_log_reference(record, log_message)
         async with self.config.guild(guild).appeals() as stored_appeals:
@@ -494,14 +535,16 @@ class BanAppeals(commands.Cog):
         guild: discord.Guild,
         record: dict[str, typing.Any],
     ) -> discord.Message | None:
-        warnings = record.get("warnings", [])
+        warnings = self._display_warnings(record)
         if warnings:
             try:
-                await message.reply(
+                validation_message = await message.reply(
                     embed=self._validation_embed(record),
                     mention_author=True,
                     allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
+                record["validation_message_id"] = validation_message.id
+                record["validation_message_url"] = validation_message.jump_url
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
@@ -550,7 +593,11 @@ class BanAppeals(commands.Cog):
             record_id = str(channel.id)
             if allow_existing and record_id in settings.get("appeals", {}):
                 record = settings["appeals"][record_id]
-                return record_id if int(record.get("message_id", 0) or 0) == message.id else None
+                if int(record.get("message_id", 0) or 0) == message.id:
+                    return record_id
+                if int(record.get("author_id", 0) or 0) == message.author.id:
+                    return record_id
+                return None
 
             owner_id = getattr(channel, "owner_id", None)
             if owner_id is not None and owner_id != message.author.id:
@@ -575,6 +622,50 @@ class BanAppeals(commands.Cog):
             return str(message.id)
 
         return None
+
+    async def _sync_validation_message(self, guild: discord.Guild, record: dict[str, typing.Any]) -> None:
+        channel_id = record.get("channel_id")
+        if not channel_id:
+            return
+        channel = guild.get_channel_or_thread(channel_id)
+        if channel is None or not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            return
+
+        warnings = self._display_warnings(record)
+        message_id = record.get("validation_message_id")
+        validation_message = None
+        if message_id:
+            try:
+                validation_message = await channel.fetch_message(int(message_id))
+            except (TypeError, ValueError, discord.Forbidden, discord.NotFound, discord.HTTPException):
+                validation_message = None
+
+        if not warnings:
+            if validation_message is not None:
+                try:
+                    await validation_message.delete()
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+            record.pop("validation_message_id", None)
+            record.pop("validation_message_url", None)
+            return
+
+        if validation_message is not None:
+            try:
+                await validation_message.edit(embed=self._validation_embed(record))
+                return
+            except (discord.Forbidden, discord.HTTPException):
+                return
+
+        try:
+            sent = await channel.send(
+                embed=self._validation_embed(record),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            return
+        record["validation_message_id"] = sent.id
+        record["validation_message_url"] = sent.jump_url
 
     async def _record_from_interaction(
         self,
@@ -627,26 +718,33 @@ class BanAppeals(commands.Cog):
 
         return {key: "\n".join(value).strip() for key, value in fields.items()}
 
+    @staticmethod
+    def _merge_fields(base: dict[str, str], override: dict[str, str]) -> dict[str, str]:
+        merged = {key: (base.get(key) or "") for key, _label in FIELD_DEFS}
+        for key, _label in FIELD_DEFS:
+            value = override.get(key)
+            if value:
+                merged[key] = value
+        return merged
+
     def _validate_fields(self, fields: dict[str, str]) -> list[str]:
         warnings: list[str] = []
-        missing = [label for key, label in FIELD_DEFS if not fields.get(key)]
+        missing = [FIELD_SHORT_LABELS[key] for key, _label in FIELD_DEFS if not fields.get(key)]
         if missing:
-            warnings.append("Missing required field(s): " + ", ".join(missing) + ".")
-        if not fields.get("ban_id"):
-            warnings.append("Ban ID is mandatory. No Ban ID means no review.")
+            warnings.append("Missing: " + self._join_human_list(missing) + ".")
 
         ban_date = fields.get("ban_date")
         if ban_date:
             try:
                 datetime.strptime(ban_date.strip(), "%d/%m/%Y")
             except ValueError:
-                warnings.append("Date of Ban must use DD/MM/YYYY.")
+                warnings.append("Ban date must use DD/MM/YYYY.")
 
         why = fields.get("why", "").strip()
         normalized_why = re.sub(r"[^a-z0-9' ]", "", why.lower()).strip()
         normalized_why = re.sub(r"\s+", " ", normalized_why)
         if why and (len(why) < 25 or normalized_why in LOW_EFFORT_WHY):
-            warnings.append("The explanation looks low-effort. Staff expect details about what happened.")
+            warnings.append("Explanation is too short. Add detail about what happened.")
 
         return warnings
 
@@ -847,13 +945,13 @@ class BanAppeals(commands.Cog):
         await ctx.send(embed=embed)
 
     def _validation_embed(self, record: dict[str, typing.Any]) -> discord.Embed:
-        warnings = record.get("warnings", [])
-        issue_text = self._shorten("; ".join(warnings), 700) if warnings else "The appeal is missing required details."
+        warnings = self._display_warnings(record)
+        issue_text = self._format_warning_text(warnings) if warnings else "The appeal is missing required details."
         embed = discord.Embed(
             title="Please Edit Your Appeal",
             description=(
                 f"{issue_text}\n\n"
-                "Keep the first post in the required format and make sure **Ban ID** is filled in."
+                "Edit the first post or reply with the missing labeled field(s). **Ban ID** must be filled in before review."
             ),
             color=discord.Color.orange(),
         )
@@ -920,10 +1018,10 @@ class BanAppeals(commands.Cog):
 
     def _compact_checks_text(self, record: dict[str, typing.Any]) -> str:
         fields = record.get("fields", {})
-        warnings = record.get("warnings") or []
+        warnings = self._display_warnings(record)
         checks = []
         if warnings:
-            checks.append(f"{len(warnings)} issue(s): {self._shorten('; '.join(warnings), 520)}")
+            checks.extend(self._shorten_warning(warning) for warning in warnings)
         else:
             checks.append("Format complete.")
 
@@ -936,6 +1034,39 @@ class BanAppeals(commands.Cog):
             checks.append("Cheating/hacking keyword detected.")
 
         return self._shorten("\n".join(f"- {check}" for check in checks), 1024)
+
+    def _shorten_warning(self, warning: str) -> str:
+        return self._shorten(warning.strip().rstrip("."), 520) + "."
+
+    def _display_warnings(self, record: dict[str, typing.Any]) -> list[str]:
+        fields = record.get("fields") or {}
+        warnings = self._validate_fields(fields)
+        seen = set(warnings)
+
+        for raw_warning in record.get("warnings") or []:
+            warning = self._normalize_warning_text(str(raw_warning))
+            if warning and warning not in seen:
+                warnings.append(warning)
+                seen.add(warning)
+
+        return warnings
+
+    def _normalize_warning_text(self, warning: str) -> str | None:
+        warning = re.sub(r"\s+", " ", warning).strip()
+        if not warning:
+            return None
+
+        lowered = warning.lower()
+        if lowered.startswith("missing required field(s):"):
+            return None
+        if lowered.startswith("ban id is mandatory") or "no ban id" in lowered:
+            return None
+        if lowered.startswith("date of ban must use"):
+            return "Ban date must use DD/MM/YYYY."
+        if lowered.startswith("the explanation looks low-effort"):
+            return "Explanation is too short. Add detail about what happened."
+
+        return warning
 
     def _compact_api_text(self, api_result: dict[str, typing.Any] | None) -> str | None:
         if not api_result:
@@ -973,7 +1104,7 @@ class BanAppeals(commands.Cog):
         if any(word in reason for word in CHEAT_WORDS):
             embed.add_field(name="Appeal type", value="Cheating/hacking keywords detected.", inline=False)
 
-        warnings = record.get("warnings") or []
+        warnings = self._display_warnings(record)
         embed.add_field(name="Validation", value=self._list_lines(warnings) if warnings else "Format looks complete.", inline=False)
         self._add_api_fields(embed, record.get("api_result"))
 
@@ -1111,6 +1242,21 @@ class BanAppeals(commands.Cog):
         if len(value) <= limit:
             return value
         return value[: limit - 3] + "..."
+
+    def _format_warning_text(self, warnings: list[str]) -> str:
+        if not warnings:
+            return "No issues."
+        return self._shorten("\n".join(f"- {self._shorten_warning(warning)}" for warning in warnings), 900)
+
+    @staticmethod
+    def _join_human_list(values: list[str]) -> str:
+        if not values:
+            return ""
+        if len(values) == 1:
+            return values[0]
+        if len(values) == 2:
+            return f"{values[0]} and {values[1]}"
+        return ", ".join(values[:-1]) + f", and {values[-1]}"
 
     def _value(self, value: str | None, *, limit: int = 1024) -> str:
         if not value:
