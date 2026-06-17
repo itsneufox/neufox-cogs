@@ -22,6 +22,7 @@ VALID_STATUSES = {
     "fake_evidence": "Fake Evidence",
     "closed": "Closed",
 }
+TERMINAL_STATUSES = {"accepted", "denied", "closed"}
 FIELD_DEFS: tuple[tuple[str, str], ...] = (
     ("ingame_name", "Your ingame name"),
     ("ban_date", "Date of Ban (DD/MM/YYYY)"),
@@ -331,6 +332,7 @@ class BanAppeals(commands.Cog):
         record["handled_at"] = now
 
         public_message = await self._apply_status_side_effects(interaction, record, settings, status)
+        await self._sync_validation_message(interaction.guild, record)
 
         log_message = await self._send_log(
             interaction.guild,
@@ -351,6 +353,11 @@ class BanAppeals(commands.Cog):
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
+        if status in {"denied", "closed"}:
+            await self._close_appeal_thread(
+                interaction.channel,
+                reason=f"Ban appeal {VALID_STATUSES.get(status, status).lower()} by {interaction.user}",
+            )
         await interaction.followup.send(f"Appeal marked as {VALID_STATUSES.get(status, status)}.", ephemeral=True)
 
     async def _apply_status_side_effects(
@@ -376,9 +383,9 @@ class BanAppeals(commands.Cog):
             record["cooldown_until"] = cooldown_until
             await self._set_user_cooldown(guild, record.get("author_id"), cooldown_until, record)
             public_message = (
-                f"Appeal denied by {moderator.mention}."
+                f"Appeal denied by {moderator.mention}. This appeal is now closed."
                 if cooldown_days <= 0
-                else f"Appeal denied by {moderator.mention}. You may submit another appeal <t:{cooldown_until}:R>."
+                else f"Appeal denied by {moderator.mention}. You may submit another appeal <t:{cooldown_until}:R>. This appeal is now closed."
             )
         elif status == "needs_info":
             public_message = (
@@ -405,17 +412,6 @@ class BanAppeals(commands.Cog):
             except (discord.Forbidden, discord.HTTPException):
                 pass
 
-        if status == "closed" and isinstance(channel, discord.Thread):
-            try:
-                await channel.edit(locked=True, archived=True, reason=f"Ban appeal closed by {moderator}")
-            except TypeError:
-                try:
-                    await channel.edit(archived=True, reason=f"Ban appeal closed by {moderator}")
-                except (discord.Forbidden, discord.HTTPException):
-                    pass
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-
         return public_message
 
     async def _message_is_eligible(self, message: discord.Message) -> bool:
@@ -427,6 +423,24 @@ class BanAppeals(commands.Cog):
         if not settings.get("enabled") or not settings.get("appeal_channel_id"):
             return False
         return self._record_id_for_message(message, settings, allow_existing=True) is not None
+
+    async def _close_appeal_thread(
+        self,
+        channel: discord.abc.Messageable | None,
+        *,
+        reason: str,
+    ) -> None:
+        if not isinstance(channel, discord.Thread):
+            return
+        try:
+            await channel.edit(locked=True, archived=True, reason=reason)
+        except TypeError:
+            try:
+                await channel.edit(archived=True, reason=reason)
+            except (discord.Forbidden, discord.HTTPException):
+                return
+        except (discord.Forbidden, discord.HTTPException):
+            return
 
     async def _handle_appeal_message(self, message: discord.Message, *, is_edit: bool) -> None:
         guild = message.guild
@@ -442,6 +456,9 @@ class BanAppeals(commands.Cog):
         primary_message_id = int(existing.get("message_id", 0) or 0) if existing else message.id
         is_primary_message = existing is None or message.id == primary_message_id
         if existing is not None and not is_edit and is_primary_message:
+            return
+        if existing is not None and existing.get("status") in TERMINAL_STATUSES:
+            await self._sync_validation_message(guild, existing)
             return
 
         parsed_fields = self._parse_appeal_fields(message.content or "")
@@ -461,9 +478,9 @@ class BanAppeals(commands.Cog):
             fields = self._merge_fields(primary_fields, supplemental_fields)
 
         warnings = self._validate_fields(fields)
-        cooldown_warning = await self._cooldown_warning(guild, message.author.id)
-        if cooldown_warning:
-            warnings.append(cooldown_warning)
+        cooldown_until = await self._active_cooldown_until(guild, message.author.id)
+        if cooldown_until:
+            warnings.append(f"Previous appeal cooldown is active until <t:{cooldown_until}:R>.")
 
         api_result = None
         ban_id = fields.get("ban_id")
@@ -488,6 +505,8 @@ class BanAppeals(commands.Cog):
                 "api_result": api_result,
             }
         )
+        if cooldown_until:
+            record["cooldown_until"] = cooldown_until
         if is_primary_message:
             record.update(
                 {
@@ -511,6 +530,31 @@ class BanAppeals(commands.Cog):
             )
 
         if existing is None:
+            if cooldown_until:
+                auto_close_message = (
+                    f"Your previous appeal was denied. You may submit another appeal <t:{cooldown_until}:R>. "
+                    "This appeal has been closed automatically."
+                )
+                record["status"] = "closed"
+                record["auto_closed"] = True
+                record["handler_id"] = self.bot.user.id if self.bot.user else None
+                record["handler_name"] = "BanAppeals"
+                record["handled_at"] = now
+                if isinstance(message.channel, (discord.TextChannel, discord.Thread)):
+                    try:
+                        await message.channel.send(
+                            auto_close_message,
+                            allowed_mentions=discord.AllowedMentions.none(),
+                        )
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+                log_message = await self._send_log(guild, "Appeal Auto-Closed", record, extra=auto_close_message)
+                self._store_log_reference(record, log_message)
+                async with self.config.guild(guild).appeals() as stored_appeals:
+                    stored_appeals[record_id] = record
+                await self._close_appeal_thread(message.channel, reason="Ban appeal auto-closed: cooldown active")
+                return
+
             panel_message = await self._send_new_appeal_messages(message, guild, record)
             if panel_message is not None:
                 record["panel_message_id"] = panel_message.id
@@ -535,7 +579,7 @@ class BanAppeals(commands.Cog):
         guild: discord.Guild,
         record: dict[str, typing.Any],
     ) -> discord.Message | None:
-        warnings = self._display_warnings(record)
+        warnings = [] if record.get("status") in TERMINAL_STATUSES else self._display_warnings(record)
         if warnings:
             try:
                 validation_message = await message.reply(
@@ -631,7 +675,7 @@ class BanAppeals(commands.Cog):
         if channel is None or not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return
 
-        warnings = self._display_warnings(record)
+        warnings = [] if record.get("status") in TERMINAL_STATUSES else self._display_warnings(record)
         message_id = record.get("validation_message_id")
         validation_message = None
         if message_id:
@@ -743,12 +787,30 @@ class BanAppeals(commands.Cog):
         why = fields.get("why", "").strip()
         normalized_why = re.sub(r"[^a-z0-9' ]", "", why.lower()).strip()
         normalized_why = re.sub(r"\s+", " ", normalized_why)
-        if why and (len(why) < 25 or normalized_why in LOW_EFFORT_WHY):
-            warnings.append("Explanation is too short. Add detail about what happened.")
+        if why and (normalized_why in LOW_EFFORT_WHY or self._meaningful_word_count(why) < 8):
+            warnings.append("Explanation needs more detail. Explain what happened and why staff should reconsider.")
 
         return warnings
 
+    @staticmethod
+    def _meaningful_word_count(value: str) -> int:
+        words = re.findall(r"[a-z0-9']+", value.lower())
+        meaningful = []
+        for word in words:
+            if len(word) <= 1:
+                continue
+            if len(word) >= 4 and len(set(word)) == 1:
+                continue
+            meaningful.append(word)
+        return len(meaningful)
+
     async def _cooldown_warning(self, guild: discord.Guild, user_id: int) -> str | None:
+        until = await self._active_cooldown_until(guild, user_id)
+        if until is None:
+            return None
+        return f"Previous appeal cooldown is active until <t:{until}:R>."
+
+    async def _active_cooldown_until(self, guild: discord.Guild, user_id: int) -> int | None:
         now = self._now()
         async with self.config.guild(guild).denied_users() as denied_users:
             entry = denied_users.get(str(user_id))
@@ -758,7 +820,7 @@ class BanAppeals(commands.Cog):
             if until <= now:
                 denied_users.pop(str(user_id), None)
                 return None
-            return f"Your previous appeal was denied. You can submit another appeal <t:{until}:R>."
+            return until
 
     async def _lookup_ban(
         self,
@@ -1018,19 +1080,25 @@ class BanAppeals(commands.Cog):
 
     def _compact_checks_text(self, record: dict[str, typing.Any]) -> str:
         fields = record.get("fields", {})
-        warnings = self._display_warnings(record)
         checks = []
-        if warnings:
-            checks.extend(self._shorten_warning(warning) for warning in warnings)
+        if record.get("status") in TERMINAL_STATUSES:
+            checks.append("Appeal closed.")
+            if record.get("cooldown_until"):
+                checks.append(f"Cooldown active until <t:{record['cooldown_until']}:R>.")
         else:
-            checks.append("Format complete.")
+            warnings = self._display_warnings(record)
+            if warnings:
+                checks.extend(self._shorten_warning(warning) for warning in warnings)
+            else:
+                checks.append("Format complete.")
 
-        api_text = self._compact_api_text(record.get("api_result"))
-        if api_text:
-            checks.append(api_text)
+        if record.get("status") not in TERMINAL_STATUSES:
+            api_text = self._compact_api_text(record.get("api_result"))
+            if api_text:
+                checks.append(api_text)
 
         reason = fields.get("ban_reason", "").lower()
-        if any(word in reason for word in CHEAT_WORDS):
+        if record.get("status") not in TERMINAL_STATUSES and any(word in reason for word in CHEAT_WORDS):
             checks.append("Cheating/hacking keyword detected.")
 
         return self._shorten("\n".join(f"- {check}" for check in checks), 1024)
@@ -1063,8 +1131,8 @@ class BanAppeals(commands.Cog):
             return None
         if lowered.startswith("date of ban must use"):
             return "Ban date must use DD/MM/YYYY."
-        if lowered.startswith("the explanation looks low-effort"):
-            return "Explanation is too short. Add detail about what happened."
+        if lowered.startswith("the explanation looks low-effort") or lowered.startswith("explanation is too short"):
+            return "Explanation needs more detail. Explain what happened and why staff should reconsider."
 
         return warning
 
