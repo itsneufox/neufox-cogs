@@ -20,6 +20,7 @@ DEFAULT_VOICE_XP_MAX = 10
 LEADERBOARD_PAGE_SIZE = 10
 PAGINATION_TIMEOUT = 120
 PROGRESS_BAR_WIDTH = 26
+PROGRESS_BAR_GAP = "\u00a0" * 10
 LEVEL_KINDS = ("chat", "voice")
 LEVEL_CASH_REWARD_LIMIT = 10**12
 CURRENCY_NAME = "LWD$"
@@ -637,7 +638,7 @@ class Leveling(commands.Cog):
         embed.add_field(name="Total XP", value=f"{xp:,}", inline=True)
         embed.add_field(
             name="Progress",
-            value=f"`{self._progress_bar(into_level, needed)}`\u00a0\u00a0\u00a0\u00a0{into_level:,}/{needed:,} XP",
+            value=f"`{self._progress_bar(into_level, needed)}`{PROGRESS_BAR_GAP}{into_level:,}/{needed:,} XP",
             inline=False,
         )
         return embed
