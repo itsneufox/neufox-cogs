@@ -208,6 +208,7 @@ class ActivityStats(commands.Cog):
                 f"`{prefix}activitystats ignorechannel [channel]` - ignore a channel or category\n"
                 f"`{prefix}activitystats allowchannel <channel_or_category_id>` - stop ignoring a channel or category\n"
                 f"`{prefix}activitystats purgechannel [channel]` - remove stored stats from a channel or category\n"
+                f"`{prefix}activitystats channels [member]` - show where a member's counted messages are\n"
                 f"`{prefix}activitystats recount` - rebuild stored totals from known messages\n"
                 f"`{prefix}activitystats reset` - clear tracked stats\n"
                 f"`{prefix}activitystats roles` - show top-message role config\n"
@@ -580,6 +581,40 @@ class ActivityStats(commands.Cog):
         )
         if role_result["configured"]:
             await ctx.send(self._format_role_sync_result(role_result))
+
+    @activitystats.command(name="messagechannels", aliases=["channels", "where"])
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_message_channels(
+        self,
+        ctx: commands.Context,
+        member: discord.Member | None = None,
+    ):
+        """Show which channels a member's counted messages came from."""
+        member = member or ctx.author
+        channel_counts = await self._message_channel_counts_for_member(ctx.guild, member.id)
+        total = sum(channel_counts.values())
+        if not total:
+            await ctx.send(f"No known message records found for {member.mention}.")
+            return
+
+        lines = []
+        for channel_id, count in channel_counts.most_common(20):
+            channel = ctx.guild.get_channel_or_thread(int(channel_id))
+            if channel is None:
+                channel = ctx.guild.get_channel(int(channel_id))
+            channel_text = self._format_channel_reference(channel) if channel else f"`{channel_id}`"
+            lines.append(f"{channel_text}: {count:,}")
+
+        if len(channel_counts) > 20:
+            lines.append(f"...and {len(channel_counts) - 20} more")
+
+        embed = discord.Embed(
+            title=f"{member.display_name}'s Message Sources",
+            description="\n".join(lines),
+            color=DEFAULT_COLOR,
+        )
+        embed.set_footer(text=f"{total:,} known message records across {len(channel_counts):,} channel(s)")
+        await ctx.send(embed=embed)
 
     @activitystats.command(name="recount", aliases=["rebuild", "recalculate"])
     @commands.admin_or_permissions(manage_guild=True)
@@ -1069,6 +1104,20 @@ class ActivityStats(commands.Cog):
             "messages_removed": len(removed_message_ids),
             "reactions_removed": reactions_removed,
         }
+
+    async def _message_channel_counts_for_member(self, guild: discord.Guild, user_id: int) -> Counter[str]:
+        message_authors = await self.config.guild(guild).message_authors()
+        channel_counts: Counter[str] = Counter()
+        user_key = str(user_id)
+
+        for entry in message_authors.values():
+            if str(self._entry_author_id(entry)) != user_key:
+                continue
+            channel_id = self._entry_channel_id(entry)
+            if channel_id is not None:
+                channel_counts[str(channel_id)] += 1
+
+        return channel_counts
 
     async def _recount_stored_stats(self, guild: discord.Guild) -> dict[str, int]:
         guild_conf = self.config.guild(guild)
