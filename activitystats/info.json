@@ -4,7 +4,7 @@
     "description": "Tracks per-server message counts, received reaction counts, and voice time with ignored channels, leaderboard commands, optional rank roles, and automatic Economy LWD$ rewards.",
     "author": ["itsneufox"],
     "min_bot_version": "3.5.0",
-    "install_msg": "ActivityStats loaded! Use `/messages`, `/reactions`, `/voice`, `/topmessages`, `/topreacts`, or `/topvoice` after syncing slash commands. Prefix commands still work with `[p]activitystats` and related commands. Use `[p]activitystats ignorechannel` to ignore a channel and `[p]activitystats purgechannel` to remove already-tracked stats from one.",
+    "install_msg": "ActivityStats loaded! Use `/messages`, `/reactions`, `/voice`, `/topmessages`, `/topreacts`, or `/topvoice` after syncing slash commands. Prefix commands still work with `[p]activitystats` and related commands. Use `[p]activitystats ignorechannel` to ignore a channel, `[p]activitystats purgechannel` to remove already-tracked stats from one, and `[p]activitystats recount` to rebuild totals from known messages.",
     "requirements": [],
     "tags": ["stats", "reactions", "messages", "voice", "utility"],
     "end_user_data_statement": "This cog stores ignored channel IDs, message IDs mapped to author IDs and channel IDs, per-user message counts, per-channel message counts, per-message reaction snapshots, per-user received reaction counters, per-user voice time totals, and active voice session start timestamps. It does not store message content or voice audio. Administrators can clear stored data with `[p]activitystats reset`."

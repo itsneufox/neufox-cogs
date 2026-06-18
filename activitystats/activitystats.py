@@ -208,6 +208,7 @@ class ActivityStats(commands.Cog):
                 f"`{prefix}activitystats ignorechannel [channel]` - ignore a channel or category\n"
                 f"`{prefix}activitystats allowchannel <channel_or_category_id>` - stop ignoring a channel or category\n"
                 f"`{prefix}activitystats purgechannel [channel]` - remove stored stats from a channel or category\n"
+                f"`{prefix}activitystats recount` - rebuild stored totals from known messages\n"
                 f"`{prefix}activitystats reset` - clear tracked stats\n"
                 f"`{prefix}activitystats roles` - show top-message role config\n"
                 f"`{prefix}activitystats roles set <first|second|third> <role>` - configure rank roles\n"
@@ -576,6 +577,22 @@ class ActivityStats(commands.Cog):
             f"Removed {result['messages_removed']:,} tracked message(s) and "
             f"{result['reactions_removed']:,} stored reaction(s) from "
             f"{self._format_channel_reference(channel)}."
+        )
+        if role_result["configured"]:
+            await ctx.send(self._format_role_sync_result(role_result))
+
+    @activitystats.command(name="recount", aliases=["rebuild", "recalculate"])
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_recount(self, ctx: commands.Context):
+        """Rebuild aggregate totals from known message records."""
+        async with ctx.typing():
+            result = await self._recount_stored_stats(ctx.guild)
+            role_result = await self._sync_top_message_roles(ctx.guild)
+
+        await ctx.send(
+            f"Recounted {result['messages']:,} known message(s) across "
+            f"{result['users']:,} user(s) and {result['channels']:,} channel(s). "
+            f"Removed {result['orphaned_reaction_snapshots']:,} orphaned reaction snapshot(s)."
         )
         if role_result["configured"]:
             await ctx.send(self._format_role_sync_result(role_result))
@@ -1046,9 +1063,68 @@ class ActivityStats(commands.Cog):
                 for author_id, emoji, delta in reaction_deltas:
                     self._apply_reaction_delta(received_reactions, author_id, emoji, delta)
 
+        await self._recount_stored_stats(guild)
+
         return {
             "messages_removed": len(removed_message_ids),
             "reactions_removed": reactions_removed,
+        }
+
+    async def _recount_stored_stats(self, guild: discord.Guild) -> dict[str, int]:
+        guild_conf = self.config.guild(guild)
+        message_authors = await guild_conf.message_authors()
+        message_reactions = await guild_conf.message_reactions()
+
+        user_messages: Counter[str] = Counter()
+        channel_messages: Counter[str] = Counter()
+        received_reactions: dict[str, dict[str, int]] = {}
+        valid_message_ids: set[str] = set()
+
+        for message_id, entry in message_authors.items():
+            author_id = self._entry_author_id(entry)
+            if author_id is None:
+                continue
+
+            author_key = str(author_id)
+            message_key = str(message_id)
+            valid_message_ids.add(message_key)
+            user_messages[author_key] += 1
+
+            channel_id = self._entry_channel_id(entry)
+            if channel_id is not None:
+                channel_messages[str(channel_id)] += 1
+
+            for emoji, count in message_reactions.get(message_key, {}).items():
+                reaction_count = max(0, int(count))
+                if reaction_count:
+                    user_reactions = received_reactions.setdefault(author_key, {})
+                    user_reactions[emoji] = int(user_reactions.get(emoji, 0)) + reaction_count
+
+        orphaned_reaction_snapshots = 0
+        cleaned_reactions = {}
+        for message_id, reactions in message_reactions.items():
+            if str(message_id) not in valid_message_ids:
+                orphaned_reaction_snapshots += 1
+                continue
+            cleaned_counts = {
+                emoji: int(count)
+                for emoji, count in reactions.items()
+                if int(count) > 0
+            }
+            if cleaned_counts:
+                cleaned_reactions[str(message_id)] = cleaned_counts
+
+        await guild_conf.total_messages.set(len(valid_message_ids))
+        await guild_conf.user_messages.set(dict(user_messages))
+        await guild_conf.channel_messages.set(dict(channel_messages))
+        await guild_conf.received_reactions.set(received_reactions)
+        await guild_conf.message_reactions.set(cleaned_reactions)
+
+        return {
+            "messages": len(valid_message_ids),
+            "users": len(user_messages),
+            "channels": len(channel_messages),
+            "orphaned_reaction_snapshots": orphaned_reaction_snapshots,
         }
 
     async def _add_ignored_channel(self, guild: discord.Guild, channel_id: int):
