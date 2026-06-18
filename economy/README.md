@@ -7,10 +7,10 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco balance [member]` - show a user's LWD$ balance.
 - `[p]eco help` - show user economy commands.
 - `[p]eco pay <member> <amount>` - transfer LWD$ to another member.
-- `[p]eco daily` - claim daily LWD$.
-- `[p]eco weekly` - claim weekly LWD$.
-- `[p]eco monthly` - claim monthly LWD$.
-- `[p]eco annual` - claim annual LWD$.
+- `[p]eco daily` - claim daily LWD$ once per UTC calendar day.
+- `[p]eco weekly` - claim weekly LWD$ once per UTC calendar week.
+- `[p]eco monthly` - claim monthly LWD$ once per UTC calendar month.
+- `[p]eco annual` - claim annual LWD$ once per UTC calendar year.
 - `[p]eco work` - claim hourly LWD$ from a configurable random range.
 - `[p]eco top` - show the LWD$ leaderboard.
 - `[p]eco shop` - show the server shop.
@@ -38,10 +38,10 @@ Shortcut commands are also available for common user actions:
 - `[p]eco admin remove <member> <amount> [reason]`
 - `[p]eco admin set <member> <amount> [reason]`
 - `[p]eco admin claim show`
-- `[p]eco admin claim daily <amount> [cooldown_seconds]`
-- `[p]eco admin claim weekly <amount> [cooldown_seconds]`
-- `[p]eco admin claim monthly <amount> [cooldown_seconds]`
-- `[p]eco admin claim annual <amount> [cooldown_seconds]`
+- `[p]eco admin claim daily <amount> [0 disables]`
+- `[p]eco admin claim weekly <amount> [0 disables]`
+- `[p]eco admin claim monthly <amount> [0 disables]`
+- `[p]eco admin claim annual <amount> [0 disables]`
 - `[p]eco admin claim work <amount> [cooldown_seconds]`
 - `[p]eco admin claim workrange <minimum> <maximum> [cooldown_seconds]`
 - `[p]eco admin logchannel [channel]`

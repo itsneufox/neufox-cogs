@@ -6,6 +6,7 @@ import logging
 import random
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from aiohttp import web
@@ -40,6 +41,13 @@ SHOP_PAGE_SIZE = 8
 REDEEM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 REDEEM_CODE_GROUPS = 3
 REDEEM_CODE_GROUP_SIZE = 4
+CALENDAR_CLAIM_TYPES = {"daily", "weekly", "monthly", "annual"}
+CALENDAR_CLAIM_PERIODS = {
+    "daily": "UTC day",
+    "weekly": "UTC week",
+    "monthly": "UTC month",
+    "annual": "UTC year",
+}
 
 
 class CodeRevealView(discord.ui.View):
@@ -508,10 +516,10 @@ class Economy(commands.Cog):
             value="\n".join(
                 [
                     f"`{prefix}eco admin claim show`",
-                    f"`{prefix}eco admin claim daily <amount> [cooldown_seconds]`",
-                    f"`{prefix}eco admin claim weekly <amount> [cooldown_seconds]`",
-                    f"`{prefix}eco admin claim monthly <amount> [cooldown_seconds]`",
-                    f"`{prefix}eco admin claim annual <amount> [cooldown_seconds]`",
+                    f"`{prefix}eco admin claim daily <amount> [0 disables]`",
+                    f"`{prefix}eco admin claim weekly <amount> [0 disables]`",
+                    f"`{prefix}eco admin claim monthly <amount> [0 disables]`",
+                    f"`{prefix}eco admin claim annual <amount> [0 disables]`",
                     f"`{prefix}eco admin claim work <amount> [cooldown_seconds]`",
                     f"`{prefix}eco admin claim workrange <min> <max> [cooldown_seconds]`",
                     f"`{prefix}eco admin logchannel [channel]`",
@@ -608,35 +616,35 @@ class Economy(commands.Cog):
         work_cooldown = await self.config.work_cooldown()
         await ctx.send(
             "Claim rewards:\n"
-            f"Daily: {daily_amount:,} {CURRENCY_NAME} every {self._format_duration(daily_cooldown)}\n"
-            f"Weekly: {await self.config.weekly_amount():,} {CURRENCY_NAME} every {self._format_duration(await self.config.weekly_cooldown())}\n"
-            f"Monthly: {await self.config.monthly_amount():,} {CURRENCY_NAME} every {self._format_duration(await self.config.monthly_cooldown())}\n"
-            f"Annual: {await self.config.annual_amount():,} {CURRENCY_NAME} every {self._format_duration(await self.config.annual_cooldown())}\n"
+            f"Daily: {daily_amount:,} {CURRENCY_NAME} {self._format_claim_interval('daily', daily_cooldown)}\n"
+            f"Weekly: {await self.config.weekly_amount():,} {CURRENCY_NAME} {self._format_claim_interval('weekly', await self.config.weekly_cooldown())}\n"
+            f"Monthly: {await self.config.monthly_amount():,} {CURRENCY_NAME} {self._format_claim_interval('monthly', await self.config.monthly_cooldown())}\n"
+            f"Annual: {await self.config.annual_amount():,} {CURRENCY_NAME} {self._format_claim_interval('annual', await self.config.annual_cooldown())}\n"
             f"Work: {await self.config.work_min():,}-{await self.config.work_max():,} {CURRENCY_NAME} every {self._format_duration(work_cooldown)}"
         )
 
     @economy_admin_claim.command(name="daily")
     @commands.is_owner()
     async def economy_admin_claim_daily(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_DAILY_COOLDOWN):
-        """Set daily amount and cooldown."""
+        """Set daily amount. Positive cooldowns reset each UTC day; 0 disables."""
         await self._set_claim_settings(ctx, "daily", amount, cooldown_seconds)
 
     @economy_admin_claim.command(name="weekly")
     @commands.is_owner()
     async def economy_admin_claim_weekly(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_WEEKLY_COOLDOWN):
-        """Set weekly amount and cooldown."""
+        """Set weekly amount. Positive cooldowns reset each UTC week; 0 disables."""
         await self._set_claim_settings(ctx, "weekly", amount, cooldown_seconds)
 
     @economy_admin_claim.command(name="monthly")
     @commands.is_owner()
     async def economy_admin_claim_monthly(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_MONTHLY_COOLDOWN):
-        """Set monthly amount and cooldown."""
+        """Set monthly amount. Positive cooldowns reset each UTC month; 0 disables."""
         await self._set_claim_settings(ctx, "monthly", amount, cooldown_seconds)
 
     @economy_admin_claim.command(name="annual", aliases=["yearly"])
     @commands.is_owner()
     async def economy_admin_claim_annual(self, ctx: commands.Context, amount: int, cooldown_seconds: int = DEFAULT_ANNUAL_COOLDOWN):
-        """Set annual amount and cooldown."""
+        """Set annual amount. Positive cooldowns reset each UTC year; 0 disables."""
         await self._set_claim_settings(ctx, "annual", amount, cooldown_seconds)
 
     @economy_admin_claim.command(name="work")
@@ -1047,7 +1055,10 @@ class Economy(commands.Cog):
         async with self.config.claims() as claims:
             user_claims = claims.setdefault(user_id, {})
             last_claimed = int(user_claims.get(claim_type, 0))
-            next_claim = last_claimed + cooldown
+            if claim_type in CALENDAR_CLAIM_TYPES:
+                next_claim = self._next_calendar_claim_timestamp(claim_type, last_claimed)
+            else:
+                next_claim = last_claimed + cooldown
             if cooldown and now < next_claim:
                 await ctx.send(f"You can claim `{claim_type}` again <t:{next_claim}:R>.")
                 return
@@ -1075,7 +1086,7 @@ class Economy(commands.Cog):
         await getattr(self.config, f"{claim_type}_amount").set(amount)
         await getattr(self.config, f"{claim_type}_cooldown").set(cooldown_seconds)
         await ctx.send(
-            f"{claim_type.title()} claim set to {amount:,} {CURRENCY_NAME} every {self._format_duration(cooldown_seconds)}."
+            f"{claim_type.title()} claim set to {amount:,} {CURRENCY_NAME} {self._format_claim_interval(claim_type, cooldown_seconds)}."
         )
 
     async def _set_work_range(self, ctx: commands.Context, minimum: int, maximum: int, cooldown_seconds: int):
@@ -2176,6 +2187,41 @@ class Economy(commands.Cog):
         if seconds or not parts:
             parts.append(f"{seconds}s")
         return " ".join(parts)
+
+    @staticmethod
+    def _format_claim_interval(claim_type: str, cooldown_seconds: int) -> str:
+        if int(cooldown_seconds) <= 0:
+            return "with no cooldown"
+        if claim_type in CALENDAR_CLAIM_TYPES:
+            return f"once per {CALENDAR_CLAIM_PERIODS[claim_type]}"
+        return f"every {Economy._format_duration(cooldown_seconds)}"
+
+    @staticmethod
+    def _next_calendar_claim_timestamp(claim_type: str, claimed_at: int) -> int:
+        if int(claimed_at) <= 0:
+            return 0
+
+        claimed = datetime.fromtimestamp(int(claimed_at), timezone.utc)
+        if claim_type == "daily":
+            next_claim = (claimed + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        elif claim_type == "weekly":
+            week_start = (claimed - timedelta(days=claimed.weekday())).replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            next_claim = week_start + timedelta(days=7)
+        elif claim_type == "monthly":
+            year = claimed.year + int(claimed.month == 12)
+            month = 1 if claimed.month == 12 else claimed.month + 1
+            next_claim = datetime(year, month, 1, tzinfo=timezone.utc)
+        elif claim_type == "annual":
+            next_claim = datetime(claimed.year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            next_claim = claimed
+
+        return int(next_claim.timestamp())
 
     @staticmethod
     def _require_amount(amount: Any, *, allow_zero: bool) -> int:
