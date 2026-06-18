@@ -114,6 +114,7 @@ class ActivityStats(commands.Cog):
             user_messages={},
             user_display_names={},
             channel_messages={},
+            ignored_channel_ids=[],
             message_authors={},
             received_reactions={},
             message_reactions={},
@@ -157,6 +158,11 @@ class ActivityStats(commands.Cog):
         embed.add_field(name="Voice Time", value=self._format_duration(voice_seconds), inline=True)
         embed.add_field(name="Users Tracked", value=str(users_tracked), inline=True)
         embed.add_field(name="Known Messages", value=str(messages_tracked), inline=True)
+        embed.add_field(
+            name="Ignored Channels",
+            value=self._format_ignored_channels(ctx.guild, data.get("ignored_channel_ids", [])),
+            inline=False,
+        )
         await ctx.send(embed=embed)
 
     @activitystats.command(name="help", aliases=["commands"])
@@ -199,6 +205,9 @@ class ActivityStats(commands.Cog):
                 f"`{prefix}activitystats backfill [limit] [channel]` - import channel history\n"
                 f"`{prefix}activitystats backfillall [limit_per_channel]` - import readable channels\n"
                 f"`{prefix}activitystats toggle` - toggle tracking\n"
+                f"`{prefix}activitystats ignorechannel [channel]` - ignore a channel or category\n"
+                f"`{prefix}activitystats allowchannel <channel_or_category_id>` - stop ignoring a channel or category\n"
+                f"`{prefix}activitystats purgechannel [channel]` - remove stored stats from a channel or category\n"
                 f"`{prefix}activitystats reset` - clear tracked stats\n"
                 f"`{prefix}activitystats roles` - show top-message role config\n"
                 f"`{prefix}activitystats roles set <first|second|third> <role>` - configure rank roles\n"
@@ -223,6 +232,9 @@ class ActivityStats(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             await ctx.send("Backfill must be run in, or pointed at, a text channel.")
             return
+        if await self._is_ignored_channel(ctx.guild, channel):
+            await ctx.send(f"{channel.mention} is ignored, so backfill was skipped.")
+            return
 
         limit = max(1, min(int(limit), 100000))
         async with ctx.typing():
@@ -246,6 +258,8 @@ class ActivityStats(commands.Cog):
 
         async with ctx.typing():
             for channel in ctx.guild.text_channels:
+                if await self._is_ignored_channel(ctx.guild, channel):
+                    continue
                 permissions = channel.permissions_for(ctx.guild.me)
                 if not permissions.read_messages or not permissions.read_message_history:
                     continue
@@ -516,6 +530,56 @@ class ActivityStats(commands.Cog):
         await self.config.guild(ctx.guild).enabled.set(new_enabled)
         await ctx.send(f"ActivityStats tracking is now {'enabled' if new_enabled else 'disabled'}.")
 
+    @activitystats.command(name="ignorechannel")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_ignore_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | discord.Thread | discord.CategoryChannel | None = None,
+    ):
+        """Ignore a channel or category for message stats."""
+        channel = channel or ctx.channel
+        if not isinstance(channel, (discord.TextChannel, discord.Thread, discord.CategoryChannel)):
+            await ctx.send("Ignore must target a text channel, thread, or category.")
+            return
+        await self._add_ignored_channel(ctx.guild, channel.id)
+        await ctx.send(f"ActivityStats will ignore {self._format_channel_reference(channel)}.")
+
+    @activitystats.command(name="allowchannel")
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_allow_channel(self, ctx: commands.Context, channel_or_category_id: int):
+        """Stop ignoring a channel or category by ID."""
+        removed = await self._remove_ignored_channel(ctx.guild, channel_or_category_id)
+        if removed:
+            await ctx.send(f"Channel/category `{channel_or_category_id}` is no longer ignored.")
+        else:
+            await ctx.send(f"Channel/category `{channel_or_category_id}` was not ignored.")
+
+    @activitystats.command(name="purgechannel", aliases=["removechannel", "clearchannelstats"])
+    @commands.admin_or_permissions(manage_guild=True)
+    async def activitystats_purge_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | discord.Thread | discord.CategoryChannel | None = None,
+    ):
+        """Remove stored message and reaction stats from a channel or category."""
+        channel = channel or ctx.channel
+        if not isinstance(channel, (discord.TextChannel, discord.Thread, discord.CategoryChannel)):
+            await ctx.send("Purge must target a text channel, thread, or category.")
+            return
+
+        async with ctx.typing():
+            result = await self._purge_channel_stats(ctx.guild, channel)
+            role_result = await self._sync_top_message_roles(ctx.guild)
+
+        await ctx.send(
+            f"Removed {result['messages_removed']:,} tracked message(s) and "
+            f"{result['reactions_removed']:,} stored reaction(s) from "
+            f"{self._format_channel_reference(channel)}."
+        )
+        if role_result["configured"]:
+            await ctx.send(self._format_role_sync_result(role_result))
+
     @activitystats.command(name="reset")
     @commands.admin_or_permissions(manage_guild=True)
     async def activitystats_reset(self, ctx: commands.Context):
@@ -735,6 +799,8 @@ class ActivityStats(commands.Cog):
             return
         if not await self.config.guild(message.guild).enabled():
             return
+        if await self._is_ignored_channel(message.guild, message.channel):
+            return
 
         guild_conf = self.config.guild(message.guild)
         user_id = str(message.author.id)
@@ -805,6 +871,8 @@ class ActivityStats(commands.Cog):
         if guild is None:
             return
         if not await self.config.guild(guild).enabled():
+            return
+        if await self._is_ignored_channel_id(guild, payload.channel_id):
             return
 
         message_authors = await self.config.guild(guild).message_authors()
@@ -910,6 +978,152 @@ class ActivityStats(commands.Cog):
                 user_display_names.update(display_name_updates)
 
         return scanned, added, reaction_updates
+
+    async def _purge_channel_stats(
+        self,
+        guild: discord.Guild,
+        target: discord.TextChannel | discord.Thread | discord.CategoryChannel,
+    ) -> dict[str, int]:
+        guild_conf = self.config.guild(guild)
+        message_authors = await guild_conf.message_authors()
+        message_reactions = await guild_conf.message_reactions()
+
+        removed_message_ids: set[str] = set()
+        user_message_deltas: Counter[str] = Counter()
+        channel_message_deltas: Counter[str] = Counter()
+        reaction_deltas: list[tuple[str, str, int]] = []
+        reactions_removed = 0
+
+        for message_id, entry in message_authors.items():
+            channel_id = self._entry_channel_id(entry)
+            if channel_id is None or not self._entry_belongs_to_channel_target(guild, int(channel_id), target):
+                continue
+
+            author_id = str(self._entry_author_id(entry))
+            if not author_id:
+                continue
+
+            removed_message_ids.add(str(message_id))
+            user_message_deltas[author_id] += 1
+            channel_message_deltas[str(channel_id)] += 1
+            for emoji, count in message_reactions.get(str(message_id), {}).items():
+                removed_count = max(0, int(count))
+                if removed_count:
+                    reaction_deltas.append((author_id, emoji, -removed_count))
+                    reactions_removed += removed_count
+
+        if not removed_message_ids:
+            return {"messages_removed": 0, "reactions_removed": 0}
+
+        await guild_conf.total_messages.set(max(0, int(await guild_conf.total_messages()) - len(removed_message_ids)))
+
+        async with guild_conf.user_messages() as user_messages:
+            for user_id, delta in user_message_deltas.items():
+                new_count = int(user_messages.get(user_id, 0)) - delta
+                if new_count > 0:
+                    user_messages[user_id] = new_count
+                else:
+                    user_messages.pop(user_id, None)
+
+        async with guild_conf.channel_messages() as channel_messages:
+            for channel_id, delta in channel_message_deltas.items():
+                new_count = int(channel_messages.get(channel_id, 0)) - delta
+                if new_count > 0:
+                    channel_messages[channel_id] = new_count
+                else:
+                    channel_messages.pop(channel_id, None)
+
+        async with guild_conf.message_authors() as stored_authors:
+            for message_id in removed_message_ids:
+                stored_authors.pop(message_id, None)
+
+        async with guild_conf.message_reactions() as stored_reactions:
+            for message_id in removed_message_ids:
+                stored_reactions.pop(message_id, None)
+
+        if reaction_deltas:
+            async with guild_conf.received_reactions() as received_reactions:
+                for author_id, emoji, delta in reaction_deltas:
+                    self._apply_reaction_delta(received_reactions, author_id, emoji, delta)
+
+        return {
+            "messages_removed": len(removed_message_ids),
+            "reactions_removed": reactions_removed,
+        }
+
+    async def _add_ignored_channel(self, guild: discord.Guild, channel_id: int):
+        async with self.config.guild(guild).ignored_channel_ids() as ignored_channel_ids:
+            value = str(channel_id)
+            if value not in ignored_channel_ids:
+                ignored_channel_ids.append(value)
+
+    async def _remove_ignored_channel(self, guild: discord.Guild, channel_id: int) -> bool:
+        async with self.config.guild(guild).ignored_channel_ids() as ignored_channel_ids:
+            value = str(channel_id)
+            if value not in ignored_channel_ids:
+                return False
+            ignored_channel_ids.remove(value)
+            return True
+
+    async def _is_ignored_channel(
+        self,
+        guild: discord.Guild,
+        channel: discord.abc.GuildChannel | discord.Thread,
+    ) -> bool:
+        return bool(self._channel_ignore_ids(channel) & set(await self.config.guild(guild).ignored_channel_ids()))
+
+    async def _is_ignored_channel_id(self, guild: discord.Guild, channel_id: int | None) -> bool:
+        if channel_id is None:
+            return False
+        channel = guild.get_channel_or_thread(int(channel_id))
+        if channel is None:
+            channel = guild.get_channel(int(channel_id))
+        if channel is None:
+            return str(channel_id) in set(await self.config.guild(guild).ignored_channel_ids())
+        return await self._is_ignored_channel(guild, channel)
+
+    def _channel_ignore_ids(self, channel: discord.abc.GuildChannel | discord.Thread) -> set[str]:
+        channel_ids = {str(channel.id)}
+        parent_id = getattr(channel, "parent_id", None)
+        if parent_id is not None:
+            channel_ids.add(str(parent_id))
+
+        category = getattr(channel, "category", None)
+        if category is not None:
+            channel_ids.add(str(category.id))
+
+        parent = getattr(channel, "parent", None)
+        parent_category = getattr(parent, "category", None)
+        if parent_category is not None:
+            channel_ids.add(str(parent_category.id))
+
+        return channel_ids
+
+    def _entry_belongs_to_channel_target(
+        self,
+        guild: discord.Guild,
+        channel_id: int,
+        target: discord.TextChannel | discord.Thread | discord.CategoryChannel,
+    ) -> bool:
+        if channel_id == target.id:
+            return True
+
+        channel = guild.get_channel_or_thread(channel_id)
+        if channel is None:
+            channel = guild.get_channel(channel_id)
+        if channel is None:
+            return False
+
+        if isinstance(target, discord.CategoryChannel):
+            if getattr(channel, "category_id", None) == target.id:
+                return True
+            parent = getattr(channel, "parent", None)
+            return getattr(parent, "category_id", None) == target.id
+
+        if isinstance(target, discord.TextChannel):
+            return getattr(channel, "parent_id", None) == target.id
+
+        return False
 
     async def _message_reaction_counts(self, message: discord.Message) -> dict[str, int]:
         counts: Counter[str] = Counter()
@@ -1122,6 +1336,28 @@ class ActivityStats(commands.Cog):
                 message += f"; and {len(skipped) - 3} more"
             message += "."
         return message
+
+    def _format_ignored_channels(self, guild: discord.Guild, channel_ids: list[str]) -> str:
+        if not channel_ids:
+            return "None"
+        lines = []
+        for channel_id in channel_ids[:20]:
+            channel = guild.get_channel_or_thread(int(channel_id))
+            if channel is None:
+                channel = guild.get_channel(int(channel_id))
+            if channel is None:
+                lines.append(f"`{channel_id}`")
+            else:
+                lines.append(self._format_channel_reference(channel))
+        if len(channel_ids) > 20:
+            lines.append(f"...and {len(channel_ids) - 20} more")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_channel_reference(channel: discord.abc.GuildChannel | discord.Thread) -> str:
+        if hasattr(channel, "mention"):
+            return channel.mention
+        return f"{channel.name} (`{channel.id}`)"
 
     async def _reward_loop(self):
         await self.bot.wait_until_ready()
@@ -1477,6 +1713,12 @@ class ActivityStats(commands.Cog):
         if isinstance(entry, dict):
             return entry.get("author_id")
         return entry
+
+    @staticmethod
+    def _entry_channel_id(entry: Any) -> str | int | None:
+        if isinstance(entry, dict):
+            return entry.get("channel_id")
+        return None
 
     @staticmethod
     def _emoji_key(emoji: discord.PartialEmoji | discord.Emoji | str) -> str:
