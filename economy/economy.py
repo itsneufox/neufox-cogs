@@ -167,6 +167,7 @@ class Economy(commands.Cog):
                     f"`{prefix}eco monthly` - claim monthly LWD$",
                     f"`{prefix}eco annual` - claim annual LWD$",
                     f"`{prefix}eco work` - work for random LWD$",
+                    f"`{prefix}eco resets` - show UTC claim reset times",
                     f"`{prefix}eco top` - show the leaderboard",
                     f"`{prefix}eco shop` - view the server shop",
                     f"`{prefix}eco buy <item> [quantity]` - buy a shop item",
@@ -334,6 +335,40 @@ class Economy(commands.Cog):
     async def economy_work(self, ctx: commands.Context):
         """Work for some LWD$."""
         await self._claim_reward(ctx, "work")
+
+    @economy.command(name="resets", aliases=["reset"])
+    async def economy_resets(self, ctx: commands.Context):
+        """Show current UTC time and upcoming claim reset times."""
+        now = datetime.now(timezone.utc)
+        embed = discord.Embed(title="Economy Claim Resets", color=discord.Color.gold())
+        embed.description = f"Current UTC time: `{self._format_utc_datetime(now)}`"
+        embed.set_footer(text="Discord timestamps display in each user's local timezone.")
+
+        for claim_type in ("daily", "weekly", "monthly", "annual"):
+            cooldown = int(await getattr(self.config, f"{claim_type}_cooldown")())
+            if cooldown <= 0:
+                value = "No cooldown."
+            else:
+                reset_ts = self._next_calendar_reset_timestamp(claim_type, now)
+                reset_at = datetime.fromtimestamp(reset_ts, timezone.utc)
+                value = (
+                    f"`{self._format_utc_datetime(reset_at)}`\n"
+                    f"<t:{reset_ts}:F> (<t:{reset_ts}:R>)"
+                )
+            embed.add_field(name=claim_type.title(), value=value, inline=False)
+
+        work_cooldown = int(await self.config.work_cooldown())
+        work_value = (
+            "No cooldown."
+            if work_cooldown <= 0
+            else f"Rolling cooldown: {self._format_duration(work_cooldown)}"
+        )
+        embed.add_field(
+            name="Work",
+            value=work_value,
+            inline=False,
+        )
+        await ctx.send(embed=embed)
 
     @economy.command(name="shop")
     @commands.guild_only()
@@ -1060,7 +1095,9 @@ class Economy(commands.Cog):
             else:
                 next_claim = last_claimed + cooldown
             if cooldown and now < next_claim:
-                await ctx.send(f"You can claim `{claim_type}` again <t:{next_claim}:R>.")
+                await ctx.send(
+                    f"You can claim `{claim_type}` again: <t:{next_claim}:F> (<t:{next_claim}:R>)."
+                )
                 return
             user_claims[claim_type] = now
 
@@ -2189,6 +2226,10 @@ class Economy(commands.Cog):
         return " ".join(parts)
 
     @staticmethod
+    def _format_utc_datetime(value: datetime) -> str:
+        return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    @staticmethod
     def _format_claim_interval(claim_type: str, cooldown_seconds: int) -> str:
         if int(cooldown_seconds) <= 0:
             return "with no cooldown"
@@ -2202,26 +2243,36 @@ class Economy(commands.Cog):
             return 0
 
         claimed = datetime.fromtimestamp(int(claimed_at), timezone.utc)
+        return Economy._next_calendar_reset_timestamp(claim_type, claimed)
+
+    @staticmethod
+    def _next_calendar_reset_timestamp(claim_type: str, now: datetime) -> int:
+        now = now.astimezone(timezone.utc)
         if claim_type == "daily":
-            next_claim = (claimed + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        elif claim_type == "weekly":
-            week_start = (claimed - timedelta(days=claimed.weekday())).replace(
+            next_reset = (now + timedelta(days=1)).replace(
                 hour=0,
                 minute=0,
                 second=0,
                 microsecond=0,
             )
-            next_claim = week_start + timedelta(days=7)
+        elif claim_type == "weekly":
+            week_start = (now - timedelta(days=now.weekday())).replace(
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
+            )
+            next_reset = week_start + timedelta(days=7)
         elif claim_type == "monthly":
-            year = claimed.year + int(claimed.month == 12)
-            month = 1 if claimed.month == 12 else claimed.month + 1
-            next_claim = datetime(year, month, 1, tzinfo=timezone.utc)
+            year = now.year + int(now.month == 12)
+            month = 1 if now.month == 12 else now.month + 1
+            next_reset = datetime(year, month, 1, tzinfo=timezone.utc)
         elif claim_type == "annual":
-            next_claim = datetime(claimed.year + 1, 1, 1, tzinfo=timezone.utc)
+            next_reset = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
         else:
-            next_claim = claimed
+            next_reset = now
 
-        return int(next_claim.timestamp())
+        return int(next_reset.timestamp())
 
     @staticmethod
     def _require_amount(amount: Any, *, allow_zero: bool) -> int:

@@ -12,6 +12,7 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco monthly` - claim monthly LWD$ once per UTC calendar month.
 - `[p]eco annual` - claim annual LWD$ once per UTC calendar year.
 - `[p]eco work` - claim hourly LWD$ from a configurable random range.
+- `[p]eco resets` - show the current UTC time and upcoming claim reset times.
 - `[p]eco top` - show the LWD$ leaderboard.
 - `[p]eco shop` - show the server shop.
 - `[p]eco buy <item> [quantity]` - buy from the server shop. Dedicated shop item messages also have one-click buy buttons.
