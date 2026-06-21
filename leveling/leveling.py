@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import time
 from typing import Any
@@ -17,12 +18,15 @@ DEFAULT_CHAT_XP_MAX = 25
 DEFAULT_CHAT_COOLDOWN = 30
 DEFAULT_VOICE_XP_MIN = 5
 DEFAULT_VOICE_XP_MAX = 10
+DEFAULT_LEVEL_CURVE_SCALE = 2.0
+MAX_LEVEL = 999999
 LEADERBOARD_PAGE_SIZE = 10
 PAGINATION_TIMEOUT = 120
 PROGRESS_BAR_WIDTH = 18
 PROGRESS_BAR_GAP = "\u00a0" * 1
 LEVEL_KINDS = ("chat", "voice")
-LEVEL_CASH_REWARD_LIMIT = 10**12
+LEVEL_CASH_REWARD_INTERVAL = 10
+LEVEL_CASH_REWARD_PER_LEVEL = 100
 CURRENCY_NAME = "LWD$"
 KIND_ALIASES = {
     "chat": "chat",
@@ -113,11 +117,11 @@ class Leveling(commands.Cog):
             chat_cooldown=DEFAULT_CHAT_COOLDOWN,
             voice_xp_min=DEFAULT_VOICE_XP_MIN,
             voice_xp_max=DEFAULT_VOICE_XP_MAX,
+            level_curve_scale=DEFAULT_LEVEL_CURVE_SCALE,
             ignored_channel_ids=[],
             ignored_role_ids=[],
             users={},
             level_roles={kind: {} for kind in LEVEL_KINDS},
-            level_cash_rewards={kind: {} for kind in LEVEL_KINDS},
             active_voice_sessions={},
         )
         self._chat_cooldowns: dict[tuple[int, int], float] = {}
@@ -182,6 +186,25 @@ class Leveling(commands.Cog):
         else:
             await menu(ctx, embeds, DEFAULT_CONTROLS)
 
+    @commands.command(name="levelannounce", aliases=["levelnotify", "levelupannounce"])
+    @commands.guild_only()
+    async def level_announce_preference(self, ctx: commands.Context, enabled: bool | None = None):
+        """Opt in or out of public level-up announcements for yourself."""
+        current = await self._levelup_announcements_enabled(ctx.guild, ctx.author.id)
+        if enabled is None:
+            status = "enabled" if current else "disabled"
+            await ctx.send(
+                f"Your level-up announcements are currently {status}. "
+                f"Use `{ctx.clean_prefix}levelannounce on` or `{ctx.clean_prefix}levelannounce off`."
+            )
+            return
+
+        await self._set_levelup_announcements(ctx.guild, ctx.author, enabled)
+        if enabled:
+            await ctx.send("Your level-up announcements are now enabled.")
+        else:
+            await ctx.send("Your level-up announcements are now disabled.")
+
     @app_commands.command(name="topxp", description="Show the XP leaderboard.")
     @app_commands.describe(kind="Choose chat or voice XP.")
     @app_commands.choices(
@@ -217,8 +240,8 @@ class Leveling(commands.Cog):
         if normalized is None:
             await ctx.send("Type must be `chat` or `voice`.")
             return
-        if level < 1:
-            await ctx.send("Level must be at least 1.")
+        if not self._valid_level(level):
+            await ctx.send(f"Level must be between 1 and {MAX_LEVEL}.")
             return
         if not self._can_manage_role(ctx.guild, role):
             await ctx.send(f"I cannot manage {role.mention}. Move my highest role above it first.")
@@ -244,8 +267,8 @@ class Leveling(commands.Cog):
         if normalized is None:
             await ctx.send("Type must be `chat` or `voice`.")
             return
-        if level < 1:
-            await ctx.send("Level must be at least 1.")
+        if not self._valid_level(level):
+            await ctx.send(f"Level must be between 1 and {MAX_LEVEL}.")
             return
 
         removed_role_id = None
@@ -283,78 +306,6 @@ class Leveling(commands.Cog):
             )
         await ctx.send(embed=embed)
 
-    @commands.group(name="levelcoins", aliases=["levelcash", "levelmoney"], invoke_without_command=True)
-    @commands.guild_only()
-    @commands.admin_or_permissions(manage_guild=True)
-    async def levelcash(self, ctx: commands.Context):
-        """Manage Economy LWD$ rewards for levels."""
-        await ctx.invoke(self.levelcash_list)
-
-    @levelcash.command(name="add", aliases=["set"])
-    @commands.admin_or_permissions(manage_guild=True)
-    async def levelcash_add(self, ctx: commands.Context, kind: str, level: int, amount: int):
-        """Add or replace an LWD$ reward for a level."""
-        normalized = self._normalize_kind(kind)
-        if normalized is None:
-            await ctx.send("Type must be `chat` or `voice`.")
-            return
-        if level < 1:
-            await ctx.send("Level must be at least 1.")
-            return
-        if amount < 0 or amount > LEVEL_CASH_REWARD_LIMIT:
-            await ctx.send(f"Amount must be between 0 and {LEVEL_CASH_REWARD_LIMIT:,}.")
-            return
-
-        async with self.config.guild(ctx.guild).level_cash_rewards() as rewards:
-            kind_rewards = rewards.setdefault(normalized, {})
-            if amount:
-                kind_rewards[str(level)] = int(amount)
-            else:
-                kind_rewards.pop(str(level), None)
-
-        economy_note = "" if self._economy_cog() is not None else " Load Economy before members level up for payouts."
-        await ctx.send(f"{normalized.title()} level {level} LWD$ reward set to {amount:,}.{economy_note}")
-
-    @levelcash.command(name="remove", aliases=["delete"])
-    @commands.admin_or_permissions(manage_guild=True)
-    async def levelcash_remove(self, ctx: commands.Context, kind: str, level: int):
-        """Remove an LWD$ reward for a level."""
-        normalized = self._normalize_kind(kind)
-        if normalized is None:
-            await ctx.send("Type must be `chat` or `voice`.")
-            return
-        if level < 1:
-            await ctx.send("Level must be at least 1.")
-            return
-
-        async with self.config.guild(ctx.guild).level_cash_rewards() as rewards:
-            kind_rewards = rewards.setdefault(normalized, {})
-            removed = kind_rewards.pop(str(level), None)
-
-        if removed is None:
-            await ctx.send(f"No {normalized} LWD$ reward is configured for level {level}.")
-        else:
-            await ctx.send(f"Removed the {removed:,} LWD$ reward from {normalized} level {level}.")
-
-    @levelcash.command(name="list")
-    @commands.admin_or_permissions(manage_guild=True)
-    async def levelcash_list(self, ctx: commands.Context):
-        """List configured level LWD$ rewards."""
-        rewards = await self.config.guild(ctx.guild).level_cash_rewards()
-        embed = discord.Embed(title="Level LWD Coin Rewards", color=DEFAULT_COLOR)
-        embed.description = "Economy cog: loaded" if self._economy_cog() is not None else "Economy cog: not loaded"
-        for kind in LEVEL_KINDS:
-            lines = []
-            kind_rewards = rewards.get(kind, {})
-            for level, amount in sorted(kind_rewards.items(), key=lambda item: int(item[0])):
-                lines.append(f"Level {level}: {int(amount):,} {CURRENCY_NAME}")
-            embed.add_field(
-                name=kind.title(),
-                value="\n".join(lines) if lines else "No LWD$ rewards configured.",
-                inline=False,
-            )
-        await ctx.send(embed=embed)
-
     @commands.group(name="levelset", invoke_without_command=True)
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
@@ -370,8 +321,6 @@ class Leveling(commands.Cog):
         channel = ctx.guild.get_channel(data["levelup_channel_id"]) if data["levelup_channel_id"] else None
         ignored_channels = self._format_ignored_channels(ctx.guild, data["ignored_channel_ids"])
         ignored_roles = self._format_ignored_roles(ctx.guild, data["ignored_role_ids"])
-        cash_rewards = data.get("level_cash_rewards", {})
-        cash_reward_count = sum(len(cash_rewards.get(kind, {})) for kind in LEVEL_KINDS)
 
         embed = discord.Embed(title="Leveling Settings", color=DEFAULT_COLOR)
         embed.add_field(name="Status", value="Enabled" if data["enabled"] else "Disabled", inline=True)
@@ -399,9 +348,15 @@ class Leveling(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="Level Curve",
+            value=f"{self._level_curve_scale(data['level_curve_scale']):g}x XP requirements",
+            inline=False,
+        )
+        embed.add_field(
             name="Economy Rewards",
             value=(
-                f"{cash_reward_count} configured | "
+                f"Automatic every {LEVEL_CASH_REWARD_INTERVAL} levels "
+                f"(`level x {LEVEL_CASH_REWARD_PER_LEVEL:,}` {CURRENCY_NAME}) | "
                 f"Economy cog {'loaded' if self._economy_cog() is not None else 'not loaded'}"
             ),
             inline=False,
@@ -484,6 +439,16 @@ class Leveling(commands.Cog):
         await self.config.guild(ctx.guild).voice_xp_min.set(minimum)
         await self.config.guild(ctx.guild).voice_xp_max.set(maximum)
         await ctx.send(f"Voice XP range set to {minimum}-{maximum} per eligible minute.")
+
+    @levelset.command(name="curve", aliases=["scale"])
+    @commands.admin_or_permissions(manage_guild=True)
+    async def levelset_curve(self, ctx: commands.Context, scale: float):
+        """Set the level curve scale. Higher values require more XP per level."""
+        if scale < 0.1 or scale > 20:
+            await ctx.send("Level curve scale must be between 0.1 and 20.")
+            return
+        await self.config.guild(ctx.guild).level_curve_scale.set(float(scale))
+        await ctx.send(f"Level curve scale set to {scale:g}x XP requirements.")
 
     @levelset.command(name="ignorechannel")
     @commands.admin_or_permissions(manage_guild=True)
@@ -622,29 +587,31 @@ class Leveling(commands.Cog):
 
     async def _rank_embed(self, guild: discord.Guild, member: discord.Member, kind: str) -> discord.Embed:
         users = await self.config.guild(guild).users()
+        curve_scale = self._level_curve_scale(await self.config.guild(guild).level_curve_scale())
         record = self._normalized_record(users.get(str(member.id), {}))
         xp = int(record[f"{kind}_xp"])
-        level = self._level_from_xp(xp)
+        level = self._level_from_xp(xp, curve_scale)
         rank = self._rank_for_user(users, member.id, kind)
-        current_level_xp = self._total_xp_for_level(level)
-        next_level_xp = self._total_xp_for_level(level + 1)
-        into_level = max(0, xp - current_level_xp)
-        needed = max(1, next_level_xp - current_level_xp)
+        if level >= MAX_LEVEL:
+            progress = "Max level"
+        else:
+            current_level_xp = self._total_xp_for_level(level, curve_scale)
+            next_level_xp = self._total_xp_for_level(level + 1, curve_scale)
+            into_level = max(0, xp - current_level_xp)
+            needed = max(1, next_level_xp - current_level_xp)
+            progress = f"`{self._progress_bar(into_level, needed)}`{PROGRESS_BAR_GAP}{into_level:,}/{needed:,} XP"
 
         embed = discord.Embed(title=f"{member.display_name}'s {kind.title()} Level", color=DEFAULT_COLOR)
         embed.set_thumbnail(url=member.display_avatar.url)
         embed.add_field(name="Level", value=str(level), inline=True)
         embed.add_field(name="Rank", value=f"#{rank}" if rank else "Unranked", inline=True)
         embed.add_field(name="Total XP", value=f"{xp:,}", inline=True)
-        embed.add_field(
-            name="Progress",
-            value=f"`{self._progress_bar(into_level, needed)}`{PROGRESS_BAR_GAP}{into_level:,}/{needed:,} XP",
-            inline=False,
-        )
+        embed.add_field(name="Progress", value=progress, inline=False)
         return embed
 
     async def _leaderboard_embeds(self, guild: discord.Guild, kind: str) -> list[discord.Embed]:
         users = await self.config.guild(guild).users()
+        curve_scale = self._level_curve_scale(await self.config.guild(guild).level_curve_scale())
         key = f"{kind}_xp"
         entries = []
         for user_id, raw_record in users.items():
@@ -671,7 +638,7 @@ class Leveling(commands.Cog):
             page_entries = entries[start : start + LEADERBOARD_PAGE_SIZE]
             lines = []
             for offset, (_, display_name, xp) in enumerate(page_entries, start=start + 1):
-                level = self._level_from_xp(xp)
+                level = self._level_from_xp(xp, curve_scale)
                 safe_name = discord.utils.escape_markdown(display_name)
                 lines.append(f"`#{offset}` **{safe_name}** - Level {level} ({xp:,} XP)")
 
@@ -782,16 +749,17 @@ class Leveling(commands.Cog):
             return None
 
         lock = self._lock_for(guild.id)
+        curve_scale = self._level_curve_scale(await self.config.guild(guild).level_curve_scale())
         async with lock:
             async with self.config.guild(guild).users() as users:
                 user_id = str(member.id)
                 record = self._normalized_record(users.get(user_id, {}))
                 old_xp = int(record[f"{kind}_xp"])
-                old_level = self._level_from_xp(old_xp)
+                old_level = self._level_from_xp(old_xp, curve_scale)
                 record[f"{kind}_xp"] = old_xp + int(amount)
                 record["display_name"] = member.display_name
                 users[user_id] = record
-                new_level = self._level_from_xp(int(record[f"{kind}_xp"]))
+                new_level = self._level_from_xp(int(record[f"{kind}_xp"]), curve_scale)
 
         if new_level > old_level:
             return old_level, new_level
@@ -884,16 +852,7 @@ class Leveling(commands.Cog):
         if economy is None or not hasattr(economy, "add_balance"):
             return 0
 
-        rewards = await self.config.guild(guild).level_cash_rewards()
-        total = 0
-        for level_key, amount in rewards.get(kind, {}).items():
-            try:
-                reward_level = int(level_key)
-                reward_amount = int(amount)
-            except (TypeError, ValueError):
-                continue
-            if old_level < reward_level <= new_level and reward_amount > 0:
-                total += reward_amount
+        total = self._automatic_level_cash_rewards(old_level, new_level)
 
         if total <= 0:
             return 0
@@ -911,6 +870,13 @@ class Leveling(commands.Cog):
             return 0
         return total
 
+    def _automatic_level_cash_rewards(self, old_level: int, new_level: int) -> int:
+        first_level = ((int(old_level) // LEVEL_CASH_REWARD_INTERVAL) + 1) * LEVEL_CASH_REWARD_INTERVAL
+        total = 0
+        for level in range(first_level, min(int(new_level), MAX_LEVEL) + 1, LEVEL_CASH_REWARD_INTERVAL):
+            total += level * LEVEL_CASH_REWARD_PER_LEVEL
+        return total
+
     async def _announce_level_up(
         self,
         guild: discord.Guild,
@@ -921,6 +887,8 @@ class Leveling(commands.Cog):
         source_channel: discord.abc.Messageable | None,
     ):
         if not await self.config.guild(guild).announce_levelups():
+            return
+        if not await self._levelup_announcements_enabled(guild, member.id):
             return
 
         channel = None
@@ -938,6 +906,24 @@ class Leveling(commands.Cog):
             await channel.send(f"{member.mention} reached {kind} level **{level}**{cash_text}!")
         except discord.HTTPException:
             pass
+
+    async def _levelup_announcements_enabled(self, guild: discord.Guild, user_id: int) -> bool:
+        users = await self.config.guild(guild).users()
+        record = self._normalized_record(users.get(str(user_id), {}))
+        return bool(record["announce_levelups"])
+
+    async def _set_levelup_announcements(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        enabled: bool,
+    ):
+        async with self.config.guild(guild).users() as users:
+            user_id = str(member.id)
+            record = self._normalized_record(users.get(user_id, {}))
+            record["announce_levelups"] = bool(enabled)
+            record["display_name"] = member.display_name
+            users[user_id] = record
 
     async def _seed_voice_sessions_when_ready(self):
         await self.bot.wait_until_ready()
@@ -989,6 +975,7 @@ class Leveling(commands.Cog):
             "chat_xp": int(record.get("chat_xp", 0)),
             "voice_xp": int(record.get("voice_xp", 0)),
             "display_name": str(record.get("display_name", "")),
+            "announce_levelups": bool(record.get("announce_levelups", True)),
         }
 
     def _rank_for_user(self, users: dict[str, Any], user_id: int, kind: str) -> int | None:
@@ -1045,6 +1032,16 @@ class Leveling(commands.Cog):
     def _valid_xp_range(self, minimum: int, maximum: int) -> bool:
         return 0 <= minimum <= maximum <= 10000
 
+    def _valid_level(self, level: int) -> bool:
+        return 1 <= int(level) <= MAX_LEVEL
+
+    def _level_curve_scale(self, value: Any) -> float:
+        try:
+            scale = float(value)
+        except (TypeError, ValueError):
+            return DEFAULT_LEVEL_CURVE_SCALE
+        return min(20.0, max(0.1, scale))
+
     def _progress_bar(self, current: int, needed: int) -> str:
         filled = int(PROGRESS_BAR_WIDTH * min(current, needed) / max(needed, 1))
         return "[" + "#" * filled + "-" * (PROGRESS_BAR_WIDTH - filled) + "]"
@@ -1059,20 +1056,21 @@ class Leveling(commands.Cog):
         hours, minutes = divmod(minutes, 60)
         return f"{hours}h {minutes}m" if minutes else f"{hours}h"
 
-    def _total_xp_for_level(self, level: int) -> int:
+    def _total_xp_for_level(self, level: int, curve_scale: float = DEFAULT_LEVEL_CURVE_SCALE) -> int:
         if level <= 0:
             return 0
-        return 5 * level * (2 * level * level + 27 * level + 91) // 6
+        base_xp = 5 * level * (2 * level * level + 27 * level + 91) // 6
+        return math.ceil(base_xp * self._level_curve_scale(curve_scale))
 
-    def _level_from_xp(self, xp: int) -> int:
+    def _level_from_xp(self, xp: int, curve_scale: float = DEFAULT_LEVEL_CURVE_SCALE) -> int:
         xp = max(0, int(xp))
+        if xp >= self._total_xp_for_level(MAX_LEVEL, curve_scale):
+            return MAX_LEVEL
         low = 0
-        high = 1
-        while self._total_xp_for_level(high) <= xp:
-            high *= 2
+        high = MAX_LEVEL
         while low + 1 < high:
             mid = (low + high) // 2
-            if self._total_xp_for_level(mid) <= xp:
+            if self._total_xp_for_level(mid, curve_scale) <= xp:
                 low = mid
             else:
                 high = mid
