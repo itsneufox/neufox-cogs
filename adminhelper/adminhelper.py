@@ -194,8 +194,8 @@ class AdminHelper(commands.Cog):
             name="Lookup",
             value=(
                 f"`{prefix}userinfo [@user]` - account, role, warning, and name-history summary\n"
-                f"`{prefix}warnings @user` - list manual warnings\n"
-                f"`{prefix}clearwarnings @user <reason>` - clear manual warnings\n"
+                f"`{prefix}warnings @user` - list manual warnings and AutoMod strikes\n"
+                f"`{prefix}clearwarnings @user <reason>` - clear manual warnings and AutoMod strikes\n"
                 f"`{prefix}ah case <id>` - show a case\n"
                 f"`{prefix}ah cases @user` - show recent cases for a member\n"
                 f"`{prefix}ah modstats @user` - show actions performed/received"
@@ -381,7 +381,8 @@ class AdminHelper(commands.Cog):
             name="Moderation",
             value=(
                 f"Timed out: {timeout_text or 'No'}\n"
-                f"Warnings: {len(warnings)} manual / {antiabuse_warnings} AutoMod"
+                f"Warnings: {len(warnings)} manual\n"
+                f"AutoMod strikes: {antiabuse_warnings}"
             ),
             inline=False,
         )
@@ -655,44 +656,57 @@ class AdminHelper(commands.Cog):
             if antiabuse_warnings:
                 await ctx.send(
                     f"{member.mention} has no manual AdminHelper warnings.\n"
-                    f"AutoMod warnings/strikes: {antiabuse_warnings}."
+                    f"AutoMod strikes: {antiabuse_warnings}."
                 )
                 return
             await ctx.send(f"{member.mention} has no manual AdminHelper warnings or AutoMod strikes.")
             return
 
         lines = []
-        for idx, warning in enumerate(warnings[-10:], start=max(1, len(warnings) - 9)):
+        for idx, warning in enumerate(warnings, start=1):
             moderator = ctx.guild.get_member(warning.get("moderator_id"))
             moderator_text = moderator.mention if moderator else str(warning.get("moderator_id", "unknown"))
             created_at = warning.get("created_at", 0)
             timestamp = f"<t:{created_at}:R>" if created_at else "unknown time"
             lines.append(f"`#{idx}` {timestamp} by {moderator_text}: {warning.get('reason', DEFAULT_REASON)}")
 
-        await ctx.send(
-            f"Manual warnings for {member.mention} ({len(warnings)} total):\n"
-            + "\n".join(lines)
-            + f"\nAutoMod warnings/strikes: {antiabuse_warnings}."
+        await self._send_chunked_lines(
+            ctx,
+            f"Manual warnings for {member.mention} ({len(warnings)} total):",
+            lines,
+            footer=f"AutoMod strikes: {antiabuse_warnings}.",
         )
 
     @commands.command(name="clearwarnings", aliases=["clearwarns"])
     @commands.admin_or_permissions(manage_messages=True)
     @commands.guild_only()
     async def clearwarnings_member(self, ctx: commands.Context, member: discord.Member, *, reason: str = DEFAULT_REASON):
-        """Clear stored warnings for a member."""
-        previous = len(await self.config.member(member).warnings())
-        if previous and not await self._confirm_action(
+        """Clear stored warnings and AutoMod strikes for a member."""
+        previous_manual = len(await self.config.member(member).warnings())
+        previous_automod = await self._antiabuse_warning_count(member)
+        if not previous_manual and not previous_automod:
+            await ctx.send(f"{member.mention} has no manual AdminHelper warnings or AutoMod strikes.")
+            return
+
+        if not await self._confirm_action(
             ctx,
-            f"clear {previous} warning(s) for {member.mention}",
+            (
+                f"clear {previous_manual} manual warning(s) and "
+                f"{previous_automod} AutoMod strike(s) for {member.mention}"
+            ),
             reason=reason,
             target=member,
         ):
             return
         await self.config.member(member).warnings.set([])
-        extra = f"Cleared {previous} warning(s)"
+        await self._clear_antiabuse_warning_count(member)
+        extra = f"Cleared {previous_manual} manual warning(s) and {previous_automod} AutoMod strike(s)"
         case_id = await self._create_case(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=extra)
         await self._log_action(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=extra, case_id=case_id)
-        await ctx.send(f"Cleared {previous} warning(s) for {member.mention}.")
+        await ctx.send(
+            f"Cleared {previous_manual} manual warning(s) and "
+            f"{previous_automod} AutoMod strike(s) for {member.mention}."
+        )
 
     @adminhelper.command(name="case")
     @commands.admin_or_permissions(manage_messages=True)
@@ -918,6 +932,53 @@ class AdminHelper(commands.Cog):
             return await config.member(member).warning_count()
         except Exception:
             return 0
+
+    async def _clear_antiabuse_warning_count(self, member: discord.Member):
+        antiabuse = self.bot.get_cog("AntiAbuse")
+        if antiabuse is None:
+            return
+        config = getattr(antiabuse, "config", None)
+        if config is None:
+            return
+        try:
+            member_cfg = config.member(member)
+            await member_cfg.warning_count.set(0)
+            await member_cfg.last_violation_at.set(0)
+            await member_cfg.last_action_at.set(0)
+        except Exception:
+            return
+
+    async def _send_chunked_lines(
+        self,
+        ctx: commands.Context,
+        header: str,
+        lines: list[str],
+        *,
+        footer: str = "",
+        max_length: int = 1900,
+    ):
+        current = header
+        for raw_line in lines:
+            line = raw_line
+            if len(line) > max_length - 2:
+                line = line[: max_length - 5] + "..."
+            candidate = f"{current}\n{line}" if current else line
+            if len(candidate) > max_length:
+                await ctx.send(current)
+                current = line
+                continue
+            current = candidate
+
+        if footer:
+            candidate = f"{current}\n{footer}" if current else footer
+            if len(candidate) > max_length:
+                await ctx.send(current)
+                current = footer
+            else:
+                current = candidate
+
+        if current:
+            await ctx.send(current)
 
     async def _send_warning_punishments(self, ctx: commands.Context):
         punishments = await self.config.guild(ctx.guild).warning_punishments()

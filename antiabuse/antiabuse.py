@@ -220,7 +220,8 @@ class AntiAbuse(commands.Cog):
             current_ratio = await guild_cfg.caps_ratio()
             current_min = await guild_cfg.caps_min_length()
             await ctx.send(
-                f"Caps rule: uppercase ratio > {current_ratio:.2f} with at least {current_min} letters."
+                f"Caps rule: uppercase ratio > {current_ratio:.2f} with at least {current_min} letters. "
+                "Stretched repeated letters are de-emphasized."
             )
             return
 
@@ -244,7 +245,10 @@ class AntiAbuse(commands.Cog):
 
         new_ratio = await guild_cfg.caps_ratio()
         new_min = await guild_cfg.caps_min_length()
-        await ctx.send(f"Caps rule updated: ratio > {new_ratio * 100:.0f}% and min length {new_min}.")
+        await ctx.send(
+            f"Caps rule updated: ratio > {new_ratio * 100:.0f}% and min length {new_min}. "
+            "Stretched repeated letters are de-emphasized."
+        )
 
     @antiabuse.command(name="punish")
     @commands.admin_or_permissions(manage_guild=True)
@@ -605,7 +609,7 @@ class AntiAbuse(commands.Cog):
         state = "enabled" if enabled else "disabled"
         current = await guild_cfg.all()
         await ctx.send(
-            f"Auto-lockdown {state}. Trigger: {current['lockdown_threshold']} warnings, "
+            f"Auto-lockdown {state}. Trigger: {current['lockdown_threshold']} AutoMod strikes, "
             f"duration: {current['lockdown_minutes']} minute(s)."
         )
 
@@ -613,19 +617,19 @@ class AntiAbuse(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def antiabuse_reset(self, ctx: commands.Context, member: discord.Member | None = None):
-        """Reset warning counters. Omit member to clear all members in this server."""
+        """Reset AutoMod strike counters. Omit member to clear all members in this server."""
         if member is None:
             for target in ctx.guild.members:
                 await self.config.member(target).warning_count.set(0)
                 await self.config.member(target).last_violation_at.set(0)
                 await self.config.member(target).last_action_at.set(0)
-            await ctx.send("All AutoMod counters cleared for this server.")
+            await ctx.send("All AutoMod strike counters cleared for this server.")
             return
 
         await self.config.member(member).warning_count.set(0)
         await self.config.member(member).last_violation_at.set(0)
         await self.config.member(member).last_action_at.set(0)
-        await ctx.send(f"Warning counters reset for {member.mention}.")
+        await ctx.send(f"AutoMod strike counters reset for {member.mention}.")
 
     @antiabuse.command(name="offender")
     @commands.admin_or_permissions(manage_guild=True)
@@ -639,7 +643,7 @@ class AntiAbuse(commands.Cog):
         now = int(time.time())
         embed = discord.Embed(title="Offender Profile", color=DEFAULT_COLOR)
         embed.add_field(name="Member", value=member.mention, inline=True)
-        embed.add_field(name="Warnings", value=str(count), inline=True)
+        embed.add_field(name="AutoMod strikes", value=str(count), inline=True)
         embed.add_field(name="Last violation", value=f"<t:{last_violation}:R>" if last_violation > 0 else "None", inline=True)
         embed.add_field(name="Last action", value=f"<t:{last_action}:R>" if last_action > 0 else "None", inline=True)
         embed.add_field(name="Activity", value=("Idle" if not last_violation or now - last_violation > 60 * 60 else "Recently active"), inline=True)
@@ -694,7 +698,11 @@ class AntiAbuse(commands.Cog):
             inline=True,
         )
         embed.add_field(name="Mentions", value=f">{settings['mention_threshold']}", inline=True)
-        embed.add_field(name="Caps", value=f">{settings['caps_ratio'] * 100:.0f}% uppercase ({settings['caps_min_length']} letters min)", inline=True)
+        embed.add_field(
+            name="Caps",
+            value=f">{settings['caps_ratio'] * 100:.0f}% uppercase ({settings['caps_min_length']} letters min; stretched-aware)",
+            inline=True,
+        )
         embed.add_field(name="Links", value=f">{settings['link_threshold']}", inline=True)
         embed.add_field(
             name="Punishment",
@@ -886,8 +894,26 @@ class AntiAbuse(commands.Cog):
         if ratio <= 0:
             return False
 
+        collapsed_letters = AntiAbuse._collapse_repeated_letters(letters)
+        repeated_letters = len(letters) - len(collapsed_letters)
+        meaningful_min_length = max(min_length * 2, 24)
+        if repeated_letters >= min_length and len(collapsed_letters) < meaningful_min_length:
+            return False
+
         uppercase = sum(1 for char in letters if char.isupper())
         return (uppercase / len(letters)) >= ratio
+
+    @staticmethod
+    def _collapse_repeated_letters(letters: list[str]) -> list[str]:
+        collapsed: list[str] = []
+        previous = ""
+        for char in letters:
+            folded = char.casefold()
+            if folded == previous:
+                continue
+            collapsed.append(char)
+            previous = folded
+        return collapsed
 
     async def _apply_penalty(self, message: discord.Message, violations: list[str]):
         member = message.author
@@ -928,8 +954,10 @@ class AntiAbuse(commands.Cog):
         await member_cfg.last_violation_at.set(now)
 
         last_action = await member_cfg.last_action_at()
-        if punish_settings["action_cooldown_seconds"] and now - last_action < punish_settings["action_cooldown_seconds"]:
-            return
+        cooldown_active = (
+            punish_settings["action_cooldown_seconds"]
+            and now - last_action < punish_settings["action_cooldown_seconds"]
+        )
 
         action = "warn"
         timeout_minutes = 0
@@ -954,6 +982,13 @@ class AntiAbuse(commands.Cog):
             do_lockdown = True
 
         if action == "warn" and warning_count < punish_settings["warn_threshold"]:
+            await self._notify(message, member, violations, f"strike recorded (count {warning_count})")
+            await self._log_action(message.guild, member, warning_count, violations, "strike recorded")
+            return
+
+        if action != "warn" and cooldown_active:
+            await self._notify(message, member, violations, f"strike recorded (count {warning_count}; action cooldown)")
+            await self._log_action(message.guild, member, warning_count, violations, "strike recorded during action cooldown")
             return
 
         if action == "short_timeout":
@@ -1037,12 +1072,32 @@ class AntiAbuse(commands.Cog):
         lines = [
             f"{member.mention} AutoMod action: **{action}**",
             f"Triggered by: {reasons}",
-            f"This is warning #{await self.config.member(member).warning_count()} for this user.",
+            self._message_context_line(message),
+            f"AutoMod strikes: {await self.config.member(member).warning_count()}.",
         ]
+        lines = [line for line in lines if line]
         await channel.send(
             "\n".join(lines),
             allowed_mentions=discord.AllowedMentions(users=True),
         )
+
+    @staticmethod
+    def _message_context_line(message: discord.Message, limit: int = 220) -> str:
+        content = " ".join((message.content or "").split())
+        if not content:
+            attachment_count = len(getattr(message, "attachments", []) or [])
+            if not attachment_count:
+                return ""
+            content = f"[{attachment_count} attachment(s)]"
+
+        content = discord.utils.escape_mentions(content)
+        if len(content) > limit:
+            content = content[: limit - 3].rstrip() + "..."
+
+        jump_url = getattr(message, "jump_url", "")
+        if jump_url:
+            return f"Message: {content}\nJump: {jump_url}"
+        return f"Message: {content}"
 
     async def _log_action(self, guild: discord.Guild, member: discord.Member, warnings: int, violations: list[str], action: str):
         log_channel_id = await self.config.guild(guild).log_channel_id()
@@ -1054,7 +1109,7 @@ class AntiAbuse(commands.Cog):
 
         embed = discord.Embed(title="AutoMod Log", color=DEFAULT_COLOR)
         embed.add_field(name="Member", value=member.mention, inline=True)
-        embed.add_field(name="Warnings", value=str(warnings), inline=True)
+        embed.add_field(name="AutoMod strikes", value=str(warnings), inline=True)
         embed.add_field(name="Action", value=action, inline=True)
         embed.add_field(name="Reasons", value=", ".join(violations), inline=False)
         try:
