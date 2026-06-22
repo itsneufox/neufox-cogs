@@ -589,8 +589,10 @@ class Economy(commands.Cog):
                     f"`{prefix}eco api status`",
                     f"`{prefix}eco api start [host] [port]`",
                     f"`{prefix}eco api stop`",
+                    f"`{prefix}eco api token list`",
                     f"`{prefix}eco api token create <name>`",
                     f"`{prefix}eco api token revoke <name>`",
+                    f"`{prefix}eco api token revokeall confirm`",
                 ]
             ),
             inline=False,
@@ -1022,6 +1024,18 @@ class Economy(commands.Cog):
             tokens[name] = token
         await ctx.send(f"Token `{name}` created. Copy it now:\n`{token}`")
 
+    @economy_api_token.command(name="list")
+    @commands.is_owner()
+    async def economy_api_token_list(self, ctx: commands.Context):
+        """List configured API token names."""
+        tokens = await self.config.api_tokens()
+        if not tokens:
+            await ctx.send("No API tokens are configured.")
+            return
+
+        names = sorted(discord.utils.escape_markdown(name) for name in tokens)
+        await ctx.send("Configured API token names:\n" + "\n".join(f"- {name}" for name in names))
+
     @economy_api_token.command(name="revoke")
     @commands.is_owner()
     async def economy_api_token_revoke(self, ctx: commands.Context, name: str):
@@ -1029,6 +1043,23 @@ class Economy(commands.Cog):
         async with self.config.api_tokens() as tokens:
             existed = tokens.pop(name, None) is not None
         await ctx.send(f"Token `{name}` {'revoked' if existed else 'was not found'}.")
+
+    @economy_api_token.command(name="revokeall", aliases=["clear", "revoke-all"])
+    @commands.is_owner()
+    async def economy_api_token_revoke_all(self, ctx: commands.Context, confirmation: str | None = None):
+        """Revoke every API token."""
+        if confirmation != "confirm":
+            await ctx.send(
+                "This revokes every API token. Run "
+                f"`{ctx.clean_prefix}eco api token revokeall confirm` to continue."
+            )
+            return
+
+        async with self.config.api_tokens() as tokens:
+            count = len(tokens)
+            tokens.clear()
+
+        await ctx.send(f"Revoked {count} API token{'s' if count != 1 else ''}.")
 
     async def _owner_adjust(
         self,

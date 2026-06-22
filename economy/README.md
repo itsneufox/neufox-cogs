@@ -73,8 +73,10 @@ Code-generated, non-role items become giftable by default. Role reward items are
 - `[p]eco api status`
 - `[p]eco api start [host] [port]`
 - `[p]eco api stop`
+- `[p]eco api token list`
 - `[p]eco api token create <name>`
 - `[p]eco api token revoke <name>`
+- `[p]eco api token revokeall confirm`
 
 HTTP API requests require `Authorization: Bearer <token>`.
 
