@@ -1,0 +1,18 @@
+{
+    "name": "EmbedFixer",
+    "short": "Fix social media embeds with webhook reposts.",
+    "description": "Watches for supported social media links, suppresses embeds on the original message when possible, and posts a fixed-link copy through a webhook using the original author's display name and avatar. Includes a button to try another fixer service when alternatives exist.",
+    "author": [
+        "itsneufox"
+    ],
+    "min_bot_version": "3.5.0",
+    "install_msg": "EmbedFixer loaded. Use `[p]embedfixer` to inspect settings, `[p]embedfixer on|off` to control automatic fixing, and `[p]embedfixer optout` if a user wants their messages ignored.",
+    "requirements": [],
+    "tags": [
+        "embed",
+        "social",
+        "webhook",
+        "utility"
+    ],
+    "end_user_data_statement": "This cog stores guild-level settings for whether embed fixing is enabled and per-member opt-out flags. It does not store message content."
+}
