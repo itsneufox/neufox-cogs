@@ -597,27 +597,20 @@ def _has_alternatives(matches: list[MatchedURL]) -> bool:
 
 
 def _rewrite_content(content: str, matches: list[MatchedURL], rotations: dict[int, int]) -> tuple[str, list[str]]:
-    pieces: list[str] = []
     fixed_urls: list[str] = []
-    last_end = 0
 
     for match in matches:
-        pieces.append(content[last_end:match.start])
         method = _method_for_index(match.domain, rotations.get(int(match.domain.id), 0), match.website)
         fixed_url = _apply_fix(match.clean, match.domain, method) if method is not None else None
         if fixed_url is None:
             fixed_url = match.original
-        pieces.append(fixed_url)
         fixed_urls.append(fixed_url)
-        last_end = match.end
 
-    pieces.append(content[last_end:])
-    rewritten = "".join(pieces)
+    rewritten = "\n".join(fixed_urls)
     if len(rewritten) <= 2000:
         return rewritten, fixed_urls
 
-    fallback = "\n".join(fixed_urls)
-    return fallback[:2000], fixed_urls
+    return rewritten[:2000], fixed_urls
 
 
 class TryOtherView(discord.ui.View):
@@ -665,7 +658,7 @@ class EmbedFixer(commands.Cog):
         if isinstance(ctx.author, discord.Member):
             opted_out = await self.config.member(ctx.author).opted_out()
             embed.add_field(name="Your opt-out", value="On" if opted_out else "Off", inline=True)
-        embed.add_field(name="Behavior", value="Suppress original embeds and repost fixed links through a webhook.", inline=False)
+        embed.add_field(name="Behavior", value="Suppress original embeds and repost only fixed links through a webhook.", inline=False)
         embed.add_field(name="Fallbacks", value="Webhook posts include a Try other button when another service exists.", inline=False)
         embed.add_field(
             name="Opt out",
