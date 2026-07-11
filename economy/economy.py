@@ -825,10 +825,19 @@ class Economy(commands.Cog):
     @commands.max_concurrency(1, per=commands.BucketType.user, wait=False)
     async def economy_casino_blackjack(self, ctx: commands.Context, wager: int):
         """Play an interactive hand of blackjack."""
-        if ctx.author.id in self._blackjack_players:
+        await self._run_blackjack_round(ctx, wager)
+
+    async def _run_blackjack_round(self, ctx: commands.Context, wager: int) -> bool:
+        """Run one blackjack round for a command or Play Again interaction."""
+        existing_view = self._blackjack_views.get(ctx.author.id)
+        if (
+            ctx.author.id in self._blackjack_players
+            and (existing_view is None or existing_view.phase != "ended")
+        ):
             await ctx.send("You already have an active blackjack hand.")
-            return
+            return False
         self._blackjack_players.add(ctx.author.id)
+        view: BlackjackView | None = None
         try:
             try:
                 await self._validate_casino_wager(wager)
@@ -840,9 +849,8 @@ class Economy(commands.Cog):
                 )
             except EconomyError as error:
                 await ctx.send(str(error))
-                return
+                return False
 
-            view: BlackjackView | None = None
             try:
                 view = BlackjackView(self, ctx, wager, currency_name=CURRENCY_NAME)
                 self._blackjack_views[ctx.author.id] = view
@@ -867,9 +875,15 @@ class Economy(commands.Cog):
                         )
                 else:
                     await ctx.send("That blackjack hand hit an unexpected error and will time out safely.")
+            return True
         finally:
-            self._blackjack_players.discard(ctx.author.id)
-            self._blackjack_views.pop(ctx.author.id, None)
+            if view is None:
+                current_view = self._blackjack_views.get(ctx.author.id)
+                if current_view is None or current_view.phase == "ended":
+                    self._blackjack_players.discard(ctx.author.id)
+            elif self._blackjack_views.get(ctx.author.id) is view:
+                self._blackjack_players.discard(ctx.author.id)
+                self._blackjack_views.pop(ctx.author.id, None)
 
     @economy.group(name="admin", invoke_without_command=True)
     @commands.is_owner()

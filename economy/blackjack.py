@@ -198,6 +198,51 @@ def render_blackjack_table(
             image.close()
 
 
+class BlackjackReplayView(discord.ui.View):
+    def __init__(self, cog: Economy, ctx, wager: int, *, timeout: float = 120):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self.ctx = ctx
+        self.player = ctx.author
+        self.wager = wager
+        self.message: discord.Message | None = None
+        self.play_again_button.label = f"Play Again ({wager:,})"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.player.id:
+            await interaction.response.send_message(
+                "Only the original player can replay this blackjack wager.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        self.play_again_button.disabled = True
+        if self.message is not None:
+            with suppress(discord.HTTPException):
+                await self.message.edit(view=self)
+
+    @discord.ui.button(label="Play Again", emoji="🔁", style=discord.ButtonStyle.success)
+    async def play_again_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ):
+        await interaction.response.defer()
+        button.disabled = True
+        if self.message is not None:
+            with suppress(discord.HTTPException):
+                await self.message.edit(view=self)
+
+        started = await self.cog._run_blackjack_round(self.ctx, self.wager)
+        if not started:
+            button.disabled = False
+            if self.message is not None:
+                with suppress(discord.HTTPException):
+                    await self.message.edit(view=self)
+
+
 class BlackjackView(discord.ui.View):
     MAX_HANDS = 4
     DEALER_HITS_SOFT_17 = False
@@ -227,6 +272,7 @@ class BlackjackView(discord.ui.View):
         self.result_lines: list[str] = []
         self.final_balance: int | None = None
         self.action_log: list[str] = []
+        self.replay_view: BlackjackReplayView | None = None
         self._action_lock = asyncio.Lock()
         self._action_version = 0
 
@@ -239,7 +285,7 @@ class BlackjackView(discord.ui.View):
         hidden.down = True
         self.dealer_cards.append(hidden)
         self._record_action(
-            f"Dealt player {self._card_short(self.hands[0].cards[0])}, "
+            f"Player dealt {self._card_short(self.hands[0].cards[0])}, "
             f"{self._card_short(self.hands[0].cards[1])} "
             f"({self._hand_total_short(self.hands[0].cards)}); "
             f"dealer shows {self._card_short(self.dealer_cards[0])}."
@@ -272,7 +318,7 @@ class BlackjackView(discord.ui.View):
             if self.phase == "ended":
                 return
             if self.phase == "insurance":
-                self._record_action("Insurance offer timed out; declined.")
+                self._record_action("Player insurance offer timed out; declined.")
                 await self._after_insurance_choice()
                 if self.phase == "ended":
                     self._sync_buttons()
@@ -281,7 +327,7 @@ class BlackjackView(discord.ui.View):
             for hand in self.hands:
                 if not hand.finished:
                     hand.forfeited = True
-            self._record_action("Action timer expired; unfinished hands forfeited.")
+            self._record_action("Player action timer expired; unfinished hands forfeited.")
             await self._finish_round(timed_out=True)
             self._sync_buttons()
             await self._edit_message()
@@ -296,6 +342,7 @@ class BlackjackView(discord.ui.View):
                 "Blackjack Canceled",
                 self.total_wager,
                 ["The economy cog was reloaded; all committed stakes were returned."],
+                allow_replay=False,
             )
             self._action_version += 1
             self._sync_buttons()
@@ -318,7 +365,7 @@ class BlackjackView(discord.ui.View):
             hand.cards.append(card)
             total, soft = hand_value(hand.cards)
             self._record_action(
-                f"Hand {hand_number}: hit {self._card_short(card)} → "
+                f"Player Hand {hand_number}: hit {self._card_short(card)} → "
                 f"{format_blackjack_total(total, soft=soft, ace_adjusted=was_soft and not soft)}."
             )
             if total >= 21:
@@ -340,7 +387,7 @@ class BlackjackView(discord.ui.View):
             hand.has_acted = True
             hand.stood = True
             self._record_action(
-                f"Hand {hand_number}: stood on {self._hand_total_short(hand.cards)}."
+                f"Player Hand {hand_number}: stood on {self._hand_total_short(hand.cards)}."
             )
             await self._advance_hand()
             await self._refresh_after_action()
@@ -378,7 +425,7 @@ class BlackjackView(discord.ui.View):
             total, soft = hand_value(hand.cards)
             hand.stood = True
             self._record_action(
-                f"Hand {hand_number}: doubled to {hand.bet:,}, drew "
+                f"Player Hand {hand_number}: doubled to {hand.bet:,}, drew "
                 f"{self._card_short(card)} → "
                 f"{format_blackjack_total(total, soft=soft, ace_adjusted=was_soft and not soft)}."
             )
@@ -427,7 +474,8 @@ class BlackjackView(discord.ui.View):
                     new_hand.stood = True
             self.hands.insert(self.active_hand_index + 1, new_hand)
             self._record_action(
-                f"Hand {hand_number}: split into hands {hand_number} and {hand_number + 1}."
+                f"Player Hand {hand_number}: split into Player Hands "
+                f"{hand_number} and {hand_number + 1}."
             )
             if hand.stood:
                 await self._advance_hand()
@@ -446,7 +494,7 @@ class BlackjackView(discord.ui.View):
             hand_number = self.active_hand_index + 1
             hand.has_acted = True
             hand.surrendered = True
-            self._record_action(f"Hand {hand_number}: surrendered.")
+            self._record_action(f"Player Hand {hand_number}: surrendered.")
             await self._advance_hand()
             await self._refresh_after_action()
 
@@ -475,7 +523,7 @@ class BlackjackView(discord.ui.View):
             self.final_balance = account["cash"]
             self.insurance_bet = insurance_bet
             self.total_wager += insurance_bet
-            self._record_action(f"Bought insurance for {insurance_bet:,}.")
+            self._record_action(f"Player bought insurance for {insurance_bet:,}.")
             await self._after_insurance_choice()
             await self._refresh_after_action()
 
@@ -488,7 +536,7 @@ class BlackjackView(discord.ui.View):
                 return
             if self.phase != "insurance":
                 return
-            self._record_action("Declined insurance.")
+            self._record_action("Player declined insurance.")
             await self._after_insurance_choice()
             await self._refresh_after_action()
 
@@ -611,12 +659,20 @@ class BlackjackView(discord.ui.View):
                 outcome = "loss"
             payout += returned
             lines.append(
-                f"Hand {index}: {outcome} ({total} vs dealer {dealer_total}), returned {returned:,}"
+                f"Player Hand {index}: {outcome} "
+                f"({total} vs Dealer {dealer_total}), returned {returned:,}"
             )
         title = "Blackjack - Timed Out" if timed_out else "Blackjack Results"
         await self._end_round(title, payout, lines)
 
-    async def _end_round(self, title: str, payout: int, lines: list[str]):
+    async def _end_round(
+        self,
+        title: str,
+        payout: int,
+        lines: list[str],
+        *,
+        allow_replay: bool = True,
+    ):
         self.dealer_cards[1].down = False
         if payout:
             account = await self.cog._credit_blackjack_payout(
@@ -641,6 +697,8 @@ class BlackjackView(discord.ui.View):
         self.result_lines = lines
         self.final_balance = account["cash"]
         self.phase = "ended"
+        if allow_replay:
+            self.replay_view = BlackjackReplayView(self.cog, self.ctx, self.base_wager)
         self.stop()
 
     @staticmethod
@@ -715,7 +773,7 @@ class BlackjackView(discord.ui.View):
                 if total > 21:
                     status = "bust"
                 lines.append(
-                    f"{marker} Hand {index}: **{total}** | bet {hand.bet:,} | {status}"
+                    f"{marker} Player Hand {index}: **{total}** | bet {hand.bet:,} | {status}"
                 )
             embed = discord.Embed(
                 title="Blackjack - Your Turn",
@@ -756,9 +814,11 @@ class BlackjackView(discord.ui.View):
             self.message = await self.ctx.send(
                 embed=embed,
                 file=file,
-                view=self,
+                view=self._message_view(),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+            if self.replay_view is not None:
+                self.replay_view.message = self.message
         finally:
             file.close()
 
@@ -767,9 +827,20 @@ class BlackjackView(discord.ui.View):
             return
         embed, file = await self._render_file()
         try:
-            await self.message.edit(embed=embed, attachments=[file], view=self)
+            await self.message.edit(
+                embed=embed,
+                attachments=[file],
+                view=self._message_view(),
+            )
+            if self.replay_view is not None:
+                self.replay_view.message = self.message
         except discord.HTTPException:
             with suppress(discord.HTTPException):
-                await self.message.edit(embed=embed, view=self)
+                await self.message.edit(embed=embed, view=self._message_view())
+                if self.replay_view is not None:
+                    self.replay_view.message = self.message
         finally:
             file.close()
+
+    def _message_view(self) -> discord.ui.View:
+        return self.replay_view or self
