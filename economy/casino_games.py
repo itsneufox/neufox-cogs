@@ -72,6 +72,13 @@ def format_blackjack_action_log(entries: list[str], character_limit: int = 1024)
     return omission + "\n".join(reversed(kept))
 
 
+def format_blackjack_total(total: int, *, soft: bool, ace_adjusted: bool = False) -> str:
+    label = f"soft {total}" if soft else str(total)
+    if ace_adjusted:
+        label += " (Ace adjusted to 1)"
+    return label
+
+
 def draw_high_card() -> tuple[tuple[str, str], tuple[str, str]]:
     """Draw distinct dealer and player cards from one securely shuffled deck."""
     deck = [(rank, suit) for rank in HIGH_CARD_RANKS for suit in HIGH_CARD_SUITS]

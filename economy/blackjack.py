@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw
 from .casino_games import (
     calculate_blackjack_dealer_natural_payout,
     format_blackjack_action_log,
+    format_blackjack_total,
 )
 
 if TYPE_CHECKING:
@@ -239,7 +240,8 @@ class BlackjackView(discord.ui.View):
         self.dealer_cards.append(hidden)
         self._record_action(
             f"Dealt player {self._card_short(self.hands[0].cards[0])}, "
-            f"{self._card_short(self.hands[0].cards[1])}; "
+            f"{self._card_short(self.hands[0].cards[1])} "
+            f"({self._hand_total_short(self.hands[0].cards)}); "
             f"dealer shows {self._card_short(self.dealer_cards[0])}."
         )
 
@@ -311,11 +313,13 @@ class BlackjackView(discord.ui.View):
                 return
             hand_number = self.active_hand_index + 1
             hand.has_acted = True
+            _, was_soft = hand_value(hand.cards)
             card = self.deck.pop()
             hand.cards.append(card)
-            total = hand_value(hand.cards)[0]
+            total, soft = hand_value(hand.cards)
             self._record_action(
-                f"Hand {hand_number}: hit {self._card_short(card)} → {total}."
+                f"Hand {hand_number}: hit {self._card_short(card)} → "
+                f"{format_blackjack_total(total, soft=soft, ace_adjusted=was_soft and not soft)}."
             )
             if total >= 21:
                 hand.stood = True
@@ -336,7 +340,7 @@ class BlackjackView(discord.ui.View):
             hand.has_acted = True
             hand.stood = True
             self._record_action(
-                f"Hand {hand_number}: stood on {hand_value(hand.cards)[0]}."
+                f"Hand {hand_number}: stood on {self._hand_total_short(hand.cards)}."
             )
             await self._advance_hand()
             await self._refresh_after_action()
@@ -368,12 +372,15 @@ class BlackjackView(discord.ui.View):
             hand.bet *= 2
             hand.has_acted = True
             hand_number = self.active_hand_index + 1
+            _, was_soft = hand_value(hand.cards)
             card = self.deck.pop()
             hand.cards.append(card)
+            total, soft = hand_value(hand.cards)
             hand.stood = True
             self._record_action(
                 f"Hand {hand_number}: doubled to {hand.bet:,}, drew "
-                f"{self._card_short(card)} → {hand_value(hand.cards)[0]}."
+                f"{self._card_short(card)} → "
+                f"{format_blackjack_total(total, soft=soft, ace_adjusted=was_soft and not soft)}."
             )
             await self._advance_hand()
             await self._refresh_after_action()
@@ -555,22 +562,28 @@ class BlackjackView(discord.ui.View):
         ]
         dealer_total, dealer_soft = hand_value(self.dealer_cards, reveal_hidden=True)
         self._record_action(
-            f"Dealer revealed {self._card_short(self.dealer_cards[1])} → {dealer_total}."
+            f"Dealer revealed {self._card_short(self.dealer_cards[1])} → "
+            f"{format_blackjack_total(dealer_total, soft=dealer_soft)}."
         )
         while eligible and (
             dealer_total < 17
             or (self.DEALER_HITS_SOFT_17 and dealer_total == 17 and dealer_soft)
         ):
+            was_soft = dealer_soft
             card = self.deck.pop()
             self.dealer_cards.append(card)
             dealer_total, dealer_soft = hand_value(self.dealer_cards, reveal_hidden=True)
             self._record_action(
-                f"Dealer hit {self._card_short(card)} → {dealer_total}."
+                f"Dealer hit {self._card_short(card)} → "
+                f"{format_blackjack_total(dealer_total, soft=dealer_soft, ace_adjusted=was_soft and not dealer_soft)}."
             )
 
         if eligible:
             dealer_result = "busted" if dealer_total > 21 else "stood"
-            self._record_action(f"Dealer {dealer_result} on {dealer_total}.")
+            self._record_action(
+                f"Dealer {dealer_result} on "
+                f"{format_blackjack_total(dealer_total, soft=dealer_soft)}."
+            )
 
         payout = 0
         lines = []
@@ -634,6 +647,11 @@ class BlackjackView(discord.ui.View):
     def _card_short(card: BlackjackCard) -> str:
         suits = {"C": "♣", "D": "♦", "H": "♥", "S": "♠"}
         return f"{card.rank}{suits[card.suit]}"
+
+    @staticmethod
+    def _hand_total_short(cards: list[BlackjackCard]) -> str:
+        total, soft = hand_value(cards)
+        return format_blackjack_total(total, soft=soft)
 
     def _record_action(self, text: str):
         self.action_log.append(f"> {text}")

@@ -35,6 +35,16 @@ class BlackjackHouseRuleTests(unittest.TestCase):
         self.assertIn("> action 19", result)
         self.assertNotIn("> action 1\n", result)
 
+    def test_blackjack_totals_explain_soft_aces_and_adjustments(self):
+        self.assertEqual(
+            casino_games.format_blackjack_total(13, soft=True),
+            "soft 13",
+        )
+        self.assertEqual(
+            casino_games.format_blackjack_total(12, soft=False, ace_adjusted=True),
+            "12 (Ace adjusted to 1)",
+        )
+
 
 class HighCardTests(unittest.TestCase):
     def test_player_win_returns_double_wager(self):
