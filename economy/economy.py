@@ -14,6 +14,15 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
+from .blackjack import BlackjackView
+from .slots import (
+    SLOT_EMOJIS,
+    SLOT_TRIPLE_MULTIPLIERS,
+    calculate_slot_payout,
+    draw_slot_spin,
+    render_slot_spin,
+)
+
 
 log = logging.getLogger("red.neufox.economy")
 
@@ -34,6 +43,10 @@ DEFAULT_WORK_AMOUNT = 75
 DEFAULT_WORK_MIN = 25
 DEFAULT_WORK_MAX = 100
 DEFAULT_WORK_COOLDOWN = 3600
+DEFAULT_CASINO_MIN_BET = 10
+DEFAULT_CASINO_MAX_BET = 10000
+CASINO_COINFLIP_PAYOUT_PERCENT = 195
+CASINO_DICE_PAYOUT_PERCENT = 570
 MAX_LEDGER_ENTRIES = 500
 MAX_AMOUNT = 10**15
 TOP_LIMIT = 10
@@ -125,6 +138,9 @@ class Economy(commands.Cog):
             work_min=DEFAULT_WORK_MIN,
             work_max=DEFAULT_WORK_MAX,
             work_cooldown=DEFAULT_WORK_COOLDOWN,
+            casino_enabled=True,
+            casino_min_bet=DEFAULT_CASINO_MIN_BET,
+            casino_max_bet=DEFAULT_CASINO_MAX_BET,
             claims={},
             shops={},
             inventories={},
@@ -136,10 +152,16 @@ class Economy(commands.Cog):
         self._lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
+        self._blackjack_players: set[int] = set()
+        self._blackjack_views: dict[int, BlackjackView] = {}
+        self._slot_players: set[int] = set()
+        self._slot_render_semaphore = asyncio.Semaphore(2)
         self._startup_task = self.bot.loop.create_task(self._start_api_if_enabled())
 
     def cog_unload(self):
         self._startup_task.cancel()
+        for view in list(self._blackjack_views.values()):
+            self.bot.loop.create_task(view.cancel_and_refund())
         self.bot.loop.create_task(self._stop_api())
 
     @commands.group(name="eco", aliases=["economy"], invoke_without_command=True)
@@ -174,6 +196,7 @@ class Economy(commands.Cog):
                     f"`{prefix}eco gift <member> <item> [quantity]` - gift an inventory item",
                     f"`{prefix}eco inventory [member]` - show inventory",
                     f"`{prefix}eco codes` - DM your unredeemed in-game item codes",
+                    f"`{prefix}eco casino` - play virtual-currency casino games",
                 ]
             ),
             inline=False,
@@ -189,6 +212,7 @@ class Economy(commands.Cog):
                     f"`{prefix}inventory [member]`, `{prefix}inv [member]`",
                     f"`{prefix}gift <member> <item> [quantity]`",
                     f"`{prefix}codes`, `{prefix}ecotop`",
+                    f"`{prefix}casino` - casino games and payout rules",
                 ]
             ),
             inline=False,
@@ -270,6 +294,40 @@ class Economy(commands.Cog):
     async def economy_top_short(self, ctx: commands.Context):
         """Shortcut for eco top."""
         await ctx.invoke(self.economy_top)
+
+    @commands.group(name="casino", aliases=["gamble"], invoke_without_command=True)
+    async def economy_casino_short(self, ctx: commands.Context):
+        """Shortcut for eco casino."""
+        await ctx.invoke(self.economy_casino)
+
+    @economy_casino_short.command(name="coinflip", aliases=["coin", "flip"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_coinflip_short(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        side: str = "heads",
+    ):
+        """Shortcut for eco casino coinflip."""
+        await ctx.invoke(self.economy_casino_coinflip, wager=wager, side=side)
+
+    @economy_casino_short.command(name="dice", aliases=["die"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_dice_short(self, ctx: commands.Context, wager: int, guess: int):
+        """Shortcut for eco casino dice."""
+        await ctx.invoke(self.economy_casino_dice, wager=wager, guess=guess)
+
+    @economy_casino_short.command(name="slots", aliases=["slot"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_slots_short(self, ctx: commands.Context, wager: int):
+        """Shortcut for eco casino slots."""
+        await ctx.invoke(self.economy_casino_slots, wager=wager)
+
+    @economy_casino_short.command(name="blackjack", aliases=["bj"])
+    @commands.max_concurrency(1, per=commands.BucketType.user, wait=False)
+    async def economy_casino_blackjack_short(self, ctx: commands.Context, wager: int):
+        """Shortcut for eco casino blackjack."""
+        await ctx.invoke(self.economy_casino_blackjack, wager=wager)
 
     @economy.command(name="balance", aliases=["bal"])
     async def economy_balance(self, ctx: commands.Context, member: discord.Member | None = None):
@@ -519,6 +577,193 @@ class Economy(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @economy.group(name="casino", aliases=["gamble"], invoke_without_command=True)
+    async def economy_casino(self, ctx: commands.Context):
+        """Play casino games with virtual LWD$."""
+        enabled = bool(await self.config.casino_enabled())
+        minimum = int(await self.config.casino_min_bet())
+        maximum = int(await self.config.casino_max_bet())
+        prefix = ctx.clean_prefix
+        embed = discord.Embed(
+            title="LWD$ Casino",
+            description=(
+                "Play using virtual LWD$ only. Each wager is taken from your global balance.\n"
+                f"Status: **{'Open' if enabled else 'Closed'}** | Bets: **{minimum:,}-{maximum:,} {CURRENCY_NAME}**"
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Coin Flip",
+            value=(
+                f"`{prefix}casino coinflip <bet> [heads|tails]`\n"
+                "Correct call returns 1.95x your wager."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Dice",
+            value=(
+                f"`{prefix}casino dice <bet> <1-6>`\n"
+                "Correct guess returns 5.7x your wager."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Slots",
+            value=(
+                f"`{prefix}casino slots <bet>`\n"
+                "Exact triples return 4x-80x according to the machine; "
+                "one cherry on an otherwise unmatched spin returns half."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Blackjack",
+            value=(
+                f"`{prefix}casino blackjack <bet>`\n"
+                "Interactive blackjack with hit, stand, double, split, surrender, and insurance."
+            ),
+            inline=False,
+        )
+        await ctx.send(embed=embed)
+
+    @economy_casino.command(name="coinflip", aliases=["coin", "flip"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_coinflip(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        side: str = "heads",
+    ):
+        """Bet on heads or tails."""
+        choices = {
+            "h": "heads",
+            "head": "heads",
+            "heads": "heads",
+            "t": "tails",
+            "tail": "tails",
+            "tails": "tails",
+        }
+        selected = choices.get(side.casefold())
+        if selected is None:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send("Choose `heads` or `tails`.")
+            return
+        try:
+            await self._validate_casino_wager(wager)
+        except EconomyError as error:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(str(error))
+            return
+
+        result = "heads" if secrets.randbelow(2) == 0 else "tails"
+        payout = wager * CASINO_COINFLIP_PAYOUT_PERCENT // 100 if selected == result else 0
+        await self._finish_casino_command(ctx, "coinflip", wager, payout, f"called {selected}; landed {result}")
+
+    @economy_casino.command(name="dice", aliases=["die"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_dice(self, ctx: commands.Context, wager: int, guess: int):
+        """Guess a six-sided die roll."""
+        if guess < 1 or guess > 6:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send("Your dice guess must be from 1 to 6.")
+            return
+        try:
+            await self._validate_casino_wager(wager)
+        except EconomyError as error:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(str(error))
+            return
+
+        result = secrets.randbelow(6) + 1
+        payout = wager * CASINO_DICE_PAYOUT_PERCENT // 100 if guess == result else 0
+        await self._finish_casino_command(ctx, "dice", wager, payout, f"guessed {guess}; rolled {result}")
+
+    @economy_casino.command(name="slots", aliases=["slot"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_slots(self, ctx: commands.Context, wager: int):
+        """Spin the slot machine."""
+        if ctx.author.id in self._slot_players:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send("Your previous slot spin is still rendering.")
+            return
+        self._slot_players.add(ctx.author.id)
+        try:
+            try:
+                await self._validate_casino_wager(wager)
+            except EconomyError as error:
+                ctx.command.reset_cooldown(ctx)
+                await ctx.send(str(error))
+                return
+            safe_maximum = MAX_AMOUNT // max(SLOT_TRIPLE_MULTIPLIERS.values())
+            if wager > safe_maximum:
+                ctx.command.reset_cooldown(ctx)
+                await ctx.send(f"Slot wager cannot exceed {safe_maximum:,} {CURRENCY_NAME}.")
+                return
+
+            symbols, stops = draw_slot_spin()
+            payout, payout_rule = calculate_slot_payout(wager, symbols)
+            await self._finish_slots_command(
+                ctx,
+                wager,
+                payout,
+                symbols=symbols,
+                stops=stops,
+                payout_rule=payout_rule,
+            )
+        finally:
+            self._slot_players.discard(ctx.author.id)
+
+    @economy_casino.command(name="blackjack", aliases=["bj"])
+    @commands.max_concurrency(1, per=commands.BucketType.user, wait=False)
+    async def economy_casino_blackjack(self, ctx: commands.Context, wager: int):
+        """Play an interactive hand of blackjack."""
+        if ctx.author.id in self._blackjack_players:
+            await ctx.send("You already have an active blackjack hand.")
+            return
+        self._blackjack_players.add(ctx.author.id)
+        try:
+            try:
+                await self._validate_casino_wager(wager)
+                account = await self._reserve_blackjack_wager(
+                    ctx.author.id,
+                    wager,
+                    guild_id=ctx.guild.id if ctx.guild else None,
+                    reason="blackjack initial wager",
+                )
+            except EconomyError as error:
+                await ctx.send(str(error))
+                return
+
+            view: BlackjackView | None = None
+            try:
+                view = BlackjackView(self, ctx, wager, currency_name=CURRENCY_NAME)
+                self._blackjack_views[ctx.author.id] = view
+                view.final_balance = account[CASH]
+                await view.start()
+                await view.wait()
+            except Exception:
+                log.exception("Could not run blackjack for user %s", ctx.author.id)
+                if view is None or view.message is None:
+                    if view is None or view.phase != "ended":
+                        await self._credit_blackjack_payout(
+                            ctx.author.id,
+                            wager,
+                            guild_id=ctx.guild.id if ctx.guild else None,
+                            reason="blackjack canceled after startup error",
+                        )
+                        await ctx.send("Blackjack could not start, so your wager was refunded.")
+                    else:
+                        await ctx.send(
+                            "The blackjack display failed after settlement. "
+                            f"Balance: {view.final_balance:,} {CURRENCY_NAME}."
+                        )
+                else:
+                    await ctx.send("That blackjack hand hit an unexpected error and will time out safely.")
+        finally:
+            self._blackjack_players.discard(ctx.author.id)
+            self._blackjack_views.pop(ctx.author.id, None)
+
     @economy.group(name="admin", invoke_without_command=True)
     @commands.is_owner()
     async def economy_admin(self, ctx: commands.Context):
@@ -532,7 +777,7 @@ class Economy(commands.Cog):
         prefix = ctx.clean_prefix
         embed = discord.Embed(
             title="Economy Admin Help",
-            description="Owner-only balance, claim, shop, log, and API commands.",
+            description="Owner-only balance, claim, casino, shop, log, and API commands.",
             color=discord.Color.gold(),
         )
         embed.add_field(
@@ -559,6 +804,17 @@ class Economy(commands.Cog):
                     f"`{prefix}eco admin claim workrange <min> <max> [cooldown_seconds]`",
                     f"`{prefix}eco admin logchannel [channel]`",
                     f"`{prefix}eco admin clearlog`",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Casino",
+            value="\n".join(
+                [
+                    f"`{prefix}eco admin casino show`",
+                    f"`{prefix}eco admin casino toggle`",
+                    f"`{prefix}eco admin casino limits <minimum> <maximum>`",
                 ]
             ),
             inline=False,
@@ -720,6 +976,52 @@ class Economy(commands.Cog):
         async with self.config.log_channels() as channels:
             channels.pop(str(ctx.guild.id), None)
         await ctx.send("Economy logs disabled for this server.")
+
+    @economy_admin.group(name="casino", invoke_without_command=True)
+    @commands.is_owner()
+    async def economy_admin_casino(self, ctx: commands.Context):
+        """Manage casino availability and bet limits."""
+        await ctx.invoke(self.economy_admin_casino_show)
+
+    @economy_admin_casino.command(name="show")
+    @commands.is_owner()
+    async def economy_admin_casino_show(self, ctx: commands.Context):
+        """Show casino settings."""
+        enabled = bool(await self.config.casino_enabled())
+        minimum = int(await self.config.casino_min_bet())
+        maximum = int(await self.config.casino_max_bet())
+        await ctx.send(
+            f"Casino: {'enabled' if enabled else 'disabled'}\n"
+            f"Bet limits: {minimum:,}-{maximum:,} {CURRENCY_NAME}"
+        )
+
+    @economy_admin_casino.command(name="toggle")
+    @commands.is_owner()
+    async def economy_admin_casino_toggle(self, ctx: commands.Context):
+        """Enable or disable casino games."""
+        enabled = not bool(await self.config.casino_enabled())
+        await self.config.casino_enabled.set(enabled)
+        await ctx.send(f"Casino games are now {'enabled' if enabled else 'disabled'}.")
+
+    @economy_admin_casino.command(name="limits")
+    @commands.is_owner()
+    async def economy_admin_casino_limits(self, ctx: commands.Context, minimum: int, maximum: int):
+        """Set the global minimum and maximum casino wager."""
+        if minimum <= 0:
+            await ctx.send("Minimum wager must be positive.")
+            return
+        if maximum < minimum:
+            await ctx.send("Maximum wager cannot be lower than the minimum wager.")
+            return
+        if maximum > MAX_AMOUNT // max(SLOT_TRIPLE_MULTIPLIERS.values()):
+            await ctx.send(
+                f"Maximum wager cannot exceed "
+                f"{MAX_AMOUNT // max(SLOT_TRIPLE_MULTIPLIERS.values()):,}."
+            )
+            return
+        await self.config.casino_min_bet.set(minimum)
+        await self.config.casino_max_bet.set(maximum)
+        await ctx.send(f"Casino bet limits set to {minimum:,}-{maximum:,} {CURRENCY_NAME}.")
 
     @economy_admin.group(name="shop", invoke_without_command=True)
     @commands.is_owner()
@@ -1249,6 +1551,233 @@ class Economy(commands.Cog):
 
         await interaction.response.send_message(content, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         await self._refresh_shop_panel(interaction.guild)
+
+    async def _validate_casino_wager(self, wager: int):
+        if not await self.config.casino_enabled():
+            raise EconomyError("The casino is currently closed.")
+        minimum = int(await self.config.casino_min_bet())
+        maximum = int(await self.config.casino_max_bet())
+        if wager < minimum or wager > maximum:
+            raise EconomyError(
+                f"Wager must be between {minimum:,} and {maximum:,} {CURRENCY_NAME}."
+            )
+
+    async def _finish_casino_command(
+        self,
+        ctx: commands.Context,
+        game: str,
+        wager: int,
+        payout: int,
+        outcome: str,
+    ):
+        try:
+            account = await self._settle_casino_wager(
+                ctx.author.id,
+                wager,
+                payout,
+                game=game,
+                outcome=outcome,
+                guild_id=ctx.guild.id if ctx.guild else None,
+            )
+        except EconomyError as error:
+            await ctx.send(str(error))
+            return
+
+        net = payout - wager
+        if net > 0:
+            result = (
+                f"You won **{net:,} {CURRENCY_NAME}**! "
+                f"Total returned: {payout:,} {CURRENCY_NAME}."
+            )
+            color = discord.Color.green()
+        elif net == 0:
+            result = f"Push. Your **{wager:,} {CURRENCY_NAME}** wager was returned."
+            color = discord.Color.gold()
+        elif payout:
+            result = (
+                f"You lost **{-net:,} {CURRENCY_NAME}**. "
+                f"Returned: {payout:,} {CURRENCY_NAME}."
+            )
+            color = discord.Color.red()
+        else:
+            result = f"You lost **{wager:,} {CURRENCY_NAME}**."
+            color = discord.Color.red()
+
+        game_title = {"coinflip": "Coin Flip", "dice": "Dice", "slots": "Slots"}.get(
+            game,
+            game.title(),
+        )
+        embed = discord.Embed(title=f"Casino - {game_title}", color=color)
+        embed.add_field(name="Outcome", value=outcome, inline=False)
+        embed.add_field(name="Result", value=result, inline=False)
+        embed.set_footer(text=f"Balance: {account[CASH]:,} {CURRENCY_NAME}")
+        await ctx.send(embed=embed)
+
+    async def _finish_slots_command(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        payout: int,
+        *,
+        symbols: tuple[str, str, str],
+        stops: tuple[int, int, int],
+        payout_rule: str,
+    ):
+        outcome = " | ".join(SLOT_EMOJIS[symbol] for symbol in symbols)
+        try:
+            account = await self._settle_casino_wager(
+                ctx.author.id,
+                wager,
+                payout,
+                game="slots",
+                outcome=f"{outcome}; {payout_rule}",
+                guild_id=ctx.guild.id if ctx.guild else None,
+            )
+        except EconomyError as error:
+            await ctx.send(str(error))
+            return
+
+        net = payout - wager
+        if net > 0:
+            result = (
+                f"You won **{net:,} {CURRENCY_NAME}**! "
+                f"Total returned: {payout:,} {CURRENCY_NAME}."
+            )
+            color = discord.Color.green()
+        elif payout:
+            result = (
+                f"You lost **{-net:,} {CURRENCY_NAME}**. "
+                f"Returned: {payout:,} {CURRENCY_NAME}."
+            )
+            color = discord.Color.red()
+        else:
+            result = f"You lost **{wager:,} {CURRENCY_NAME}**."
+            color = discord.Color.red()
+
+        embed = discord.Embed(title="Casino - Slots", color=color)
+        embed.add_field(name="Reels", value=outcome, inline=False)
+        embed.add_field(name="Result", value=result, inline=False)
+        embed.set_footer(text=f"Balance: {account[CASH]:,} {CURRENCY_NAME} | {payout_rule}")
+
+        try:
+            async with self._slot_render_semaphore:
+                buffer = await asyncio.to_thread(render_slot_spin, stops)
+            filename = f"slots-{ctx.author.id}-{secrets.token_hex(4)}.gif"
+            file = discord.File(buffer, filename=filename)
+            embed.set_image(url=f"attachment://{filename}")
+            try:
+                await ctx.send(
+                    embed=embed,
+                    file=file,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            finally:
+                file.close()
+        except Exception:
+            log.exception("Could not render animated slots for user %s", ctx.author.id)
+            embed.remove_image()
+            await ctx.send(embed=embed)
+
+    async def _settle_casino_wager(
+        self,
+        user_id: int,
+        wager: int,
+        payout: int,
+        *,
+        game: str,
+        outcome: str,
+        guild_id: int | None,
+    ) -> dict[str, int]:
+        """Atomically take a casino wager and apply its payout."""
+        wager = self._require_amount(wager, allow_zero=False)
+        payout = self._require_amount(payout, allow_zero=True)
+        net = payout - wager
+        async with self._lock:
+            async with self.config.balances() as balances:
+                account = self._account_from_mapping(balances, user_id)
+                if account[CASH] < wager:
+                    raise EconomyError("Insufficient funds.")
+                account[CASH] += net
+                balances[str(user_id)] = account
+
+            if net > 0:
+                tx_type = "casino_win"
+                from_user_id = None
+                to_user_id = user_id
+            elif net < 0:
+                tx_type = "casino_loss"
+                from_user_id = user_id
+                to_user_id = None
+            else:
+                tx_type = "casino_push"
+                from_user_id = user_id
+                to_user_id = user_id
+            await self._append_ledger(
+                tx_type,
+                from_user_id=from_user_id,
+                to_user_id=to_user_id,
+                amount=abs(net),
+                actor_id=user_id,
+                guild_id=guild_id,
+                reason=(
+                    f"{game}: wager {wager}; payout {payout}; outcome {outcome}"
+                ),
+            )
+        return account
+
+    async def _reserve_blackjack_wager(
+        self,
+        user_id: int,
+        wager: int,
+        *,
+        guild_id: int | None,
+        reason: str,
+    ) -> dict[str, int]:
+        """Reserve blackjack funds immediately so they cannot be spent mid-hand."""
+        wager = self._require_amount(wager, allow_zero=False)
+        async with self._lock:
+            async with self.config.balances() as balances:
+                account = self._account_from_mapping(balances, user_id)
+                if account[CASH] < wager:
+                    raise EconomyError("Insufficient funds.")
+                account[CASH] -= wager
+                balances[str(user_id)] = account
+            await self._append_ledger(
+                "blackjack_wager",
+                from_user_id=user_id,
+                to_user_id=None,
+                amount=wager,
+                actor_id=user_id,
+                guild_id=guild_id,
+                reason=reason,
+            )
+        return account
+
+    async def _credit_blackjack_payout(
+        self,
+        user_id: int,
+        payout: int,
+        *,
+        guild_id: int | None,
+        reason: str,
+    ) -> dict[str, int]:
+        """Credit the total return from a reserved blackjack wager."""
+        payout = self._require_amount(payout, allow_zero=False)
+        async with self._lock:
+            async with self.config.balances() as balances:
+                account = self._account_from_mapping(balances, user_id)
+                account[CASH] += payout
+                balances[str(user_id)] = account
+            await self._append_ledger(
+                "blackjack_payout",
+                from_user_id=None,
+                to_user_id=user_id,
+                amount=payout,
+                actor_id=user_id,
+                guild_id=guild_id,
+                reason=reason,
+            )
+        return account
 
     async def get_balance(self, user_id: int) -> dict[str, int]:
         """Public cog API: return a user's balances."""

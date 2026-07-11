@@ -19,6 +19,11 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco gift <member> <item> [quantity]` - gift an allowed inventory item.
 - `[p]eco inventory [member]` - show inventory items.
 - `[p]eco codes` - DM your unredeemed in-game item codes.
+- `[p]eco casino` - show casino games, bet limits, and payout rules.
+- `[p]eco casino coinflip <bet> [heads|tails]` - bet on a coin flip.
+- `[p]eco casino dice <bet> <1-6>` - guess a six-sided die roll.
+- `[p]eco casino slots <bet>` - spin the slot machine.
+- `[p]eco casino blackjack <bet>` - play interactive blackjack.
 
 Shortcut commands are also available for common user actions:
 
@@ -31,6 +36,19 @@ Shortcut commands are also available for common user actions:
 - `[p]inventory [member]` / `[p]inv [member]`
 - `[p]codes`
 - `[p]ecotop`
+- `[p]casino` / `[p]gamble`
+- `[p]casino coinflip <bet> [heads|tails]`
+- `[p]casino dice <bet> <1-6>`
+- `[p]casino slots <bet>`
+- `[p]casino blackjack <bet>` / `[p]casino bj <bet>`
+
+Casino games use the same global LWD$ balance as the rest of the economy. They use secure random draws, settle each wager atomically, and record the net result in the transaction ledger. The defaults allow bets from 10 to 10,000 LWD$, with a short per-game anti-spam cooldown.
+
+Payouts include the original wager: coin flip returns 1.95x on a win, and an exact dice guess returns 5.7x. Animated slots use the machine's printed exact-triple payouts: lemon 4x, cherry 5x, bell 10x, coin 25x, diamond 40x, and seven 80x. Exactly one cherry on an otherwise unmatched spin returns half the wager.
+
+Blackjack supports hit, stand, double down, up to four split hands, late surrender, and insurance. The dealer stands on soft 17 and a natural blackjack pays 3:2. Wagers and any extra double, split, or insurance stakes are reserved immediately, so funds cannot be moved away while a hand is active. An unanswered hand times out and forfeits after 90 seconds.
+
+Blackjack card/table artwork and slot-machine artwork are used under the bundled Casino Bot MIT notice in `CASINO_BOT_LICENSE.md`.
 
 ## Owner commands
 
@@ -47,6 +65,9 @@ Shortcut commands are also available for common user actions:
 - `[p]eco admin claim workrange <minimum> <maximum> [cooldown_seconds]`
 - `[p]eco admin logchannel [channel]`
 - `[p]eco admin clearlog`
+- `[p]eco admin casino show`
+- `[p]eco admin casino toggle`
+- `[p]eco admin casino limits <minimum> <maximum>`
 - `[p]eco admin shop add <name> <price> [stock] [description]`
 - `[p]eco admin shop remove <name>`
 - `[p]eco admin shop role <name> [role]`

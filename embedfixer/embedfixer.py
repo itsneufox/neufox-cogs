@@ -248,6 +248,14 @@ DOMAINS: Final[list[Domain]] = [
         ],
         fix_methods=[
             FixMethod(
+                id=23,
+                name="KKInstagram",
+                fixes=[ReplaceFix(old_domain="instagram.com", new_domain="kkinstagram.com")],
+                repo_url="https://kkscript.com/",
+                default=True,
+                has_ads=True,
+            ),
+            FixMethod(
                 id=8,
                 name="InstaFix",
                 fixes=[ReplaceFix(old_domain="instagram.com", new_domain="eeinstagram.com")],
@@ -261,18 +269,10 @@ DOMAINS: Final[list[Domain]] = [
                 has_ads=True,
             ),
             FixMethod(
-                id=23,
-                name="KKInstagram",
-                fixes=[ReplaceFix(old_domain="instagram.com", new_domain="kkinstagram.com")],
-                repo_url="https://kkscript.com/",
-                has_ads=True,
-            ),
-            FixMethod(
                 id=34,
                 name="vxinstagram",
                 fixes=[ReplaceFix(old_domain="instagram.com", new_domain="fxig.seria.moe")],
                 repo_url="https://github.com/Lainmode/InstagramEmbed-vxinstagram",
-                default=True,
             ),
             FixMethod(
                 id=35,
