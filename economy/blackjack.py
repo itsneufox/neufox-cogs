@@ -198,6 +198,43 @@ def render_blackjack_table(
             image.close()
 
 
+class BlackjackBetModal(discord.ui.Modal):
+    def __init__(self, replay_view: "BlackjackReplayView"):
+        super().__init__(title="Blackjack - Change Bet")
+        self.replay_view = replay_view
+        self.wager_input = discord.ui.TextInput(
+            label="New wager",
+            placeholder="Enter a whole number of LWD$",
+            default=str(replay_view.wager),
+            min_length=1,
+            max_length=20,
+        )
+        self.add_item(self.wager_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.replay_view.player.id:
+            await interaction.response.send_message(
+                "Only the original player can change this blackjack wager.",
+                ephemeral=True,
+            )
+            return
+        try:
+            wager = int(str(self.wager_input.value).replace(",", "").strip())
+        except ValueError:
+            await interaction.response.send_message(
+                "Enter a whole-number wager.",
+                ephemeral=True,
+            )
+            return
+        if wager <= 0:
+            await interaction.response.send_message(
+                "Wager must be positive.",
+                ephemeral=True,
+            )
+            return
+        await self.replay_view.start_round(interaction, wager)
+
+
 class BlackjackReplayView(discord.ui.View):
     def __init__(self, cog: Economy, ctx, wager: int, *, timeout: float = 120):
         super().__init__(timeout=timeout)
@@ -206,7 +243,10 @@ class BlackjackReplayView(discord.ui.View):
         self.player = ctx.author
         self.wager = wager
         self.message: discord.Message | None = None
-        self.play_again_button.label = f"Play Again ({wager:,})"
+        self._launching = False
+        self.same_bet_button.label = f"Same Bet ({wager:,})"
+        self.half_bet_button.label = f"Half ({max(1, wager // 2):,})"
+        self.double_bet_button.label = f"Double ({wager * 2:,})"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.player.id:
@@ -218,29 +258,72 @@ class BlackjackReplayView(discord.ui.View):
         return True
 
     async def on_timeout(self):
-        self.play_again_button.disabled = True
+        self._set_buttons_disabled(True)
         if self.message is not None:
             with suppress(discord.HTTPException):
                 await self.message.edit(view=self)
 
-    @discord.ui.button(label="Play Again", emoji="🔁", style=discord.ButtonStyle.success)
-    async def play_again_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        await interaction.response.defer()
-        button.disabled = True
+    def _set_buttons_disabled(self, disabled: bool):
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = disabled
+
+    async def start_round(self, interaction: discord.Interaction, wager: int):
+        if self._launching:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "A replay is already starting.",
+                    ephemeral=True,
+                )
+            return
+
+        self._launching = True
+        if not interaction.response.is_done():
+            await interaction.response.defer()
+        self._set_buttons_disabled(True)
         if self.message is not None:
             with suppress(discord.HTTPException):
                 await self.message.edit(view=self)
 
-        started = await self.cog._run_blackjack_round(self.ctx, self.wager)
+        started = await self.cog._run_blackjack_round(self.ctx, wager)
         if not started:
-            button.disabled = False
+            self._launching = False
+            self._set_buttons_disabled(False)
             if self.message is not None:
                 with suppress(discord.HTTPException):
                     await self.message.edit(view=self)
+
+    @discord.ui.button(label="Same Bet", emoji="🔁", style=discord.ButtonStyle.success, row=0)
+    async def same_bet_button(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ):
+        await self.start_round(interaction, self.wager)
+
+    @discord.ui.button(label="Half", emoji="➗", style=discord.ButtonStyle.secondary, row=0)
+    async def half_bet_button(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ):
+        await self.start_round(interaction, max(1, self.wager // 2))
+
+    @discord.ui.button(label="Double", emoji="✖️", style=discord.ButtonStyle.secondary, row=0)
+    async def double_bet_button(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ):
+        await self.start_round(interaction, self.wager * 2)
+
+    @discord.ui.button(label="Change Bet", emoji="✏️", style=discord.ButtonStyle.primary, row=0)
+    async def change_bet_button(
+        self,
+        interaction: discord.Interaction,
+        _: discord.ui.Button,
+    ):
+        await interaction.response.send_modal(BlackjackBetModal(self))
 
 
 class BlackjackView(discord.ui.View):
