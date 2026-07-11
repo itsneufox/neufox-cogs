@@ -46,6 +46,31 @@ class BlackjackHouseRuleTests(unittest.TestCase):
         )
 
 
+class CasinoExclusionTests(unittest.TestCase):
+    def test_parses_compact_and_combined_durations(self):
+        self.assertEqual(casino_games.parse_casino_exclusion_duration("30m"), 1800)
+        self.assertEqual(casino_games.parse_casino_exclusion_duration("1w 2d"), 777600)
+        self.assertEqual(casino_games.parse_casino_exclusion_duration("1y"), 31536000)
+
+    def test_parses_permanent_duration(self):
+        for value in ("permanent", "forever", "indefinite"):
+            with self.subTest(value=value):
+                self.assertEqual(casino_games.parse_casino_exclusion_duration(value), 0)
+
+    def test_rejects_invalid_or_zero_durations(self):
+        for value in ("", "0d", "tomorrow", "1 month", "2d later", "101y"):
+            with self.subTest(value=value):
+                self.assertIsNone(casino_games.parse_casino_exclusion_duration(value))
+
+    def test_self_exclusion_can_only_be_extended(self):
+        self.assertTrue(casino_games.can_extend_casino_self_exclusion(None, 100))
+        self.assertTrue(casino_games.can_extend_casino_self_exclusion(100, 200))
+        self.assertTrue(casino_games.can_extend_casino_self_exclusion(100, 0))
+        self.assertFalse(casino_games.can_extend_casino_self_exclusion(100, 50))
+        self.assertFalse(casino_games.can_extend_casino_self_exclusion(100, 100))
+        self.assertFalse(casino_games.can_extend_casino_self_exclusion(0, 200))
+
+
 class HighCardTests(unittest.TestCase):
     def test_player_win_returns_double_wager(self):
         payout, rule = casino_games.calculate_high_card_payout(100, ("9", "C"), ("K", "D"))

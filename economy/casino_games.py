@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import secrets
 
 
@@ -42,6 +43,53 @@ ROULETTE_BET_ALIASES = {
     "green": "number:0",
     "zero": "number:0",
 }
+
+CASINO_EXCLUSION_TIME_UNITS = {
+    "s": 1,
+    "m": 60,
+    "h": 3600,
+    "d": 86400,
+    "w": 604800,
+    "y": 31536000,
+}
+CASINO_EXCLUSION_PERMANENT_WORDS = frozenset(
+    {"permanent", "permanently", "forever", "indefinite", "indefinitely"}
+)
+MAX_CASINO_EXCLUSION_SECONDS = 100 * CASINO_EXCLUSION_TIME_UNITS["y"]
+
+
+def parse_casino_exclusion_duration(value: str) -> int | None:
+    """Parse compact exclusion durations, returning 0 for a permanent exclusion."""
+    cleaned = str(value or "").strip().casefold()
+    if cleaned in CASINO_EXCLUSION_PERMANENT_WORDS:
+        return 0
+    if not cleaned:
+        return None
+
+    total = 0
+    consumed = ""
+    for amount, unit in re.findall(r"(\d+)\s*([smhdwy])", cleaned):
+        total += int(amount) * CASINO_EXCLUSION_TIME_UNITS[unit]
+        consumed += f"{amount}{unit}"
+    if (
+        not total
+        or total > MAX_CASINO_EXCLUSION_SECONDS
+        or consumed != re.sub(r"\s+", "", cleaned)
+    ):
+        return None
+    return total
+
+
+def can_extend_casino_self_exclusion(
+    current_expires_at: int | None,
+    proposed_expires_at: int,
+) -> bool:
+    """Allow a new self-exclusion, a longer fixed term, or conversion to permanent."""
+    if current_expires_at is None:
+        return True
+    if int(current_expires_at) == 0:
+        return False
+    return int(proposed_expires_at) == 0 or int(proposed_expires_at) > int(current_expires_at)
 
 
 def calculate_blackjack_dealer_natural_payout(wager: int, insurance_bet: int = 0) -> int:

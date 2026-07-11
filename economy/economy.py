@@ -16,11 +16,13 @@ from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 from .blackjack import BlackjackCard, BlackjackHand, BlackjackView, render_blackjack_table
 from .casino_games import (
+    can_extend_casino_self_exclusion,
     calculate_high_card_payout,
     calculate_roulette_payout,
     draw_high_card,
     high_card_label,
     normalize_roulette_bet,
+    parse_casino_exclusion_duration,
     roulette_bet_label,
     roulette_number_color,
 )
@@ -150,6 +152,7 @@ class Economy(commands.Cog):
             casino_enabled=True,
             casino_min_bet=DEFAULT_CASINO_MIN_BET,
             casino_max_bet=DEFAULT_CASINO_MAX_BET,
+            casino_exclusions={},
             claims={},
             shops={},
             inventories={},
@@ -163,6 +166,7 @@ class Economy(commands.Cog):
         self._site: web.TCPSite | None = None
         self._blackjack_players: set[int] = set()
         self._blackjack_views: dict[int, BlackjackView] = {}
+        self._casino_exclusion_lock = asyncio.Lock()
         self._slot_players: set[int] = set()
         self._slot_render_semaphore = asyncio.Semaphore(2)
         self._startup_task = self.bot.loop.create_task(self._start_api_if_enabled())
@@ -354,6 +358,59 @@ class Economy(commands.Cog):
     async def economy_casino_blackjack_short(self, ctx: commands.Context, wager: int):
         """Shortcut for eco casino blackjack."""
         await ctx.invoke(self.economy_casino_blackjack, wager=wager)
+
+    @economy_casino_short.command(name="selfexclude", aliases=["self-exclude"])
+    async def economy_casino_selfexclude_short(
+        self,
+        ctx: commands.Context,
+        duration: str,
+        confirmation: str = "",
+    ):
+        """Shortcut for eco casino selfexclude."""
+        await ctx.invoke(
+            self.economy_casino_selfexclude,
+            duration=duration,
+            confirmation=confirmation,
+        )
+
+    @economy_casino_short.command(name="exclusion", aliases=["excluded", "status"])
+    async def economy_casino_exclusion_short(
+        self,
+        ctx: commands.Context,
+        member: discord.Member | None = None,
+    ):
+        """Shortcut for eco casino exclusion."""
+        await ctx.invoke(self.economy_casino_exclusion, member=member)
+
+    @economy_casino_short.command(name="exclude")
+    @commands.guild_only()
+    @commands.admin_or_permissions(administrator=True)
+    async def economy_casino_exclude_short(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+        duration: str,
+        *,
+        reason: str = "No reason provided.",
+    ):
+        """Shortcut for eco casino exclude."""
+        await ctx.invoke(
+            self.economy_casino_exclude,
+            member=member,
+            duration=duration,
+            reason=reason,
+        )
+
+    @economy_casino_short.command(name="unexclude")
+    @commands.guild_only()
+    @commands.admin_or_permissions(administrator=True)
+    async def economy_casino_unexclude_short(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+    ):
+        """Shortcut for eco casino unexclude."""
+        await ctx.invoke(self.economy_casino_unexclude, member=member)
 
     @economy.command(name="balance", aliases=["bal"])
     async def economy_balance(self, ctx: commands.Context, member: discord.Member | None = None):
@@ -609,6 +666,7 @@ class Economy(commands.Cog):
         enabled = bool(await self.config.casino_enabled())
         minimum = int(await self.config.casino_min_bet())
         maximum = int(await self.config.casino_max_bet())
+        active_exclusions = await self._active_casino_exclusions(ctx.author.id)
         prefix = ctx.clean_prefix
         embed = discord.Embed(
             title="LWD$ Casino",
@@ -668,7 +726,180 @@ class Economy(commands.Cog):
             ),
             inline=False,
         )
+        protection_lines = [
+            f"`{prefix}casino selfexclude <duration|permanent> confirm`",
+            f"`{prefix}casino exclusion` — check your exclusion status.",
+            "Durations use `m`, `h`, `d`, `w`, or `y` (for example `30d` or `1y`). "
+            "A self-exclusion cannot be shortened or removed.",
+        ]
+        if active_exclusions:
+            protection_lines.extend(
+                ["", "**Your current exclusions:**", *self._casino_exclusion_status_lines(active_exclusions)]
+            )
+        embed.add_field(
+            name="Player Protection",
+            value="\n".join(protection_lines),
+            inline=False,
+        )
+        embed.add_field(
+            name="Administrator Controls",
+            value=(
+                f"`{prefix}casino exclude <member> <duration|permanent> [reason]`\n"
+                f"`{prefix}casino unexclude <member>`\n"
+                f"`{prefix}casino exclusion [member]`"
+            ),
+            inline=False,
+        )
         await ctx.send(embed=embed)
+
+    @economy_casino.command(name="selfexclude", aliases=["self-exclude"])
+    async def economy_casino_selfexclude(
+        self,
+        ctx: commands.Context,
+        duration: str,
+        confirmation: str = "",
+    ):
+        """Exclude yourself from casino games for a fixed period or permanently."""
+        seconds = parse_casino_exclusion_duration(duration)
+        if seconds is None:
+            await ctx.send(
+                "Use a duration like `12h`, `30d`, `6w`, or `1y`, or use `permanent`."
+            )
+            return
+        if confirmation.casefold() != "confirm":
+            await ctx.send(
+                "Self-exclusion cannot be canceled or shortened. If you are certain, run "
+                f"`{ctx.clean_prefix}{ctx.command.qualified_name} {duration} confirm`."
+            )
+            return
+
+        expires_at = int(time.time()) + seconds if seconds else 0
+        async with self._casino_exclusion_lock:
+            active = await self._active_casino_exclusions(ctx.author.id)
+            current = active.get("self")
+            if current:
+                current_expiry = int(current.get("expires_at", 0) or 0)
+                if not can_extend_casino_self_exclusion(current_expiry, expires_at):
+                    if current_expiry == 0:
+                        await ctx.send("Your permanent casino self-exclusion is already active.")
+                        return
+                    await ctx.send(
+                        "Your self-exclusion cannot be shortened. It currently ends "
+                        f"<t:{current_expiry}:F> (<t:{current_expiry}:R>)."
+                    )
+                    return
+
+            await self._set_casino_exclusion(
+                ctx.author.id,
+                "self",
+                expires_at=expires_at,
+                actor_id=ctx.author.id,
+                reason="Voluntary self-exclusion",
+            )
+        await self._cancel_excluded_blackjack(ctx.author.id)
+        if expires_at:
+            await ctx.send(
+                "Your casino self-exclusion is now active until "
+                f"<t:{expires_at}:F> (<t:{expires_at}:R>). It cannot be canceled or shortened."
+            )
+        else:
+            await ctx.send(
+                "Your permanent casino self-exclusion is now active. It cannot be canceled."
+            )
+
+    @economy_casino.command(name="exclusion", aliases=["excluded", "status"])
+    async def economy_casino_exclusion(
+        self,
+        ctx: commands.Context,
+        member: discord.Member | None = None,
+    ):
+        """Show your casino exclusion status; administrators may inspect another member."""
+        target = member or ctx.author
+        if target.id != ctx.author.id:
+            is_owner = await self.bot.is_owner(ctx.author)
+            is_admin = bool(
+                ctx.guild
+                and isinstance(ctx.author, discord.Member)
+                and ctx.author.guild_permissions.administrator
+            )
+            if not is_owner and not is_admin:
+                await ctx.send("Only administrators can view another player's exclusion status.")
+                return
+
+        active = await self._active_casino_exclusions(target.id)
+        if not active:
+            await ctx.send(f"{target.mention} has no active casino exclusion.")
+            return
+        await ctx.send(
+            f"Casino exclusions for {target.mention}:\n"
+            + "\n".join(self._casino_exclusion_status_lines(active)),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @economy_casino.command(name="exclude")
+    @commands.guild_only()
+    @commands.admin_or_permissions(administrator=True)
+    async def economy_casino_exclude(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+        duration: str,
+        *,
+        reason: str = "No reason provided.",
+    ):
+        """Administratively exclude a member from casino games."""
+        seconds = parse_casino_exclusion_duration(duration)
+        if seconds is None:
+            await ctx.send(
+                "Use a duration like `12h`, `30d`, `6w`, or `1y`, or use `permanent`."
+            )
+            return
+        expires_at = int(time.time()) + seconds if seconds else 0
+        reason = reason.strip()[:500] or "No reason provided."
+        await self._set_casino_exclusion(
+            member.id,
+            "admin",
+            expires_at=expires_at,
+            actor_id=ctx.author.id,
+            reason=reason,
+        )
+        await self._cancel_excluded_blackjack(member.id)
+        duration_text = (
+            f"until <t:{expires_at}:F> (<t:{expires_at}:R>)" if expires_at else "permanently"
+        )
+        await ctx.send(
+            f"{member.mention} is excluded from casino games {duration_text}. Reason: {reason}",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @economy_casino.command(name="unexclude")
+    @commands.guild_only()
+    @commands.admin_or_permissions(administrator=True)
+    async def economy_casino_unexclude(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+    ):
+        """Remove an administrator-imposed casino exclusion."""
+        removed = await self._clear_admin_casino_exclusion(member.id)
+        if not removed:
+            active = await self._active_casino_exclusions(member.id)
+            if "self" in active:
+                await ctx.send(
+                    f"{member.mention} has no administrator-imposed exclusion. "
+                    "Their self-exclusion cannot be removed."
+                )
+            else:
+                await ctx.send(f"{member.mention} has no administrator-imposed casino exclusion.")
+            return
+        active = await self._active_casino_exclusions(member.id)
+        if "self" in active:
+            await ctx.send(
+                f"The administrator-imposed exclusion for {member.mention} was removed, "
+                "but their self-exclusion remains active."
+            )
+        else:
+            await ctx.send(f"The administrator-imposed casino exclusion for {member.mention} was removed.")
 
     @economy_casino.command(name="coinflip", aliases=["coin", "flip"])
     @commands.cooldown(1, 3, commands.BucketType.user)
@@ -693,7 +924,7 @@ class Economy(commands.Cog):
             await ctx.send("Choose `heads` or `tails`.")
             return
         try:
-            await self._validate_casino_wager(wager)
+            await self._validate_casino_wager(wager, ctx.author.id)
         except EconomyError as error:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(str(error))
@@ -712,7 +943,7 @@ class Economy(commands.Cog):
             await ctx.send("Your dice guess must be from 1 to 6.")
             return
         try:
-            await self._validate_casino_wager(wager)
+            await self._validate_casino_wager(wager, ctx.author.id)
         except EconomyError as error:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(str(error))
@@ -727,7 +958,7 @@ class Economy(commands.Cog):
     async def economy_casino_highcard(self, ctx: commands.Context, wager: int):
         """Draw a high card against the dealer."""
         try:
-            await self._validate_casino_wager(wager)
+            await self._validate_casino_wager(wager, ctx.author.id)
         except EconomyError as error:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(str(error))
@@ -762,7 +993,7 @@ class Economy(commands.Cog):
             )
             return
         try:
-            await self._validate_casino_wager(wager)
+            await self._validate_casino_wager(wager, ctx.author.id)
         except EconomyError as error:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(str(error))
@@ -797,7 +1028,7 @@ class Economy(commands.Cog):
         self._slot_players.add(ctx.author.id)
         try:
             try:
-                await self._validate_casino_wager(wager)
+                await self._validate_casino_wager(wager, ctx.author.id)
             except EconomyError as error:
                 ctx.command.reset_cooldown(ctx)
                 await ctx.send(str(error))
@@ -840,7 +1071,7 @@ class Economy(commands.Cog):
         view: BlackjackView | None = None
         try:
             try:
-                await self._validate_casino_wager(wager)
+                await self._validate_casino_wager(wager, ctx.author.id)
                 account = await self._reserve_blackjack_wager(
                     ctx.author.id,
                     wager,
@@ -936,6 +1167,9 @@ class Economy(commands.Cog):
                     f"`{prefix}eco admin casino show`",
                     f"`{prefix}eco admin casino toggle`",
                     f"`{prefix}eco admin casino limits <minimum> <maximum>`",
+                    f"`{prefix}casino exclude <member> <duration|permanent> [reason]`",
+                    f"`{prefix}casino unexclude <member>`",
+                    f"`{prefix}casino exclusion [member]`",
                 ]
             ),
             inline=False,
@@ -1673,9 +1907,105 @@ class Economy(commands.Cog):
         await interaction.response.send_message(content, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         await self._refresh_shop_panel(interaction.guild)
 
-    async def _validate_casino_wager(self, wager: int):
+    async def _active_casino_exclusions(self, user_id: int) -> dict[str, dict[str, Any]]:
+        """Return active exclusions and lazily discard expired records."""
+        now = int(time.time())
+        user_key = str(user_id)
+        active: dict[str, dict[str, Any]] = {}
+        async with self.config.casino_exclusions() as exclusions:
+            stored = exclusions.get(user_key)
+            if not isinstance(stored, dict):
+                if stored is not None:
+                    exclusions.pop(user_key, None)
+                return active
+
+            for source in ("self", "admin"):
+                record = stored.get(source)
+                if not isinstance(record, dict):
+                    stored.pop(source, None)
+                    continue
+                expires_at = int(record.get("expires_at", 0) or 0)
+                if expires_at and expires_at <= now:
+                    stored.pop(source, None)
+                    continue
+                active[source] = dict(record)
+
+            if stored:
+                exclusions[user_key] = stored
+            else:
+                exclusions.pop(user_key, None)
+        return active
+
+    async def _set_casino_exclusion(
+        self,
+        user_id: int,
+        source: str,
+        *,
+        expires_at: int,
+        actor_id: int,
+        reason: str,
+    ):
+        if source not in {"self", "admin"}:
+            raise ValueError("unknown casino exclusion source")
+        async with self.config.casino_exclusions() as exclusions:
+            user_key = str(user_id)
+            stored = exclusions.get(user_key)
+            if not isinstance(stored, dict):
+                stored = {}
+            stored[source] = {
+                "expires_at": int(expires_at),
+                "created_at": int(time.time()),
+                "actor_id": int(actor_id),
+                "reason": str(reason)[:500],
+            }
+            exclusions[user_key] = stored
+
+    async def _clear_admin_casino_exclusion(self, user_id: int) -> bool:
+        user_key = str(user_id)
+        async with self.config.casino_exclusions() as exclusions:
+            stored = exclusions.get(user_key)
+            if not isinstance(stored, dict) or "admin" not in stored:
+                return False
+            stored.pop("admin", None)
+            if stored:
+                exclusions[user_key] = stored
+            else:
+                exclusions.pop(user_key, None)
+            return True
+
+    @staticmethod
+    def _casino_exclusion_status_lines(active: dict[str, dict[str, Any]]) -> list[str]:
+        lines = []
+        for source, label in (("self", "Self-exclusion"), ("admin", "Admin exclusion")):
+            record = active.get(source)
+            if not record:
+                continue
+            expires_at = int(record.get("expires_at", 0) or 0)
+            duration = (
+                f"until <t:{expires_at}:F> (<t:{expires_at}:R>)"
+                if expires_at
+                else "permanent"
+            )
+            line = f"- **{label}:** {duration}"
+            reason = str(record.get("reason", "")).strip()
+            if source == "admin" and reason:
+                line += f" — {reason}"
+            lines.append(line)
+        return lines
+
+    async def _cancel_excluded_blackjack(self, user_id: int):
+        view = self._blackjack_views.get(user_id)
+        if view is not None and view.phase != "ended":
+            await view.cancel_for_exclusion()
+
+    async def _validate_casino_wager(self, wager: int, user_id: int | None = None):
         if not await self.config.casino_enabled():
             raise EconomyError("The casino is currently closed.")
+        if user_id is not None:
+            active = await self._active_casino_exclusions(user_id)
+            if active:
+                details = " ".join(self._casino_exclusion_status_lines(active))
+                raise EconomyError(f"You cannot use casino games while excluded. {details}")
         minimum = int(await self.config.casino_min_bet())
         maximum = int(await self.config.casino_max_bet())
         if wager < minimum or wager > maximum:
@@ -1735,6 +2065,10 @@ class Economy(commands.Cog):
             game.title(),
         )
         embed = discord.Embed(title=f"Casino - {game_title}", color=color)
+        embed.set_author(
+            name=f"Player: {ctx.author.display_name}",
+            icon_url=ctx.author.display_avatar.url,
+        )
         embed.add_field(name="Outcome", value=outcome, inline=False)
         embed.add_field(name="Result", value=result, inline=False)
         embed.set_footer(text=f"Balance: {account[CASH]:,} {CURRENCY_NAME}")
@@ -1781,6 +2115,10 @@ class Economy(commands.Cog):
             color = discord.Color.red()
 
         embed = discord.Embed(title=f"Casino - High Card: {title}", color=color)
+        embed.set_author(
+            name=f"Player: {ctx.author.display_name}",
+            icon_url=ctx.author.display_avatar.url,
+        )
         embed.add_field(name="Dealer", value=dealer_label, inline=True)
         embed.add_field(name="Player", value=player_label, inline=True)
         embed.add_field(name="Result", value=result, inline=False)
@@ -1852,6 +2190,10 @@ class Economy(commands.Cog):
             color = discord.Color.red()
 
         embed = discord.Embed(title="Casino - Slots", color=color)
+        embed.set_author(
+            name=f"Player: {ctx.author.display_name}",
+            icon_url=ctx.author.display_avatar.url,
+        )
         embed.add_field(name="Reels", value=outcome, inline=False)
         embed.add_field(name="Result", value=result, inline=False)
         embed.set_footer(text=f"Balance: {account[CASH]:,} {CURRENCY_NAME} | {payout_rule}")

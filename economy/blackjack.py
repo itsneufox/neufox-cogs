@@ -431,6 +431,22 @@ class BlackjackView(discord.ui.View):
             self._sync_buttons()
             await self._edit_message()
 
+    async def cancel_for_exclusion(self):
+        """Close and refund a round when its player becomes casino-excluded."""
+        async with self._action_lock:
+            if self.phase == "ended":
+                return
+            self._record_action("Casino exclusion activated; committed stakes refunded.")
+            await self._end_round(
+                "Blackjack Canceled",
+                self.total_wager,
+                ["Casino exclusion activated; all committed stakes were returned."],
+                allow_replay=False,
+            )
+            self._action_version += 1
+            self._sync_buttons()
+            await self._edit_message()
+
     @discord.ui.button(label="Hit", emoji="🃏", style=discord.ButtonStyle.primary, row=0)
     async def hit_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         version = self._action_version
@@ -863,6 +879,10 @@ class BlackjackView(discord.ui.View):
                 description="\n".join(lines),
                 color=discord.Color.gold(),
             )
+        embed.set_author(
+            name=f"Player: {self.player.display_name}",
+            icon_url=self.player.display_avatar.url,
+        )
         balance = self.final_balance
         if balance is None:
             balance = (await self.cog.get_balance(self.player.id))["cash"]
