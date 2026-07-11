@@ -11,6 +11,11 @@ from typing import TYPE_CHECKING
 import discord
 from PIL import Image, ImageDraw
 
+from .casino_games import (
+    calculate_blackjack_dealer_natural_payout,
+    format_blackjack_action_log,
+)
+
 if TYPE_CHECKING:
     from .economy import Economy
 
@@ -220,6 +225,7 @@ class BlackjackView(discord.ui.View):
         self.result_title = "Blackjack"
         self.result_lines: list[str] = []
         self.final_balance: int | None = None
+        self.action_log: list[str] = []
         self._action_lock = asyncio.Lock()
         self._action_version = 0
 
@@ -231,11 +237,17 @@ class BlackjackView(discord.ui.View):
         hidden = self.deck.pop()
         hidden.down = True
         self.dealer_cards.append(hidden)
+        self._record_action(
+            f"Dealt player {self._card_short(self.hands[0].cards[0])}, "
+            f"{self._card_short(self.hands[0].cards[1])}; "
+            f"dealer shows {self._card_short(self.dealer_cards[0])}."
+        )
 
     async def start(self):
         dealer_upcard = self.dealer_cards[0]
         if dealer_upcard.rank == "A" and self.base_wager >= 2:
             self.phase = "insurance"
+            self._record_action("Dealer shows an Ace; insurance offered.")
         else:
             await self._after_insurance_choice()
         self._sync_buttons()
@@ -258,6 +270,7 @@ class BlackjackView(discord.ui.View):
             if self.phase == "ended":
                 return
             if self.phase == "insurance":
+                self._record_action("Insurance offer timed out; declined.")
                 await self._after_insurance_choice()
                 if self.phase == "ended":
                     self._sync_buttons()
@@ -266,6 +279,7 @@ class BlackjackView(discord.ui.View):
             for hand in self.hands:
                 if not hand.finished:
                     hand.forfeited = True
+            self._record_action("Action timer expired; unfinished hands forfeited.")
             await self._finish_round(timed_out=True)
             self._sync_buttons()
             await self._edit_message()
@@ -275,6 +289,7 @@ class BlackjackView(discord.ui.View):
         async with self._action_lock:
             if self.phase == "ended":
                 return
+            self._record_action("Cog reloaded; committed stakes refunded.")
             await self._end_round(
                 "Blackjack Canceled",
                 self.total_wager,
@@ -294,9 +309,15 @@ class BlackjackView(discord.ui.View):
             hand = self._active_hand()
             if self.phase != "playing" or hand is None:
                 return
+            hand_number = self.active_hand_index + 1
             hand.has_acted = True
-            hand.cards.append(self.deck.pop())
-            if hand_value(hand.cards)[0] >= 21:
+            card = self.deck.pop()
+            hand.cards.append(card)
+            total = hand_value(hand.cards)[0]
+            self._record_action(
+                f"Hand {hand_number}: hit {self._card_short(card)} → {total}."
+            )
+            if total >= 21:
                 hand.stood = True
                 await self._advance_hand()
             await self._refresh_after_action()
@@ -311,8 +332,12 @@ class BlackjackView(discord.ui.View):
             hand = self._active_hand()
             if self.phase != "playing" or hand is None:
                 return
+            hand_number = self.active_hand_index + 1
             hand.has_acted = True
             hand.stood = True
+            self._record_action(
+                f"Hand {hand_number}: stood on {hand_value(hand.cards)[0]}."
+            )
             await self._advance_hand()
             await self._refresh_after_action()
 
@@ -342,8 +367,14 @@ class BlackjackView(discord.ui.View):
             self.total_wager += hand.bet
             hand.bet *= 2
             hand.has_acted = True
-            hand.cards.append(self.deck.pop())
+            hand_number = self.active_hand_index + 1
+            card = self.deck.pop()
+            hand.cards.append(card)
             hand.stood = True
+            self._record_action(
+                f"Hand {hand_number}: doubled to {hand.bet:,}, drew "
+                f"{self._card_short(card)} → {hand_value(hand.cards)[0]}."
+            )
             await self._advance_hand()
             await self._refresh_after_action()
 
@@ -371,6 +402,7 @@ class BlackjackView(discord.ui.View):
                 return
             self.final_balance = account["cash"]
             self.total_wager += hand.bet
+            hand_number = self.active_hand_index + 1
             moved_card = hand.cards.pop()
             new_hand = BlackjackHand([moved_card], hand.bet)
             split_aces = hand.cards[0].rank == "A" and moved_card.rank == "A"
@@ -387,6 +419,9 @@ class BlackjackView(discord.ui.View):
                 if hand_value(new_hand.cards)[0] >= 21:
                     new_hand.stood = True
             self.hands.insert(self.active_hand_index + 1, new_hand)
+            self._record_action(
+                f"Hand {hand_number}: split into hands {hand_number} and {hand_number + 1}."
+            )
             if hand.stood:
                 await self._advance_hand()
             await self._refresh_after_action()
@@ -401,8 +436,10 @@ class BlackjackView(discord.ui.View):
             hand = self._active_hand()
             if not self._can_surrender(hand):
                 return
+            hand_number = self.active_hand_index + 1
             hand.has_acted = True
             hand.surrendered = True
+            self._record_action(f"Hand {hand_number}: surrendered.")
             await self._advance_hand()
             await self._refresh_after_action()
 
@@ -431,6 +468,7 @@ class BlackjackView(discord.ui.View):
             self.final_balance = account["cash"]
             self.insurance_bet = insurance_bet
             self.total_wager += insurance_bet
+            self._record_action(f"Bought insurance for {insurance_bet:,}.")
             await self._after_insurance_choice()
             await self._refresh_after_action()
 
@@ -443,6 +481,7 @@ class BlackjackView(discord.ui.View):
                 return
             if self.phase != "insurance":
                 return
+            self._record_action("Declined insurance.")
             await self._after_insurance_choice()
             await self._refresh_after_action()
 
@@ -475,22 +514,25 @@ class BlackjackView(discord.ui.View):
         dealer_blackjack = is_blackjack(self.dealer_cards, reveal_hidden=True)
         player_blackjack = is_blackjack(self.hands[0].cards, reveal_hidden=True)
         if dealer_blackjack:
-            payout = self.insurance_bet * 3
-            lines = []
+            payout = calculate_blackjack_dealer_natural_payout(
+                self.base_wager,
+                self.insurance_bet,
+            )
             if player_blackjack:
-                payout += self.base_wager
-                lines.append(f"Main hand: push, returned {self.base_wager:,}")
+                lines = [f"Both have natural blackjack: redraw, returned {self.base_wager:,}"]
             else:
-                lines.append(f"Main hand: dealer blackjack, lost {self.base_wager:,}")
+                lines = [f"Dealer natural: redraw, returned {self.base_wager:,}"]
             if self.insurance_bet:
                 lines.append(f"Insurance won, returned {self.insurance_bet * 3:,}")
-            await self._end_round("Dealer Blackjack", payout, lines)
+            self._record_action("Dealer revealed a natural blackjack; main hand redrawn.")
+            await self._end_round("Dealer Natural - Redraw", payout, lines)
             return
         if player_blackjack:
             payout = self.base_wager + (self.base_wager * 3 // 2)
             lines = [f"Natural blackjack paid 3:2, returned {payout:,}"]
             if self.insurance_bet:
                 lines.append(f"Insurance lost {self.insurance_bet:,}")
+            self._record_action("Player natural blackjack paid 3:2.")
             await self._end_round("Blackjack!", payout, lines)
             return
         self.phase = "playing"
@@ -512,12 +554,23 @@ class BlackjackView(discord.ui.View):
             if not hand.surrendered and not hand.forfeited and hand_value(hand.cards)[0] <= 21
         ]
         dealer_total, dealer_soft = hand_value(self.dealer_cards, reveal_hidden=True)
+        self._record_action(
+            f"Dealer revealed {self._card_short(self.dealer_cards[1])} → {dealer_total}."
+        )
         while eligible and (
             dealer_total < 17
             or (self.DEALER_HITS_SOFT_17 and dealer_total == 17 and dealer_soft)
         ):
-            self.dealer_cards.append(self.deck.pop())
+            card = self.deck.pop()
+            self.dealer_cards.append(card)
             dealer_total, dealer_soft = hand_value(self.dealer_cards, reveal_hidden=True)
+            self._record_action(
+                f"Dealer hit {self._card_short(card)} → {dealer_total}."
+            )
+
+        if eligible:
+            dealer_result = "busted" if dealer_total > 21 else "stood"
+            self._record_action(f"Dealer {dealer_result} on {dealer_total}.")
 
         payout = 0
         lines = []
@@ -568,11 +621,22 @@ class BlackjackView(discord.ui.View):
             lines.append(f"Net result: -{-net:,} {self.currency_name}")
         else:
             lines.append(f"Net result: 0 {self.currency_name}")
+        self._record_action(
+            f"Settled: returned {payout:,}; net {net:+,} {self.currency_name}."
+        )
         self.result_title = title
         self.result_lines = lines
         self.final_balance = account["cash"]
         self.phase = "ended"
         self.stop()
+
+    @staticmethod
+    def _card_short(card: BlackjackCard) -> str:
+        suits = {"C": "♣", "D": "♦", "H": "♥", "S": "♠"}
+        return f"{card.rank}{suits[card.suit]}"
+
+    def _record_action(self, text: str):
+        self.action_log.append(f"> {text}")
 
     async def _refresh_after_action(self):
         self._action_version += 1
@@ -648,6 +712,11 @@ class BlackjackView(discord.ui.View):
                 f"Committed: {self.total_wager:,} {self.currency_name} | "
                 f"Balance: {balance:,} {self.currency_name}"
             )
+        )
+        embed.add_field(
+            name="Round Log",
+            value=format_blackjack_action_log(self.action_log),
+            inline=False,
         )
         embed.set_image(url=f"attachment://blackjack-{self.player.id}.png")
         return embed

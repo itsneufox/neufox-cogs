@@ -22,6 +22,8 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco casino` - show casino games, bet limits, and payout rules.
 - `[p]eco casino coinflip <bet> [heads|tails]` - bet on a coin flip.
 - `[p]eco casino dice <bet> <1-6>` - guess a six-sided die roll.
+- `[p]eco casino highcard <bet>` - draw a card against the dealer.
+- `[p]eco casino roulette <bet> <choice>` - spin a European roulette wheel.
 - `[p]eco casino slots <bet>` - spin the slot machine.
 - `[p]eco casino blackjack <bet>` - play interactive blackjack.
 
@@ -39,14 +41,18 @@ Shortcut commands are also available for common user actions:
 - `[p]casino` / `[p]gamble`
 - `[p]casino coinflip <bet> [heads|tails]`
 - `[p]casino dice <bet> <1-6>`
+- `[p]casino highcard <bet>` / `[p]casino war <bet>`
+- `[p]casino roulette <bet> <choice>` / `[p]casino wheel <bet> <choice>`
 - `[p]casino slots <bet>`
 - `[p]casino blackjack <bet>` / `[p]casino bj <bet>`
 
 Casino games use the same global LWD$ balance as the rest of the economy. They use secure random draws, settle each wager atomically, and record the net result in the transaction ledger. The defaults allow bets from 10 to 10,000 LWD$, with a short per-game anti-spam cooldown.
 
-Payouts include the original wager: coin flip returns 1.95x on a win, and an exact dice guess returns 5.7x. Animated slots use the machine's printed exact-triple payouts: lemon 4x, cherry 5x, bell 10x, coin 25x, diamond 40x, and seven 80x. Exactly one cherry on an otherwise unmatched spin returns half the wager.
+Payouts include the original wager: coin flip returns 1.95x on a win, and an exact dice guess returns 5.7x. High Card returns 2x when your card outranks the dealer and pushes on equal ranks. Animated slots use the machine's printed exact-triple payouts: lemon 4x, cherry 5x, bell 10x, coin 25x, diamond 40x, and seven 80x. Exactly one cherry on an otherwise unmatched spin returns half the wager.
 
-Blackjack supports hit, stand, double down, up to four split hands, late surrender, and insurance. The dealer stands on soft 17 and a natural blackjack pays 3:2. Wagers and any extra double, split, or insurance stakes are reserved immediately, so funds cannot be moved away while a hand is active. An unanswered hand times out and forfeits after 90 seconds.
+European Roulette uses a single-zero wheel. Straight-up numbers from 0 to 36 return 36x; red/black, odd/even, and low/high return 2x; first, second, and third dozen bets return 3x. Choices can be written as `17`, `red`, `odd`, `low`, `1st12`, `2nd12`, or `3rd12`.
+
+Blackjack supports hit, stand, double down, up to four split hands, late surrender, and insurance. Its live message includes a chronological round log covering player actions, dealer draws, timeouts, and settlement. The dealer stands on soft 17 and a player natural blackjack pays 3:2. As a house fairness rule, a dealer natural is a redraw: the main wager is returned instead of losing. Insurance still pays 2:1. Wagers and any extra double, split, or insurance stakes are reserved immediately, so funds cannot be moved away while a hand is active. An unanswered hand times out and forfeits after 90 seconds.
 
 Blackjack card/table artwork and slot-machine artwork are used under the bundled Casino Bot MIT notice in `CASINO_BOT_LICENSE.md`.
 

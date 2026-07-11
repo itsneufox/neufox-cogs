@@ -14,7 +14,16 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
-from .blackjack import BlackjackView
+from .blackjack import BlackjackCard, BlackjackHand, BlackjackView, render_blackjack_table
+from .casino_games import (
+    calculate_high_card_payout,
+    calculate_roulette_payout,
+    draw_high_card,
+    high_card_label,
+    normalize_roulette_bet,
+    roulette_bet_label,
+    roulette_number_color,
+)
 from .slots import (
     SLOT_EMOJIS,
     SLOT_TRIPLE_MULTIPLIERS,
@@ -317,6 +326,23 @@ class Economy(commands.Cog):
         """Shortcut for eco casino dice."""
         await ctx.invoke(self.economy_casino_dice, wager=wager, guess=guess)
 
+    @economy_casino_short.command(name="highcard", aliases=["war"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_highcard_short(self, ctx: commands.Context, wager: int):
+        """Shortcut for eco casino highcard."""
+        await ctx.invoke(self.economy_casino_highcard, wager=wager)
+
+    @economy_casino_short.command(name="roulette", aliases=["wheel"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_roulette_short(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        choice: str,
+    ):
+        """Shortcut for eco casino roulette."""
+        await ctx.invoke(self.economy_casino_roulette, wager=wager, choice=choice)
+
     @economy_casino_short.command(name="slots", aliases=["slot"])
     @commands.cooldown(1, 3, commands.BucketType.user)
     async def economy_casino_slots_short(self, ctx: commands.Context, wager: int):
@@ -609,6 +635,23 @@ class Economy(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="High Card",
+            value=(
+                f"`{prefix}casino highcard <bet>`\n"
+                "Draw against the dealer. Higher rank returns 2x; equal ranks push."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="European Roulette",
+            value=(
+                f"`{prefix}casino roulette <bet> <choice>`\n"
+                "Choose 0-36, red/black, odd/even, low/high, or 1st12/2nd12/3rd12. "
+                "Returns 36x, 2x, or 3x respectively."
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="Slots",
             value=(
                 f"`{prefix}casino slots <bet>`\n"
@@ -678,6 +721,70 @@ class Economy(commands.Cog):
         result = secrets.randbelow(6) + 1
         payout = wager * CASINO_DICE_PAYOUT_PERCENT // 100 if guess == result else 0
         await self._finish_casino_command(ctx, "dice", wager, payout, f"guessed {guess}; rolled {result}")
+
+    @economy_casino.command(name="highcard", aliases=["war"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_highcard(self, ctx: commands.Context, wager: int):
+        """Draw a high card against the dealer."""
+        try:
+            await self._validate_casino_wager(wager)
+        except EconomyError as error:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(str(error))
+            return
+
+        dealer_card, player_card = draw_high_card()
+        payout, payout_rule = calculate_high_card_payout(wager, dealer_card, player_card)
+        await self._finish_highcard_command(
+            ctx,
+            wager,
+            payout,
+            dealer_card=dealer_card,
+            player_card=player_card,
+            payout_rule=payout_rule,
+        )
+
+    @economy_casino.command(name="roulette", aliases=["wheel"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_casino_roulette(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        choice: str,
+    ):
+        """Bet on a European roulette spin."""
+        selected = normalize_roulette_bet(choice)
+        if selected is None:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(
+                "Choose a number from `0` to `36`, `red`, `black`, `odd`, `even`, "
+                "`low`, `high`, `1st12`, `2nd12`, or `3rd12`."
+            )
+            return
+        try:
+            await self._validate_casino_wager(wager)
+        except EconomyError as error:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(str(error))
+            return
+        if selected.startswith("number:") and wager > MAX_AMOUNT // 36:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(f"Straight-up wager cannot exceed {MAX_AMOUNT // 36:,} {CURRENCY_NAME}.")
+            return
+
+        result = secrets.randbelow(37)
+        payout, payout_rule = calculate_roulette_payout(wager, selected, result)
+        color = roulette_number_color(result)
+        await self._finish_casino_command(
+            ctx,
+            "roulette",
+            wager,
+            payout,
+            (
+                f"bet {roulette_bet_label(selected)}; wheel landed on "
+                f"{result} {color}; {payout_rule}"
+            ),
+        )
 
     @economy_casino.command(name="slots", aliases=["slot"])
     @commands.cooldown(1, 3, commands.BucketType.user)
@@ -1603,7 +1710,13 @@ class Economy(commands.Cog):
             result = f"You lost **{wager:,} {CURRENCY_NAME}**."
             color = discord.Color.red()
 
-        game_title = {"coinflip": "Coin Flip", "dice": "Dice", "slots": "Slots"}.get(
+        game_title = {
+            "coinflip": "Coin Flip",
+            "dice": "Dice",
+            "highcard": "High Card",
+            "roulette": "European Roulette",
+            "slots": "Slots",
+        }.get(
             game,
             game.title(),
         )
@@ -1612,6 +1725,76 @@ class Economy(commands.Cog):
         embed.add_field(name="Result", value=result, inline=False)
         embed.set_footer(text=f"Balance: {account[CASH]:,} {CURRENCY_NAME}")
         await ctx.send(embed=embed)
+
+    async def _finish_highcard_command(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        payout: int,
+        *,
+        dealer_card: tuple[str, str],
+        player_card: tuple[str, str],
+        payout_rule: str,
+    ):
+        dealer_label = high_card_label(dealer_card)
+        player_label = high_card_label(player_card)
+        outcome = f"dealer {dealer_label}; player {player_label}; {payout_rule}"
+        try:
+            account = await self._settle_casino_wager(
+                ctx.author.id,
+                wager,
+                payout,
+                game="highcard",
+                outcome=outcome,
+                guild_id=ctx.guild.id if ctx.guild else None,
+            )
+        except EconomyError as error:
+            await ctx.send(str(error))
+            return
+
+        net = payout - wager
+        if net > 0:
+            title = "You Win"
+            result = f"You won **{net:,} {CURRENCY_NAME}**. Total returned: {payout:,}."
+            color = discord.Color.green()
+        elif net == 0:
+            title = "Push"
+            result = f"Your **{wager:,} {CURRENCY_NAME}** wager was returned."
+            color = discord.Color.gold()
+        else:
+            title = "Dealer Wins"
+            result = f"You lost **{wager:,} {CURRENCY_NAME}**."
+            color = discord.Color.red()
+
+        embed = discord.Embed(title=f"Casino - High Card: {title}", color=color)
+        embed.add_field(name="Dealer", value=dealer_label, inline=True)
+        embed.add_field(name="Player", value=player_label, inline=True)
+        embed.add_field(name="Result", value=result, inline=False)
+        embed.set_footer(text=f"Balance: {account[CASH]:,} {CURRENCY_NAME}")
+
+        buffer = None
+        file = None
+        try:
+            dealer = BlackjackCard(*dealer_card)
+            hand = BlackjackHand([BlackjackCard(*player_card)], wager, stood=True)
+            buffer = await asyncio.to_thread(render_blackjack_table, [dealer], [hand], None)
+            filename = f"highcard-{ctx.author.id}-{secrets.token_hex(4)}.png"
+            file = discord.File(buffer, filename=filename)
+            embed.set_image(url=f"attachment://{filename}")
+            await ctx.send(
+                embed=embed,
+                file=file,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except Exception:
+            log.exception("Could not render high card table for user %s", ctx.author.id)
+            embed.remove_image()
+            await ctx.send(embed=embed)
+        finally:
+            if file is not None:
+                file.close()
+            elif buffer is not None:
+                buffer.close()
 
     async def _finish_slots_command(
         self,
