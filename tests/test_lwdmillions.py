@@ -93,11 +93,11 @@ class ScheduleTests(unittest.TestCase):
         )
 
 
-class CommitRevealTests(unittest.TestCase):
-    def test_draw_is_reproducible_from_revealed_secret(self):
+class LegacyMigrationProofTests(unittest.TestCase):
+    def test_v1_draw_remains_reproducible_for_already_sold_tickets(self):
         secret = "00" * 32
-        commitment = lwdmillions.lwdmillions_commitment(secret, 7)
-        main, stars = lwdmillions.committed_lwdmillions_draw(secret, 7)
+        commitment = lwdmillions.legacy_lwdmillions_commitment(secret, 7)
+        main, stars = lwdmillions.legacy_committed_lwdmillions_draw(secret, 7)
         self.assertEqual(
             commitment,
             "fc8792a188aed9379b3107a9ccfeaafbb08c9e50c5e55239ff6591ac9077af8a",
@@ -105,7 +105,7 @@ class CommitRevealTests(unittest.TestCase):
         self.assertEqual(main, (20, 26, 32, 37, 45))
         self.assertEqual(stars, (1, 11))
         self.assertTrue(
-            lwdmillions.verify_lwdmillions_draw(
+            lwdmillions.verify_legacy_lwdmillions_draw(
                 secret,
                 7,
                 commitment,
@@ -114,12 +114,12 @@ class CommitRevealTests(unittest.TestCase):
             )
         )
 
-    def test_verification_rejects_tampering(self):
+    def test_v1_verification_rejects_tampering(self):
         secret = "11" * 32
-        commitment = lwdmillions.lwdmillions_commitment(secret, 8)
-        main, stars = lwdmillions.committed_lwdmillions_draw(secret, 8)
+        commitment = lwdmillions.legacy_lwdmillions_commitment(secret, 8)
+        main, stars = lwdmillions.legacy_committed_lwdmillions_draw(secret, 8)
         self.assertFalse(
-            lwdmillions.verify_lwdmillions_draw(
+            lwdmillions.verify_legacy_lwdmillions_draw(
                 secret,
                 8,
                 "0" * 64,
@@ -129,11 +129,184 @@ class CommitRevealTests(unittest.TestCase):
         )
         tampered_main = (1, 2, 3, 4, 5)
         self.assertFalse(
-            lwdmillions.verify_lwdmillions_draw(
+            lwdmillions.verify_legacy_lwdmillions_draw(
                 secret,
                 8,
                 commitment,
                 tampered_main,
+                stars,
+            )
+        )
+
+    def test_commitment_detection_preserves_v1_despite_new_config_defaults(self):
+        secret = "33" * 32
+        commitment = lwdmillions.legacy_lwdmillions_commitment(secret, 12)
+        self.assertEqual(
+            lwdmillions.detect_lwdmillions_proof_version(
+                secret,
+                12,
+                commitment,
+                999_999,
+            ),
+            1,
+        )
+
+
+class PublicBeaconProofTests(unittest.TestCase):
+    # A historical League of Entropy Quicknet beacon makes this test deterministic
+    # and exercises the protocol's SHA-256(signature) randomness derivation.
+    BEACON_ROUND = 1000
+    BEACON_RANDOMNESS = (
+        "fe290beca10872ef2fb164d2aa4442de4566183ec51c56ff3cd603d930e54fdd"
+    )
+    BEACON_SIGNATURE = (
+        "b44679b9a59af2ec876b1a6b1ad52ea9b1615fc3982b19576350f93447cb1125"
+        "e342b73a8dd2bacbe47e4b6b63ed5e39"
+    )
+
+    def test_quicknet_round_is_strictly_after_draw_time(self):
+        genesis = lwdmillions.DRAND_QUICKNET_GENESIS_TIME
+        self.assertEqual(lwdmillions.drand_round_after(genesis), 2)
+        self.assertEqual(
+            lwdmillions.drand_round_timestamp(2),
+            genesis + lwdmillions.DRAND_QUICKNET_PERIOD,
+        )
+        self.assertEqual(lwdmillions.drand_round_after(genesis + 3), 3)
+
+    def test_historical_beacon_shape_and_randomness_hash_validate(self):
+        self.assertTrue(
+            lwdmillions.validate_drand_quicknet_beacon(
+                self.BEACON_ROUND,
+                self.BEACON_RANDOMNESS,
+                self.BEACON_SIGNATURE,
+            )
+        )
+        tampered_signature = "0" + self.BEACON_SIGNATURE[1:]
+        self.assertFalse(
+            lwdmillions.validate_drand_quicknet_beacon(
+                self.BEACON_ROUND,
+                self.BEACON_RANDOMNESS,
+                tampered_signature,
+            )
+        )
+
+    def test_v2_draw_is_reproducible_from_secret_and_public_beacon(self):
+        secret = "00" * 32
+        commitment = lwdmillions.lwdmillions_commitment(
+            secret,
+            7,
+            self.BEACON_ROUND,
+        )
+        main, stars = lwdmillions.committed_lwdmillions_draw(
+            secret,
+            7,
+            self.BEACON_ROUND,
+            self.BEACON_RANDOMNESS,
+        )
+        self.assertEqual(
+            commitment,
+            "299412946069cef0c6688c963e97fbe1186fc41abf228ad57a0432fee682161f",
+        )
+        self.assertEqual(main, (6, 10, 13, 16, 28))
+        self.assertEqual(stars, (3, 4))
+        self.assertTrue(
+            lwdmillions.verify_lwdmillions_draw(
+                secret,
+                7,
+                self.BEACON_ROUND,
+                self.BEACON_RANDOMNESS,
+                self.BEACON_SIGNATURE,
+                commitment,
+                main,
+                stars,
+            )
+        )
+
+    def test_v2_commitment_binds_the_future_beacon_round(self):
+        secret = "22" * 32
+        commitment = lwdmillions.lwdmillions_commitment(
+            secret,
+            9,
+            self.BEACON_ROUND,
+        )
+        main, stars = lwdmillions.committed_lwdmillions_draw(
+            secret,
+            9,
+            self.BEACON_ROUND,
+            self.BEACON_RANDOMNESS,
+        )
+        self.assertFalse(
+            lwdmillions.verify_lwdmillions_draw(
+                secret,
+                9,
+                self.BEACON_ROUND + 1,
+                self.BEACON_RANDOMNESS,
+                self.BEACON_SIGNATURE,
+                commitment,
+                main,
+                stars,
+            )
+        )
+        self.assertEqual(
+            lwdmillions.detect_lwdmillions_proof_version(
+                secret,
+                9,
+                commitment,
+                self.BEACON_ROUND,
+            ),
+            2,
+        )
+
+    def test_paid_v1_draw_can_add_drand_without_replacing_its_commitment(self):
+        secret = "44" * 32
+        draw_number = 10
+        scheduled_for = lwdmillions.drand_round_timestamp(self.BEACON_ROUND - 1)
+        legacy_commitment = lwdmillions.legacy_lwdmillions_commitment(
+            secret,
+            draw_number,
+        )
+        main, stars = lwdmillions.committed_lwdmillions_draw(
+            secret,
+            draw_number,
+            self.BEACON_ROUND,
+            self.BEACON_RANDOMNESS,
+        )
+        self.assertTrue(
+            lwdmillions.verify_migrated_lwdmillions_draw(
+                secret,
+                draw_number,
+                scheduled_for,
+                self.BEACON_ROUND,
+                self.BEACON_RANDOMNESS,
+                self.BEACON_SIGNATURE,
+                legacy_commitment,
+                main,
+                stars,
+            )
+        )
+        self.assertFalse(
+            lwdmillions.verify_migrated_lwdmillions_draw(
+                secret,
+                draw_number,
+                scheduled_for,
+                self.BEACON_ROUND + 1,
+                self.BEACON_RANDOMNESS,
+                self.BEACON_SIGNATURE,
+                legacy_commitment,
+                main,
+                stars,
+            )
+        )
+        self.assertFalse(
+            lwdmillions.verify_migrated_lwdmillions_draw(
+                secret,
+                draw_number,
+                scheduled_for,
+                self.BEACON_ROUND,
+                self.BEACON_RANDOMNESS,
+                self.BEACON_SIGNATURE,
+                "0" * 64,
+                main,
                 stars,
             )
         )

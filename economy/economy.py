@@ -10,13 +10,16 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from aiohttp import web
+from aiohttp import ClientError, ClientSession, ClientTimeout, web
 import discord
 from redbot.core import Config, commands
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 from .blackjack import BlackjackCard, BlackjackHand, BlackjackView, render_blackjack_table
 from .casino_games import (
+    MINES_MAX_COUNT,
+    MINES_MAX_PAYOUT_MULTIPLIER,
+    MINES_MIN_COUNT,
     can_extend_casino_self_exclusion,
     calculate_high_card_payout,
     calculate_roulette_payout,
@@ -28,11 +31,18 @@ from .casino_games import (
     roulette_number_color,
 )
 from .lwdmillions import (
+    DRAND_QUICKNET_CHAIN_HASH,
+    DRAND_QUICKNET_PUBLIC_KEY,
     LWD_MILLIONS_PRIZE_MULTIPLIERS,
     LWD_MILLIONS_PRIZE_TIER_ORDER,
     calculate_lwdmillions_prize,
     committed_lwdmillions_draw,
+    detect_lwdmillions_proof_version,
+    drand_round_after,
+    drand_round_timestamp,
     format_lwdmillions_ticket,
+    legacy_committed_lwdmillions_draw,
+    legacy_lwdmillions_commitment,
     lwdmillions_commitment,
     lwdmillions_match_label,
     match_lwdmillions_ticket,
@@ -40,8 +50,12 @@ from .lwdmillions import (
     parse_lwdmillions_ticket,
     random_lwdmillions_ticket,
     validate_lwdmillions_ticket,
+    validate_drand_quicknet_beacon,
     verify_lwdmillions_draw,
+    verify_legacy_lwdmillions_draw,
+    verify_migrated_lwdmillions_draw,
 )
+from .mines import DEFAULT_MINES, MinesView
 from .slots import (
     SLOT_EMOJIS,
     SLOT_TRIPLE_MULTIPLIERS,
@@ -52,6 +66,11 @@ from .slots import (
 
 
 log = logging.getLogger("red.neufox.economy")
+
+try:
+    import drand_verify
+except ImportError:  # The cog requirement normally installs this before loading.
+    drand_verify = None
 
 CASH = "cash"
 CURRENCY_NAME = "LWD$"
@@ -82,6 +101,14 @@ MAX_LWDMILLIONS_TOTAL_TICKETS = 10_000
 LWDMILLIONS_HISTORY_LIMIT = 10
 LWDMILLIONS_HISTORY_WINNER_LIMIT = 100
 LWDMILLIONS_DRAW_POLL_SECONDS = 30
+DRAND_FETCH_TIMEOUT_SECONDS = 12
+DRAND_REQUIRED_CONSENSUS = 2
+DRAND_QUICKNET_ENDPOINTS = (
+    "https://api.drand.sh",
+    "https://api2.drand.sh",
+    "https://api3.drand.sh",
+    "https://drand.cloudflare.com",
+)
 MAX_LEDGER_ENTRIES = 500
 MAX_AMOUNT = 10**15
 TOP_LIMIT = 10
@@ -192,6 +219,8 @@ class Economy(commands.Cog):
                 "jackpot_contribution_percent": DEFAULT_LWDMILLIONS_JACKPOT_CONTRIBUTION_PERCENT,
                 "draw_number": 1,
                 "next_draw": 0,
+                "beacon_round": 0,
+                "proof_version": 2,
                 "secret": "",
                 "commitment": "",
                 "next_ticket_id": 1,
@@ -205,6 +234,8 @@ class Economy(commands.Cog):
         self._site: web.TCPSite | None = None
         self._blackjack_players: set[int] = set()
         self._blackjack_views: dict[int, BlackjackView] = {}
+        self._mines_players: set[int] = set()
+        self._mines_views: dict[int, MinesView] = {}
         self._casino_exclusion_lock = asyncio.Lock()
         self._slot_players: set[int] = set()
         self._slot_render_semaphore = asyncio.Semaphore(2)
@@ -219,6 +250,8 @@ class Economy(commands.Cog):
         for task in list(self._lwdmillions_notification_tasks):
             task.cancel()
         for view in list(self._blackjack_views.values()):
+            self.bot.loop.create_task(view.cancel_and_refund())
+        for view in list(self._mines_views.values()):
             self.bot.loop.create_task(view.cancel_and_refund())
         self.bot.loop.create_task(self._stop_api())
 
@@ -455,6 +488,21 @@ class Economy(commands.Cog):
     async def economy_casino_slots_short(self, ctx: commands.Context, wager: int):
         """Shortcut for eco casino slots."""
         await ctx.invoke(self.economy_casino_slots, wager=wager)
+
+    @economy_casino_short.command(name="mines", aliases=["mine"])
+    @commands.max_concurrency(1, per=commands.BucketType.user, wait=False)
+    async def economy_casino_mines_short(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        mine_count: int = DEFAULT_MINES,
+    ):
+        """Shortcut for eco casino mines."""
+        await ctx.invoke(
+            self.economy_casino_mines,
+            wager=wager,
+            mine_count=mine_count,
+        )
 
     @economy_casino_short.command(name="blackjack", aliases=["bj"])
     @commands.max_concurrency(1, per=commands.BucketType.user, wait=False)
@@ -774,7 +822,10 @@ class Economy(commands.Cog):
         next_draw = int(state["next_draw"])
         tickets = [ticket for ticket in state["tickets"] if isinstance(ticket, dict)]
         players = {int(ticket.get("user_id", 0)) for ticket in tickets}
-        status = "Open" if state["enabled"] else "Ticket sales closed"
+        if not self._lwdmillions_state_commitment_valid(state):
+            status = "Paused — draw proof needs repair"
+        else:
+            status = "Open" if state["enabled"] else "Ticket sales closed"
         prefix = ctx.clean_prefix
 
         embed = discord.Embed(
@@ -824,6 +875,38 @@ class Economy(commands.Cog):
             value=f"`{state['commitment']}`",
             inline=False,
         )
+        proof_version = int(state.get("proof_version", 1))
+        if proof_version == 1:
+            embed.add_field(
+                name="Original Draw Proof Preserved",
+                value=(
+                    "Tickets for this in-progress draw retain the exact v1 commitment "
+                    "published when sales began. Public drand entropy starts next draw."
+                ),
+                inline=False,
+            )
+        else:
+            if proof_version == 3:
+                embed.add_field(
+                    name="Existing Tickets Upgraded",
+                    value=(
+                        "All selections and financial values are unchanged. The published v1 "
+                        "commitment remains the secret anchor, now mixed with the deterministic "
+                        "public beacon below."
+                    ),
+                    inline=False,
+                )
+            beacon_round = int(state.get("beacon_round", 0))
+            if beacon_round > 0:
+                beacon_time = drand_round_timestamp(beacon_round)
+                embed.add_field(
+                    name="Future Public Entropy",
+                    value=(
+                        f"League of Entropy Quicknet round **#{beacon_round:,}**, published "
+                        f"<t:{beacon_time}:R>. The bot will wait for its verified beacon."
+                    ),
+                    inline=False,
+                )
         embed.set_footer(
             text=(
                 f"{len(tickets):,} lines from {len(players):,} players | "
@@ -901,6 +984,36 @@ class Economy(commands.Cog):
             value=f"<t:{int(state['next_draw'])}:F> (<t:{int(state['next_draw'])}:R>)",
             inline=False,
         )
+        proof_version = int(state.get("proof_version", 1))
+        if proof_version == 1:
+            embed.add_field(
+                name="Ticket Migration",
+                value=(
+                    "Your lines and original v1 commitment are unchanged. This draw settles "
+                    "under its original proof; public drand entropy begins next draw."
+                ),
+                inline=False,
+            )
+        else:
+            if proof_version == 3:
+                embed.add_field(
+                    name="Ticket Migration",
+                    value=(
+                        "Your lines, price, and original commitment are unchanged. This draw "
+                        "now also uses the deterministic public beacon below."
+                    ),
+                    inline=False,
+                )
+            beacon_round = int(state.get("beacon_round", 0))
+            if beacon_round > 0:
+                embed.add_field(
+                    name="Locked Public Beacon",
+                    value=(
+                        f"Quicknet round **#{beacon_round:,}** at "
+                        f"<t:{drand_round_timestamp(beacon_round)}:F>"
+                    ),
+                    inline=False,
+                )
         embed.set_footer(text=f"{len(tickets):,}/{MAX_LWDMILLIONS_LINES_PER_PLAYER} lines")
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
@@ -981,19 +1094,82 @@ class Economy(commands.Cog):
             return
 
         try:
-            valid = verify_lwdmillions_draw(
-                str(record["secret"]),
-                int(record["draw_number"]),
-                str(record["commitment"]),
-                record["main"],
-                record["stars"],
-            )
-        except (KeyError, TypeError, ValueError):
+            proof_version = int(record.get("proof_version", 1))
+        except (TypeError, ValueError):
+            proof_version = 0
+        try:
+            if proof_version == 1:
+                valid = verify_legacy_lwdmillions_draw(
+                    str(record["secret"]),
+                    int(record["draw_number"]),
+                    str(record["commitment"]),
+                    record["main"],
+                    record["stars"],
+                )
+            elif proof_version in (2, 3):
+                if proof_version == 2:
+                    proof_valid = verify_lwdmillions_draw(
+                        str(record["secret"]),
+                        int(record["draw_number"]),
+                        int(record["beacon_round"]),
+                        str(record["beacon_randomness"]),
+                        str(record["beacon_signature"]),
+                        str(record["commitment"]),
+                        record["main"],
+                        record["stars"],
+                    )
+                else:
+                    proof_valid = verify_migrated_lwdmillions_draw(
+                        str(record["secret"]),
+                        int(record["draw_number"]),
+                        int(record["scheduled_for"]),
+                        int(record["beacon_round"]),
+                        str(record["beacon_randomness"]),
+                        str(record["beacon_signature"]),
+                        str(record["commitment"]),
+                        record["main"],
+                        record["stars"],
+                    )
+                verified_randomness = (
+                    str(
+                        drand_verify.verify_quicknet(
+                            int(record["beacon_round"]),
+                            str(record["beacon_signature"]),
+                            DRAND_QUICKNET_PUBLIC_KEY,
+                        )
+                    ).casefold()
+                    if proof_valid and drand_verify is not None
+                    else ""
+                )
+                beacon_valid = secrets.compare_digest(
+                    verified_randomness,
+                    str(record["beacon_randomness"]).casefold(),
+                )
+                chain_valid = secrets.compare_digest(
+                    str(record.get("beacon_chain_hash", "")),
+                    DRAND_QUICKNET_CHAIN_HASH,
+                )
+                valid = proof_valid and beacon_valid and chain_valid
+            else:
+                valid = False
+        except (KeyError, OverflowError, TypeError, ValueError):
             valid = False
         embed = discord.Embed(
             title=f"LWDMillions Draw #{int(record.get('draw_number', 0)):,} Verification",
             description=(
-                "✅ The revealed secret reproduces the published commitment and winning numbers."
+                (
+                    "✅ The revealed secret reproduces the original v1 commitment and "
+                    "winning numbers. This proof was preserved for tickets bought before "
+                    "the public-beacon upgrade."
+                    if proof_version == 1
+                    else (
+                        "✅ The original v1 commitment, deterministic public-beacon round, "
+                        "BLS-verified beacon, and revealed secret reproduce the winning numbers."
+                        if proof_version == 3
+                        else "✅ The BLS-verified public beacon and revealed secret reproduce "
+                        "the published commitment and winning numbers."
+                    )
+                )
                 if valid
                 else "❌ This stored draw does not pass commitment verification."
             ),
@@ -1001,6 +1177,20 @@ class Economy(commands.Cog):
         )
         embed.add_field(name="Commitment", value=f"`{record.get('commitment', '')}`", inline=False)
         embed.add_field(name="Revealed Secret", value=f"`{record.get('secret', '')}`", inline=False)
+        if proof_version in (2, 3):
+            beacon_round = int(record.get("beacon_round", 0))
+            beacon_url = (
+                f"https://api.drand.sh/{DRAND_QUICKNET_CHAIN_HASH}/public/{beacon_round}"
+            )
+            embed.add_field(
+                name=f"League of Entropy Quicknet Round #{beacon_round:,}",
+                value=(
+                    f"Randomness: `{record.get('beacon_randomness', '')}`\n"
+                    f"Signature: `{record.get('beacon_signature', '')}`\n"
+                    f"[Open the public beacon]({beacon_url})"
+                ),
+                inline=False,
+            )
         embed.add_field(
             name="Winning Numbers",
             value=format_lwdmillions_ticket(record.get("main", []), record.get("stars", [])),
@@ -1063,6 +1253,16 @@ class Economy(commands.Cog):
                 f"`{prefix}casino slots <bet>`\n"
                 "Exact triples return 4x-80x according to the machine; "
                 "one cherry on an otherwise unmatched spin returns half."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Mines",
+            value=(
+                f"`{prefix}casino mines <bet> [mines]`\n"
+                f"Reveal safe tiles and cash out before hitting a mine. Choose "
+                f"{MINES_MIN_COUNT}-{MINES_MAX_COUNT} mines; the default is {DEFAULT_MINES}. "
+                f"Returns are capped at {MINES_MAX_PAYOUT_MULTIPLIER}x."
             ),
             inline=False,
         )
@@ -1145,7 +1345,7 @@ class Economy(commands.Cog):
                 actor_id=ctx.author.id,
                 reason="Voluntary self-exclusion",
             )
-        await self._cancel_excluded_blackjack(ctx.author.id)
+        await self._cancel_excluded_casino_games(ctx.author.id)
         if expires_at:
             await ctx.send(
                 "Your casino self-exclusion is now active until "
@@ -1214,7 +1414,7 @@ class Economy(commands.Cog):
             actor_id=ctx.author.id,
             reason=reason,
         )
-        await self._cancel_excluded_blackjack(member.id)
+        await self._cancel_excluded_casino_games(member.id)
         duration_text = (
             f"until <t:{expires_at}:F> (<t:{expires_at}:R>)" if expires_at else "permanently"
         )
@@ -1396,6 +1596,99 @@ class Economy(commands.Cog):
             )
         finally:
             self._slot_players.discard(ctx.author.id)
+
+    @economy_casino.command(name="mines", aliases=["mine"])
+    @commands.max_concurrency(1, per=commands.BucketType.user, wait=False)
+    async def economy_casino_mines(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        mine_count: int = DEFAULT_MINES,
+    ):
+        """Play an interactive game of Mines."""
+        await self._run_mines_round(ctx, wager, mine_count)
+
+    async def _run_mines_round(
+        self,
+        ctx: commands.Context,
+        wager: int,
+        mine_count: int,
+    ) -> bool:
+        """Run one Mines game for a command or replay interaction."""
+        existing_view = self._mines_views.get(ctx.author.id)
+        if (
+            ctx.author.id in self._mines_players
+            and (existing_view is None or existing_view.phase != "ended")
+        ):
+            await ctx.send("You already have an active Mines game.")
+            return False
+        if mine_count < MINES_MIN_COUNT or mine_count > MINES_MAX_COUNT:
+            await ctx.send(
+                f"Choose between {MINES_MIN_COUNT} and {MINES_MAX_COUNT} mines."
+            )
+            return False
+
+        self._mines_players.add(ctx.author.id)
+        view: MinesView | None = None
+        try:
+            try:
+                await self._validate_casino_wager(wager, ctx.author.id)
+                safe_maximum = MAX_AMOUNT // MINES_MAX_PAYOUT_MULTIPLIER
+                if wager > safe_maximum:
+                    raise EconomyError(
+                        f"Mines wager cannot exceed {safe_maximum:,} {CURRENCY_NAME}."
+                    )
+                account = await self._reserve_mines_wager(
+                    ctx.author.id,
+                    wager,
+                    guild_id=ctx.guild.id if ctx.guild else None,
+                    reason=f"mines initial wager; {mine_count} mines",
+                )
+            except EconomyError as error:
+                await ctx.send(str(error))
+                return False
+
+            try:
+                view = MinesView(
+                    self,
+                    ctx,
+                    wager,
+                    mine_count,
+                    currency_name=CURRENCY_NAME,
+                )
+                self._mines_views[ctx.author.id] = view
+                view.final_balance = account[CASH]
+                await view.start()
+                await view.wait()
+            except Exception:
+                log.exception("Could not run Mines for user %s", ctx.author.id)
+                if view is None or view.message is None:
+                    if view is None or view.phase != "ended":
+                        await self._credit_mines_payout(
+                            ctx.author.id,
+                            wager,
+                            guild_id=ctx.guild.id if ctx.guild else None,
+                            reason="mines canceled after startup error; wager refunded",
+                        )
+                        await ctx.send("Mines could not start, so your wager was refunded.")
+                    else:
+                        await ctx.send(
+                            "The Mines display failed after settlement. "
+                            f"Balance: {view.final_balance:,} {CURRENCY_NAME}."
+                        )
+                else:
+                    await ctx.send(
+                        "That Mines game hit an unexpected error and will time out safely."
+                    )
+            return True
+        finally:
+            if view is None:
+                current_view = self._mines_views.get(ctx.author.id)
+                if current_view is None or current_view.phase == "ended":
+                    self._mines_players.discard(ctx.author.id)
+            elif self._mines_views.get(ctx.author.id) is view:
+                self._mines_players.discard(ctx.author.id)
+                self._mines_views.pop(ctx.author.id, None)
 
     @economy_casino.command(name="blackjack", aliases=["bj"])
     @commands.max_concurrency(1, per=commands.BucketType.user, wait=False)
@@ -1758,6 +2051,26 @@ class Economy(commands.Cog):
         """Show LWDMillions settings."""
         state = await self._lwdmillions_state_snapshot()
         channels = state.get("announcement_channels", {})
+        proof_version = int(state.get("proof_version", 1))
+        if proof_version == 1:
+            proof_summary = "Proof: preserved v1 commitment (drand begins next draw)"
+        elif proof_version == 3:
+            beacon_round = int(state.get("beacon_round", 0))
+            proof_summary = (
+                "Proof: paid v1 draw upgraded with its original commitment + "
+                f"Quicknet round #{beacon_round:,} at "
+                f"<t:{drand_round_timestamp(beacon_round)}:F>"
+                if beacon_round > 0
+                else "Proof: invalid migrated beacon round"
+            )
+        else:
+            beacon_round = int(state.get("beacon_round", 0))
+            proof_summary = (
+                f"Locked beacon: Quicknet round #{beacon_round:,} at "
+                f"<t:{drand_round_timestamp(beacon_round)}:F>"
+                if beacon_round > 0
+                else "Proof: invalid v2 beacon round"
+            )
         await ctx.send(
             "LWDMillions settings:\n"
             f"Sales: {'enabled' if state['enabled'] else 'disabled'}\n"
@@ -1767,6 +2080,7 @@ class Economy(commands.Cog):
             f"Jackpot contribution: {int(state['jackpot_contribution_percent'])}% per ticket\n"
             f"Upcoming draw: #{int(state['draw_number']):,} at "
             f"<t:{int(state['next_draw'])}:F> (<t:{int(state['next_draw'])}:R>)\n"
+            f"{proof_summary}\n"
             f"Tickets sold: {len(state['tickets']):,}/{MAX_LWDMILLIONS_TOTAL_TICKETS:,}\n"
             f"Announcement channels: {len(channels):,}\n"
             f"Commitment: `{state['commitment']}`"
@@ -1883,10 +2197,12 @@ class Economy(commands.Cog):
         ctx: commands.Context,
         confirmation: str = "",
     ):
-        """Close and settle the current LWDMillions draw immediately."""
+        """Settle the current draw once its committed entropy is available."""
         if confirmation.casefold() != "confirm":
             await ctx.send(
-                "This immediately closes the current draw and settles every ticket. Run "
+                "This closes the current draw and settles every ticket. A public-beacon draw "
+                "can never "
+                "settle before its locked public beacon exists. Run "
                 f"`{ctx.clean_prefix}eco admin lwdmillions draw confirm` to continue."
             )
             return
@@ -1895,7 +2211,20 @@ class Economy(commands.Cog):
             skip_channel_id=ctx.channel.id,
         )
         if record is None:
-            await ctx.send("The LWDMillions draw could not be completed.")
+            state = await self._lwdmillions_state_snapshot()
+            beacon_round = int(state.get("beacon_round", 0))
+            if int(state.get("proof_version", 1)) in (2, 3) and beacon_round > 0:
+                beacon_time = drand_round_timestamp(beacon_round)
+                if int(time.time()) < beacon_time:
+                    await ctx.send(
+                        "The draw is locked until Quicknet round "
+                        f"#{beacon_round:,} is published <t:{beacon_time}:R>."
+                    )
+                    return
+            await ctx.send(
+                "The LWDMillions draw could not be completed. Its proof was left unchanged; "
+                "check the cog logs for beacon availability or proof validation errors."
+            )
             return
         await ctx.send(
             embed=self._lwdmillions_result_embed(record, ctx.clean_prefix),
@@ -2473,6 +2802,12 @@ class Economy(commands.Cog):
         if next_draw <= 0:
             next_draw = int(next_lwdmillions_draw().timestamp())
         state["next_draw"] = next_draw
+        try:
+            expected_beacon_round = drand_round_after(next_draw)
+        except ValueError:
+            next_draw = int(next_lwdmillions_draw().timestamp())
+            state["next_draw"] = next_draw
+            expected_beacon_round = drand_round_after(next_draw)
 
         if not isinstance(state.get("tickets"), list):
             state["tickets"] = []
@@ -2484,23 +2819,91 @@ class Economy(commands.Cog):
             state["announcement_channels"] = {}
 
         secret = str(state.get("secret", ""))
-        if not secret:
-            secret = secrets.token_hex(32)
-            state["secret"] = secret
         commitment = str(state.get("commitment", ""))
-        if not commitment:
-            state["commitment"] = lwdmillions_commitment(secret, draw_number)
-        elif (
-            not secrets.compare_digest(
+        try:
+            beacon_round = int(state.get("beacon_round", 0))
+        except (TypeError, ValueError):
+            beacon_round = 0
+        if beacon_round < 0:
+            beacon_round = 0
+        raw_proof_version = state.get("proof_version")
+        try:
+            proof_version = int(raw_proof_version) if raw_proof_version is not None else 0
+        except (TypeError, ValueError):
+            proof_version = 0
+
+        detected_version = (
+            detect_lwdmillions_proof_version(
+                secret,
+                draw_number,
                 commitment,
-                lwdmillions_commitment(secret, draw_number),
+                beacon_round,
             )
-            and not state["tickets"]
-        ):
-            # With no sold tickets, a corrupt proof can be rotated without affecting players.
+            if secret and commitment
+            else None
+        )
+
+        if state["tickets"]:
+            # Never rotate proof material after somebody has paid. Detect an old live
+            # draw from its actual v1 commitment, even if nested defaults supplied a
+            # misleading proof_version value during the upgrade.
+            if detected_version == 1:
+                # Keep the exact old commitment as the secret anchor, then add the
+                # objectively selected first Quicknet round after the original draw
+                # time. Ticket selections and all financial values remain untouched.
+                state["proof_version"] = 3
+                state["beacon_round"] = expected_beacon_round
+                return
+            if detected_version == 2:
+                state["proof_version"] = 2
+                state["beacon_round"] = beacon_round
+                return
+
+            # An unknown or damaged proof must fail closed, but its original values
+            # are retained so an owner can investigate without losing paid tickets.
+            retained_version = proof_version if proof_version in (1, 2, 3) else 2
+            state["proof_version"] = retained_version
+            state["beacon_round"] = 0 if retained_version == 1 else beacon_round
+            return
+
+        # With no paid tickets, safely establish (or repair) the current v2 proof.
+        if not secret or beacon_round != expected_beacon_round or detected_version != 2:
             secret = secrets.token_hex(32)
             state["secret"] = secret
-            state["commitment"] = lwdmillions_commitment(secret, draw_number)
+            commitment = lwdmillions_commitment(
+                secret,
+                draw_number,
+                expected_beacon_round,
+            )
+            state["commitment"] = commitment
+        state["proof_version"] = 2
+        state["beacon_round"] = expected_beacon_round
+
+    @staticmethod
+    def _lwdmillions_state_commitment_valid(state: dict[str, Any]) -> bool:
+        """Return whether the current state's versioned commitment is intact."""
+        try:
+            proof_version = int(state.get("proof_version", 1))
+            secret = str(state["secret"])
+            draw_number = int(state["draw_number"])
+            commitment = str(state["commitment"])
+            if proof_version == 1:
+                expected = legacy_lwdmillions_commitment(secret, draw_number)
+            elif proof_version == 2:
+                expected = lwdmillions_commitment(
+                    secret,
+                    draw_number,
+                    int(state["beacon_round"]),
+                )
+            elif proof_version == 3:
+                if int(state["beacon_round"]) != drand_round_after(int(state["next_draw"])):
+                    return False
+                expected = legacy_lwdmillions_commitment(secret, draw_number)
+            else:
+                return False
+        except (KeyError, TypeError, ValueError):
+            return False
+        return secrets.compare_digest(expected, commitment)
 
     async def _lwdmillions_state_snapshot(self) -> dict[str, Any]:
         async with self._lock:
@@ -2554,10 +2957,7 @@ class Economy(commands.Cog):
                     raise EconomyError("The draw is being settled. Please try again in a moment.")
                 if not state["enabled"]:
                     raise EconomyError("LWDMillions ticket sales are currently closed.")
-                if not secrets.compare_digest(
-                    str(state["commitment"]),
-                    lwdmillions_commitment(str(state["secret"]), int(state["draw_number"])),
-                ):
+                if not self._lwdmillions_state_commitment_valid(state):
                     raise EconomyError(
                         "LWDMillions ticket sales are paused because the draw proof needs repair."
                     )
@@ -2676,6 +3076,33 @@ class Economy(commands.Cog):
             value=f"`{state['commitment']}`",
             inline=False,
         )
+        proof_version = int(state.get("proof_version", 1))
+        if proof_version == 1:
+            embed.add_field(
+                name="Original Proof Preserved",
+                value="This draw uses its already-published v1 proof; drand starts next draw.",
+                inline=False,
+            )
+        else:
+            if proof_version == 3:
+                embed.add_field(
+                    name="Existing Ticket Upgrade",
+                    value=(
+                        "The original v1 commitment still anchors this paid draw; the public "
+                        "beacon below is now mixed into its result."
+                    ),
+                    inline=False,
+                )
+            beacon_round = int(state.get("beacon_round", 0))
+            if beacon_round > 0:
+                embed.add_field(
+                    name="Locked Public Beacon",
+                    value=(
+                        f"Quicknet round **#{beacon_round:,}** at "
+                        f"<t:{drand_round_timestamp(beacon_round)}:F>"
+                    ),
+                    inline=False,
+                )
         embed.set_footer(text=f"Balance: {account[CASH]:,} {CURRENCY_NAME}")
         await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
@@ -2757,16 +3184,150 @@ class Economy(commands.Cog):
             ),
             inline=False,
         )
+        try:
+            proof_version = int(record.get("proof_version", 1))
+        except (TypeError, ValueError):
+            proof_version = 0
+        if proof_version == 1:
+            proof_note = "Original v1 proof preserved for this completed draw.\n"
+        elif proof_version == 3:
+            proof_note = (
+                "Paid v1 draw upgraded to public entropy; this is still its original "
+                "commitment.\n"
+            )
+        else:
+            proof_note = ""
         embed.add_field(
             name="Commit-Reveal Proof",
             value=(
-                f"Commitment: `{record.get('commitment', '')}`\n"
+                f"{proof_note}Commitment: `{record.get('commitment', '')}`\n"
                 f"Secret: `{record.get('secret', '')}`\n"
                 f"Run `{prefix}lwdmillions verify {int(record.get('draw_number', 0))}`."
             ),
             inline=False,
         )
+        if proof_version in (2, 3):
+            beacon_round = int(record.get("beacon_round", 0))
+            beacon_url = (
+                f"https://api.drand.sh/{DRAND_QUICKNET_CHAIN_HASH}/public/{beacon_round}"
+            )
+            source_count = len(record.get("beacon_sources", []))
+            embed.add_field(
+                name=f"Verified Public Beacon — Quicknet #{beacon_round:,}",
+                value=(
+                    f"Randomness: `{record.get('beacon_randomness', '')}`\n"
+                    f"Signature: `{record.get('beacon_signature', '')}`\n"
+                    f"BLS verified with {source_count:,} matching relays · "
+                    f"[Open beacon]({beacon_url})"
+                ),
+                inline=False,
+            )
         return embed
+
+    @staticmethod
+    async def _fetch_drand_endpoint(
+        session: ClientSession,
+        endpoint: str,
+        round_number: int,
+    ) -> dict[str, Any] | None:
+        url = (
+            f"{endpoint}/{DRAND_QUICKNET_CHAIN_HASH}/public/{int(round_number)}"
+        )
+        try:
+            async with session.get(
+                url,
+                headers={"Accept": "application/json", "Cache-Control": "no-cache"},
+            ) as response:
+                if response.status == 404:
+                    return None
+                response.raise_for_status()
+                payload = await response.json(content_type=None)
+        except (ClientError, asyncio.TimeoutError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        try:
+            returned_round = int(payload["round"])
+            randomness = str(payload["randomness"]).casefold()
+            signature = str(payload["signature"]).casefold()
+        except (KeyError, TypeError, ValueError):
+            return None
+        if returned_round != int(round_number):
+            return None
+        if not validate_drand_quicknet_beacon(
+            returned_round,
+            randomness,
+            signature,
+        ):
+            return None
+        return {
+            "round": returned_round,
+            "randomness": randomness,
+            "signature": signature,
+            "endpoint": endpoint,
+        }
+
+    async def _fetch_drand_beacon(self, round_number: int) -> dict[str, Any] | None:
+        """Require relay consensus and a valid Quicknet BLS signature."""
+        if drand_verify is None:
+            log.error("drand-verify is unavailable; LWDMillions draw settlement is paused")
+            return None
+
+        timeout = ClientTimeout(total=DRAND_FETCH_TIMEOUT_SECONDS)
+        async with ClientSession(timeout=timeout) as session:
+            responses = await asyncio.gather(
+                *(
+                    self._fetch_drand_endpoint(session, endpoint, round_number)
+                    for endpoint in DRAND_QUICKNET_ENDPOINTS
+                ),
+                return_exceptions=True,
+            )
+
+        matching: dict[tuple[str, str], list[str]] = {}
+        for response in responses:
+            if not isinstance(response, dict):
+                continue
+            key = (str(response["randomness"]), str(response["signature"]))
+            matching.setdefault(key, []).append(str(response["endpoint"]))
+        if not matching:
+            log.warning("No valid drand responses for Quicknet round %s", round_number)
+            return None
+
+        (randomness, signature), sources = max(
+            matching.items(),
+            key=lambda item: len(item[1]),
+        )
+        if len(sources) < DRAND_REQUIRED_CONSENSUS:
+            log.warning(
+                "Only %s drand relay confirmed Quicknet round %s; settlement needs %s",
+                len(sources),
+                round_number,
+                DRAND_REQUIRED_CONSENSUS,
+            )
+            return None
+
+        try:
+            verified_randomness = str(
+                drand_verify.verify_quicknet(
+                    int(round_number),
+                    signature,
+                    DRAND_QUICKNET_PUBLIC_KEY,
+                )
+            ).casefold()
+        except (TypeError, ValueError):
+            log.error("BLS verification failed for drand Quicknet round %s", round_number)
+            return None
+        if not secrets.compare_digest(verified_randomness, randomness):
+            log.error("Verified drand randomness differs for Quicknet round %s", round_number)
+            return None
+        return {
+            "round": int(round_number),
+            "randomness": randomness,
+            "signature": signature,
+            "sources": sources,
+            "chain_hash": DRAND_QUICKNET_CHAIN_HASH,
+            "verified": True,
+        }
 
     async def _run_lwdmillions_draw(
         self,
@@ -2777,9 +3338,43 @@ class Economy(commands.Cog):
         """Atomically settle the current draw and open the next ticket period."""
         async with self._lwdmillions_draw_lock:
             now = int(time.time())
+            pending = await self._lwdmillions_state_snapshot()
+            scheduled_for = int(pending["next_draw"])
+            if not force and now < scheduled_for:
+                return None
+
+            draw_number = int(pending["draw_number"])
+            secret = str(pending["secret"])
+            commitment = str(pending["commitment"])
+            proof_version = int(pending.get("proof_version", 1))
+            if not self._lwdmillions_state_commitment_valid(pending):
+                log.error(
+                    "Refusing to settle LWDMillions draw %s: v%s commitment mismatch",
+                    draw_number,
+                    proof_version,
+                )
+                return None
+
+            beacon: dict[str, Any] | None = None
+            if proof_version in (2, 3):
+                beacon_round = int(pending["beacon_round"])
+                if now < drand_round_timestamp(beacon_round):
+                    return None
+                beacon = await self._fetch_drand_beacon(beacon_round)
+                if beacon is None:
+                    return None
+            elif proof_version != 1:
+                log.error(
+                    "Refusing to settle LWDMillions draw %s: unknown proof version %s",
+                    draw_number,
+                    proof_version,
+                )
+                return None
+
             async with self._lock:
                 async with self.config.lwdmillions() as state:
                     self._normalize_lwdmillions_state(state)
+                    now = int(time.time())
                     scheduled_for = int(state["next_draw"])
                     if not force and now < scheduled_for:
                         return None
@@ -2787,15 +3382,48 @@ class Economy(commands.Cog):
                     draw_number = int(state["draw_number"])
                     secret = str(state["secret"])
                     commitment = str(state["commitment"])
-                    expected_commitment = lwdmillions_commitment(secret, draw_number)
-                    if not secrets.compare_digest(expected_commitment, commitment):
+                    current_proof_version = int(state.get("proof_version", 1))
+                    if (
+                        draw_number != int(pending["draw_number"])
+                        or commitment != str(pending["commitment"])
+                        or scheduled_for != int(pending["next_draw"])
+                        or current_proof_version != proof_version
+                    ):
+                        return None
+                    if not self._lwdmillions_state_commitment_valid(state):
                         log.error(
-                            "Refusing to settle LWDMillions draw %s: commitment mismatch",
+                            "Refusing to settle LWDMillions draw %s: v%s commitment mismatch",
                             draw_number,
+                            current_proof_version,
                         )
                         return None
 
-                    draw_main, draw_stars = committed_lwdmillions_draw(secret, draw_number)
+                    if current_proof_version == 1:
+                        draw_main, draw_stars = legacy_committed_lwdmillions_draw(
+                            secret,
+                            draw_number,
+                        )
+                        proof_record: dict[str, Any] = {"proof_version": 1}
+                    else:
+                        beacon_round = int(state["beacon_round"])
+                        if beacon is None or beacon_round != int(beacon["round"]):
+                            return None
+                        draw_main, draw_stars = committed_lwdmillions_draw(
+                            secret,
+                            draw_number,
+                            beacon_round,
+                            str(beacon["randomness"]),
+                        )
+                        proof_record = {
+                            "proof_version": current_proof_version,
+                            "beacon_chain_hash": DRAND_QUICKNET_CHAIN_HASH,
+                            "beacon_round": beacon_round,
+                            "beacon_round_time": drand_round_timestamp(beacon_round),
+                            "beacon_randomness": str(beacon["randomness"]),
+                            "beacon_signature": str(beacon["signature"]),
+                            "beacon_sources": list(beacon["sources"]),
+                            "beacon_verified": bool(beacon["verified"]),
+                        }
                     tickets = [
                         copy.deepcopy(ticket)
                         for ticket in state["tickets"]
@@ -2891,11 +3519,14 @@ class Economy(commands.Cog):
                     state["draw_number"] = draw_number + 1
                     schedule_after = max(now, scheduled_for) if force else now
                     state["next_draw"] = int(next_lwdmillions_draw(schedule_after).timestamp())
+                    state["beacon_round"] = drand_round_after(int(state["next_draw"]))
                     next_secret = secrets.token_hex(32)
                     state["secret"] = next_secret
+                    state["proof_version"] = 2
                     state["commitment"] = lwdmillions_commitment(
                         next_secret,
                         int(state["draw_number"]),
+                        int(state["beacon_round"]),
                     )
 
                     all_winners = sorted(
@@ -2924,6 +3555,7 @@ class Economy(commands.Cog):
                         "jackpot_winning_lines": len(jackpot_winners),
                         "jackpot_after": jackpot_after,
                         "total_paid": sum(payout_by_user.values()),
+                        **proof_record,
                     }
                     state["history"].append(record)
                     del state["history"][:-LWDMILLIONS_HISTORY_LIMIT]
@@ -3042,9 +3674,15 @@ class Economy(commands.Cog):
         while True:
             try:
                 state = await self._lwdmillions_state_snapshot()
-                delay = int(state["next_draw"]) - int(time.time())
+                ready_at = int(state["next_draw"])
+                beacon_round = int(state.get("beacon_round", 0))
+                if int(state.get("proof_version", 1)) in (2, 3) and beacon_round > 0:
+                    ready_at = max(ready_at, drand_round_timestamp(beacon_round))
+                delay = ready_at - int(time.time())
                 if delay <= 0:
-                    await self._run_lwdmillions_draw(force=False)
+                    record = await self._run_lwdmillions_draw(force=False)
+                    if record is None:
+                        await asyncio.sleep(LWDMILLIONS_DRAW_POLL_SECONDS)
                 else:
                     await asyncio.sleep(min(delay, LWDMILLIONS_DRAW_POLL_SECONDS))
             except asyncio.CancelledError:
@@ -3146,6 +3784,12 @@ class Economy(commands.Cog):
 
     async def _cancel_excluded_blackjack(self, user_id: int):
         view = self._blackjack_views.get(user_id)
+        if view is not None and view.phase != "ended":
+            await view.cancel_for_exclusion()
+
+    async def _cancel_excluded_casino_games(self, user_id: int):
+        await self._cancel_excluded_blackjack(user_id)
+        view = self._mines_views.get(user_id)
         if view is not None and view.phase != "ended":
             await view.cancel_for_exclusion()
 
@@ -3460,6 +4104,60 @@ class Economy(commands.Cog):
                 balances[str(user_id)] = account
             await self._append_ledger(
                 "blackjack_payout",
+                from_user_id=None,
+                to_user_id=user_id,
+                amount=payout,
+                actor_id=user_id,
+                guild_id=guild_id,
+                reason=reason,
+            )
+        return account
+
+    async def _reserve_mines_wager(
+        self,
+        user_id: int,
+        wager: int,
+        *,
+        guild_id: int | None,
+        reason: str,
+    ) -> dict[str, int]:
+        """Reserve Mines funds immediately so they cannot be spent mid-game."""
+        wager = self._require_amount(wager, allow_zero=False)
+        async with self._lock:
+            async with self.config.balances() as balances:
+                account = self._account_from_mapping(balances, user_id)
+                if account[CASH] < wager:
+                    raise EconomyError("Insufficient funds.")
+                account[CASH] -= wager
+                balances[str(user_id)] = account
+            await self._append_ledger(
+                "mines_wager",
+                from_user_id=user_id,
+                to_user_id=None,
+                amount=wager,
+                actor_id=user_id,
+                guild_id=guild_id,
+                reason=reason,
+            )
+        return account
+
+    async def _credit_mines_payout(
+        self,
+        user_id: int,
+        payout: int,
+        *,
+        guild_id: int | None,
+        reason: str,
+    ) -> dict[str, int]:
+        """Credit the total return from a reserved Mines wager."""
+        payout = self._require_amount(payout, allow_zero=False)
+        async with self._lock:
+            async with self.config.balances() as balances:
+                account = self._account_from_mapping(balances, user_id)
+                account[CASH] += payout
+                balances[str(user_id)] = account
+            await self._append_ledger(
+                "mines_payout",
                 from_user_id=None,
                 to_user_id=user_id,
                 amount=payout,

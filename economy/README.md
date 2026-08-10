@@ -32,6 +32,7 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco casino highcard <bet>` - draw a card against the dealer.
 - `[p]eco casino roulette <bet> <choice>` - spin a European roulette wheel.
 - `[p]eco casino slots <bet>` - spin the slot machine.
+- `[p]eco casino mines <bet> [mines]` - reveal safe tiles and cash out before hitting a mine.
 - `[p]eco casino blackjack <bet>` - play interactive blackjack.
 - `[p]eco casino selfexclude <duration|permanent> confirm` - block your own chance-game access.
 - `[p]eco casino exclusion [member]` - show active exclusions.
@@ -55,6 +56,7 @@ Shortcut commands are also available for common user actions:
 - `[p]casino highcard <bet>` / `[p]casino war <bet>`
 - `[p]casino roulette <bet> <choice>` / `[p]casino wheel <bet> <choice>`
 - `[p]casino slots <bet>`
+- `[p]casino mines <bet> [mines]`
 - `[p]casino blackjack <bet>` / `[p]casino bj <bet>`
 
 ## LWDMillions
@@ -71,7 +73,9 @@ Example entries:
 [p]lwdmillions tickets
 ```
 
-Every ticket period publishes a SHA-256 commitment before the draw. At settlement, the bot reveals the committed secret and derives the result deterministically with unbiased sampling. `[p]lwdmillions verify` independently recalculates both the commitment and winning numbers. Ticket purchases are blocked for users with an active casino self-exclusion or administrator exclusion.
+Every ticket period publishes a SHA-256 commitment that binds a private secret, the draw number, and a specific future League of Entropy drand Quicknet round. That public beacon does not exist when tickets are sold. After its scheduled publication, the bot requires matching responses from at least two relays, verifies the beacon's BLS signature against Quicknet's pinned public key, mixes it with the committed secret, and derives the numbers with unbiased sampling. Settlement fails closed if the beacon cannot be verified. `[p]lwdmillions verify` checks the stored beacon, commitment, and winning numbers and links to the public beacon.
+
+When upgrading while tickets are already sold, nobody must rebuy and no selection, ticket price, or jackpot contribution changes. The in-progress draw keeps its exact original v1 commitment as the secret anchor, deterministically locks the first Quicknet round after its original draw time, and mixes that beacon into the result. Verification checks both the old commitment and the public beacon. Following draws use native v2 commitments. Ticket purchases are blocked for users with an active casino self-exclusion or administrator exclusion.
 
 Casino games use the same global LWD$ balance as the rest of the economy. They use secure random draws, settle each wager atomically, and record the net result in the transaction ledger. The defaults allow bets from 10 to 10,000 LWD$, with a short per-game anti-spam cooldown.
 
@@ -80,6 +84,8 @@ Players cannot shorten or remove their own self-exclusion. A server administrato
 Payouts include the original wager: coin flip returns 1.95x on a win, and an exact dice guess returns 5.7x. High Card returns 2x when your card outranks the dealer and pushes on equal ranks. Animated slots use the machine's printed exact-triple payouts: lemon 4x, cherry 5x, bell 10x, coin 25x, diamond 40x, and seven 80x. Exactly one cherry on an otherwise unmatched spin returns half the wager.
 
 European Roulette uses a single-zero wheel. Straight-up numbers from 0 to 36 return 36x; red/black, odd/even, and low/high return 2x; first, second, and third dozen bets return 3x. Choices can be written as `17`, `red`, `odd`, `low`, `1st12`, `2nd12`, or `3rd12`.
+
+Mines uses a 20-tile button board with 1-10 mines (3 by default). Safe reveals build a probability-based cash-out value; hitting a mine loses the reserved wager. Cash-out values target 97% RTP before integer rounding and are capped at 100x. Reaching the cap or clearing every safe tile settles automatically. An unanswered board refunds before the first pick or automatically cashes out its current value after at least one safe pick. Completed games reveal the board and provide player-only replay and setup controls.
 
 Blackjack supports hit, stand, double down, up to four split hands, late surrender, and insurance. Its live message includes a chronological round log covering player actions, dealer draws, timeouts, and settlement. Completed rounds have player-only Same Bet, Half, Double, and Change Bet replay controls; all replay wagers still respect the casino limits and available balance. The dealer stands on soft 17 and a player natural blackjack pays 3:2. As a house fairness rule, a dealer natural is a redraw: the main wager is returned instead of losing. Insurance still pays 2:1. Wagers and any extra double, split, or insurance stakes are reserved immediately, so funds cannot be moved away while a hand is active. An unanswered hand times out and forfeits after 90 seconds.
 

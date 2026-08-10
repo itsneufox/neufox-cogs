@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import secrets
+from math import comb
 
 
 HIGH_CARD_RANKS = ("2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A")
@@ -56,6 +57,12 @@ CASINO_EXCLUSION_PERMANENT_WORDS = frozenset(
     {"permanent", "permanently", "forever", "indefinite", "indefinitely"}
 )
 MAX_CASINO_EXCLUSION_SECONDS = 100 * CASINO_EXCLUSION_TIME_UNITS["y"]
+
+MINES_TILE_COUNT = 20
+MINES_MIN_COUNT = 1
+MINES_MAX_COUNT = 10
+MINES_RETURN_PERCENT = 97
+MINES_MAX_PAYOUT_MULTIPLIER = 100
 
 
 def parse_casino_exclusion_duration(value: str) -> int | None:
@@ -125,6 +132,45 @@ def format_blackjack_total(total: int, *, soft: bool, ace_adjusted: bool = False
     if ace_adjusted:
         label += " (Ace adjusted to 1)"
     return label
+
+
+def draw_mines(mine_count: int) -> frozenset[int]:
+    """Place distinct mines on the fixed-size board using system randomness."""
+    if mine_count < MINES_MIN_COUNT or mine_count > MINES_MAX_COUNT:
+        raise ValueError(
+            f"mine count must be between {MINES_MIN_COUNT} and {MINES_MAX_COUNT}"
+        )
+    return frozenset(
+        secrets.SystemRandom().sample(range(MINES_TILE_COUNT), mine_count)
+    )
+
+
+def calculate_mines_payout(wager: int, mine_count: int, safe_picks: int) -> int:
+    """Return the total cash-out value for a surviving Mines board state.
+
+    Each fixed stopping point targets ``MINES_RETURN_PERCENT`` percent RTP before
+    integer rounding. The maximum return keeps the game's variance in line with
+    the other casino games.
+    """
+    if wager <= 0:
+        raise ValueError("wager must be positive")
+    if mine_count < MINES_MIN_COUNT or mine_count > MINES_MAX_COUNT:
+        raise ValueError(
+            f"mine count must be between {MINES_MIN_COUNT} and {MINES_MAX_COUNT}"
+        )
+    safe_tile_count = MINES_TILE_COUNT - mine_count
+    if safe_picks < 0 or safe_picks > safe_tile_count:
+        raise ValueError(f"safe picks must be between 0 and {safe_tile_count}")
+    if safe_picks == 0:
+        return wager
+
+    payout = (
+        wager
+        * MINES_RETURN_PERCENT
+        * comb(MINES_TILE_COUNT, safe_picks)
+        // (100 * comb(safe_tile_count, safe_picks))
+    )
+    return min(payout, wager * MINES_MAX_PAYOUT_MULTIPLIER)
 
 
 def draw_high_card() -> tuple[tuple[str, str], tuple[str, str]]:

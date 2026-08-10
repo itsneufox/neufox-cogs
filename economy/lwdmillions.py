@@ -13,7 +13,18 @@ LUCKY_STAR_COUNT = 2
 LUCKY_STAR_MAX = 12
 DRAW_WEEKDAYS = (1, 4)  # Tuesday and Friday, where Monday is 0.
 DRAW_HOUR_UTC = 20
-COMMITMENT_DOMAIN = "LWDMillions/v1"
+LEGACY_COMMITMENT_DOMAIN = "LWDMillions/v1"
+COMMITMENT_DOMAIN = "LWDMillions/v2"
+DRAND_QUICKNET_CHAIN_HASH = (
+    "52db9ba70e0cc0f6eaf7803dd07447a1f5477735fd3f661792ba94600c84e971"
+)
+DRAND_QUICKNET_PUBLIC_KEY = (
+    "83cf0f2896adee7eb8b5f01fcad3912212c437e0073e911fb90022d3e760183c8"
+    "c4b450b6a0a6c3ac6a5776a2d1064510d1fec758c921cc22b0e17e63aaf4bcb5"
+    "ed66304de9cf809bd274ca73bab4af5a6e9c76a4bc09e76eae8991ef5ece45a"
+)
+DRAND_QUICKNET_GENESIS_TIME = 1_692_803_367
+DRAND_QUICKNET_PERIOD = 3
 
 # Multipliers include the returned value of a winning line. The 5 + 2 tier is
 # handled separately because those tickets split the rolling jackpot.
@@ -201,13 +212,59 @@ def next_lwdmillions_draw(after: datetime | int | float | None = None) -> dateti
     raise RuntimeError("could not find the next LWDMillions draw")
 
 
-def lwdmillions_commitment(secret: str, draw_number: int) -> str:
-    """Commit to a draw secret before tickets close."""
-    material = f"{COMMITMENT_DOMAIN}|commit|{int(draw_number)}|{secret}".encode()
+def drand_round_after(timestamp: datetime | int | float) -> int:
+    """Return the first Quicknet round whose publication time is after `timestamp`."""
+    if isinstance(timestamp, datetime):
+        value = timestamp
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        timestamp_value = int(value.timestamp())
+    else:
+        timestamp_value = int(timestamp)
+    if timestamp_value < DRAND_QUICKNET_GENESIS_TIME:
+        raise ValueError("timestamp predates the drand Quicknet chain")
+    current_round = (
+        (timestamp_value - DRAND_QUICKNET_GENESIS_TIME) // DRAND_QUICKNET_PERIOD
+    ) + 1
+    return current_round + 1
+
+
+def drand_round_timestamp(round_number: int) -> int:
+    """Return the scheduled Unix timestamp for a Quicknet round."""
+    round_value = int(round_number)
+    if round_value <= 0:
+        raise ValueError("drand round must be positive")
+    return DRAND_QUICKNET_GENESIS_TIME + (round_value - 1) * DRAND_QUICKNET_PERIOD
+
+
+def validate_drand_quicknet_beacon(
+    round_number: int,
+    randomness: str,
+    signature: str,
+) -> bool:
+    """Validate beacon shape and the protocol's SHA-256 randomness derivation."""
+    try:
+        if int(round_number) <= 0:
+            return False
+        randomness_bytes = bytes.fromhex(str(randomness))
+        signature_bytes = bytes.fromhex(str(signature))
+    except (TypeError, ValueError):
+        return False
+    if len(randomness_bytes) != 32 or len(signature_bytes) != 48:
+        return False
+    expected = hashlib.sha256(signature_bytes).hexdigest()
+    return secrets.compare_digest(expected, str(randomness).casefold())
+
+
+def legacy_lwdmillions_commitment(secret: str, draw_number: int) -> str:
+    """Reproduce a v1 commitment so already-sold tickets retain their original proof."""
+    material = (
+        f"{LEGACY_COMMITMENT_DOMAIN}|commit|{int(draw_number)}|{secret}"
+    ).encode()
     return hashlib.sha256(material).hexdigest()
 
 
-def _committed_sample(
+def _legacy_committed_sample(
     maximum: int,
     count: int,
     *,
@@ -219,10 +276,120 @@ def _committed_sample(
     selected: list[int] = []
     counter = 0
     value_range = 1 << 256
+    while len(selected) < count:
+        material = (
+            f"{LEGACY_COMMITMENT_DOMAIN}|draw|{int(draw_number)}|"
+            f"{pool_name}|{counter}|{secret}"
+        ).encode()
+        value = int.from_bytes(hashlib.sha256(material).digest(), "big")
+        counter += 1
+        limit = value_range - (value_range % len(pool))
+        if value >= limit:
+            continue
+        selected.append(pool.pop(value % len(pool)))
+    return tuple(sorted(selected))
+
+
+def legacy_committed_lwdmillions_draw(
+    secret: str,
+    draw_number: int,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Reproduce the original v1 draw algorithm during a live migration."""
+    if not str(secret):
+        raise ValueError("draw secret cannot be empty")
+    if int(draw_number) <= 0:
+        raise ValueError("draw number must be positive")
+    main = _legacy_committed_sample(
+        MAIN_NUMBER_MAX,
+        MAIN_NUMBER_COUNT,
+        secret=str(secret),
+        draw_number=int(draw_number),
+        pool_name="main",
+    )
+    stars = _legacy_committed_sample(
+        LUCKY_STAR_MAX,
+        LUCKY_STAR_COUNT,
+        secret=str(secret),
+        draw_number=int(draw_number),
+        pool_name="stars",
+    )
+    return main, stars
+
+
+def verify_legacy_lwdmillions_draw(
+    secret: str,
+    draw_number: int,
+    commitment: str,
+    main_numbers: Iterable[int],
+    lucky_stars: Iterable[int],
+) -> bool:
+    """Verify a completed v1 draw retained for already-purchased tickets."""
+    expected_commitment = legacy_lwdmillions_commitment(secret, draw_number)
+    if not secrets.compare_digest(expected_commitment, str(commitment)):
+        return False
+    expected_main, expected_stars = legacy_committed_lwdmillions_draw(
+        secret,
+        draw_number,
+    )
+    try:
+        actual_main, actual_stars = validate_lwdmillions_ticket(main_numbers, lucky_stars)
+    except (TypeError, ValueError):
+        return False
+    return expected_main == actual_main and expected_stars == actual_stars
+
+
+def lwdmillions_commitment(secret: str, draw_number: int, beacon_round: int) -> str:
+    """Commit to both the private secret and future public beacon round."""
+    if not str(secret):
+        raise ValueError("draw secret cannot be empty")
+    if int(draw_number) <= 0 or int(beacon_round) <= 0:
+        raise ValueError("draw and beacon rounds must be positive")
+    material = (
+        f"{COMMITMENT_DOMAIN}|commit|{int(draw_number)}|"
+        f"{DRAND_QUICKNET_CHAIN_HASH}|{int(beacon_round)}|{secret}"
+    ).encode()
+    return hashlib.sha256(material).hexdigest()
+
+
+def detect_lwdmillions_proof_version(
+    secret: str,
+    draw_number: int,
+    commitment: str,
+    beacon_round: int = 0,
+) -> int | None:
+    """Identify a v1 or v2 commitment without trusting newly added config fields."""
+    try:
+        if secrets.compare_digest(
+            legacy_lwdmillions_commitment(str(secret), int(draw_number)),
+            str(commitment),
+        ):
+            return 1
+        if int(beacon_round) > 0 and secrets.compare_digest(
+            lwdmillions_commitment(str(secret), int(draw_number), int(beacon_round)),
+            str(commitment),
+        ):
+            return 2
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _committed_sample(
+    maximum: int,
+    count: int,
+    *,
+    entropy: str,
+    draw_number: int,
+    pool_name: str,
+) -> tuple[int, ...]:
+    pool = list(range(1, maximum + 1))
+    selected: list[int] = []
+    counter = 0
+    value_range = 1 << 256
 
     while len(selected) < count:
         material = (
-            f"{COMMITMENT_DOMAIN}|draw|{int(draw_number)}|{pool_name}|{counter}|{secret}"
+            f"{COMMITMENT_DOMAIN}|draw|{int(draw_number)}|{pool_name}|{counter}|{entropy}"
         ).encode()
         value = int.from_bytes(hashlib.sha256(material).digest(), "big")
         counter += 1
@@ -238,23 +405,38 @@ def _committed_sample(
 def committed_lwdmillions_draw(
     secret: str,
     draw_number: int,
+    beacon_round: int,
+    beacon_randomness: str,
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Derive an independently reproducible draw from a previously committed secret."""
+    """Mix private committed entropy with a fixed future public drand beacon."""
     if not str(secret):
         raise ValueError("draw secret cannot be empty")
-    if int(draw_number) <= 0:
-        raise ValueError("draw number must be positive")
+    if int(draw_number) <= 0 or int(beacon_round) <= 0:
+        raise ValueError("draw and beacon rounds must be positive")
+    try:
+        randomness_bytes = bytes.fromhex(str(beacon_randomness))
+    except ValueError as error:
+        raise ValueError("beacon randomness must be hexadecimal") from error
+    if len(randomness_bytes) != 32:
+        raise ValueError("beacon randomness must contain 32 bytes")
+    entropy = hashlib.sha256(
+        (
+            f"{COMMITMENT_DOMAIN}|entropy|{int(draw_number)}|"
+            f"{DRAND_QUICKNET_CHAIN_HASH}|{int(beacon_round)}|{secret}|"
+            f"{str(beacon_randomness).casefold()}"
+        ).encode()
+    ).hexdigest()
     main = _committed_sample(
         MAIN_NUMBER_MAX,
         MAIN_NUMBER_COUNT,
-        secret=str(secret),
+        entropy=entropy,
         draw_number=int(draw_number),
         pool_name="main",
     )
     stars = _committed_sample(
         LUCKY_STAR_MAX,
         LUCKY_STAR_COUNT,
-        secret=str(secret),
+        entropy=entropy,
         draw_number=int(draw_number),
         pool_name="stars",
     )
@@ -264,15 +446,72 @@ def committed_lwdmillions_draw(
 def verify_lwdmillions_draw(
     secret: str,
     draw_number: int,
+    beacon_round: int,
+    beacon_randomness: str,
+    beacon_signature: str,
     commitment: str,
     main_numbers: Iterable[int],
     lucky_stars: Iterable[int],
 ) -> bool:
-    """Verify both a revealed commitment and its resulting draw."""
-    expected_commitment = lwdmillions_commitment(secret, draw_number)
+    """Verify the commitment, beacon hash, and resulting winning numbers."""
+    if not validate_drand_quicknet_beacon(
+        beacon_round,
+        beacon_randomness,
+        beacon_signature,
+    ):
+        return False
+    expected_commitment = lwdmillions_commitment(secret, draw_number, beacon_round)
     if not secrets.compare_digest(expected_commitment, str(commitment)):
         return False
-    expected_main, expected_stars = committed_lwdmillions_draw(secret, draw_number)
+    expected_main, expected_stars = committed_lwdmillions_draw(
+        secret,
+        draw_number,
+        beacon_round,
+        beacon_randomness,
+    )
+    try:
+        actual_main, actual_stars = validate_lwdmillions_ticket(main_numbers, lucky_stars)
+    except (TypeError, ValueError):
+        return False
+    return expected_main == actual_main and expected_stars == actual_stars
+
+
+def verify_migrated_lwdmillions_draw(
+    secret: str,
+    draw_number: int,
+    scheduled_for: int,
+    beacon_round: int,
+    beacon_randomness: str,
+    beacon_signature: str,
+    legacy_commitment: str,
+    main_numbers: Iterable[int],
+    lucky_stars: Iterable[int],
+) -> bool:
+    """Verify a paid v1 draw upgraded to deterministic future drand entropy."""
+    try:
+        expected_beacon_round = drand_round_after(int(scheduled_for))
+        beacon_round_value = int(beacon_round)
+    except (TypeError, ValueError):
+        return False
+    if beacon_round_value != expected_beacon_round:
+        return False
+    if not secrets.compare_digest(
+        legacy_lwdmillions_commitment(secret, draw_number),
+        str(legacy_commitment),
+    ):
+        return False
+    if not validate_drand_quicknet_beacon(
+        beacon_round_value,
+        beacon_randomness,
+        beacon_signature,
+    ):
+        return False
+    expected_main, expected_stars = committed_lwdmillions_draw(
+        secret,
+        draw_number,
+        beacon_round_value,
+        beacon_randomness,
+    )
     try:
         actual_main, actual_stars = validate_lwdmillions_ticket(main_numbers, lucky_stars)
     except (TypeError, ValueError):

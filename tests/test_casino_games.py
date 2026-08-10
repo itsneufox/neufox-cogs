@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import unittest
+from fractions import Fraction
+from math import comb
 from pathlib import Path
 
 
@@ -69,6 +71,71 @@ class CasinoExclusionTests(unittest.TestCase):
         self.assertFalse(casino_games.can_extend_casino_self_exclusion(100, 50))
         self.assertFalse(casino_games.can_extend_casino_self_exclusion(100, 100))
         self.assertFalse(casino_games.can_extend_casino_self_exclusion(0, 200))
+
+
+class MinesTests(unittest.TestCase):
+    def test_draws_requested_number_of_distinct_in_range_mines(self):
+        for mine_count in (1, 3, casino_games.MINES_MAX_COUNT):
+            for _ in range(10):
+                mines = casino_games.draw_mines(mine_count)
+                self.assertEqual(len(mines), mine_count)
+                self.assertTrue(
+                    all(0 <= tile < casino_games.MINES_TILE_COUNT for tile in mines)
+                )
+
+    def test_unplayed_board_returns_original_wager(self):
+        self.assertEqual(casino_games.calculate_mines_payout(100, 3, 0), 100)
+
+    def test_cashout_uses_probability_based_return(self):
+        self.assertEqual(casino_games.calculate_mines_payout(100, 3, 1), 114)
+        self.assertEqual(casino_games.calculate_mines_payout(100, 3, 2), 135)
+
+    def test_cashout_increases_with_each_safe_pick(self):
+        payouts = [
+            casino_games.calculate_mines_payout(100, 5, safe_picks)
+            for safe_picks in range(1, 8)
+        ]
+        self.assertEqual(payouts, sorted(payouts))
+        self.assertEqual(len(payouts), len(set(payouts)))
+
+    def test_cashout_is_capped_at_one_hundred_times_wager(self):
+        self.assertEqual(casino_games.calculate_mines_payout(100, 10, 6), 10_000)
+        self.assertEqual(casino_games.calculate_mines_payout(100, 10, 10), 10_000)
+
+    def test_all_cashout_points_stay_at_or_below_target_rtp(self):
+        target_rtp = Fraction(casino_games.MINES_RETURN_PERCENT, 100)
+        for mine_count in range(
+            casino_games.MINES_MIN_COUNT,
+            casino_games.MINES_MAX_COUNT + 1,
+        ):
+            safe_tiles = casino_games.MINES_TILE_COUNT - mine_count
+            previous_payout = 100
+            for safe_picks in range(1, safe_tiles + 1):
+                payout = casino_games.calculate_mines_payout(
+                    100,
+                    mine_count,
+                    safe_picks,
+                )
+                survival_chance = Fraction(
+                    comb(safe_tiles, safe_picks),
+                    comb(casino_games.MINES_TILE_COUNT, safe_picks),
+                )
+                self.assertGreaterEqual(payout, previous_payout)
+                self.assertLessEqual(survival_chance * Fraction(payout, 100), target_rtp)
+                previous_payout = payout
+
+    def test_rejects_invalid_mines_inputs(self):
+        invalid_cases = (
+            (0, 3, 1),
+            (100, 0, 1),
+            (100, casino_games.MINES_MAX_COUNT + 1, 1),
+            (100, 3, -1),
+            (100, 3, casino_games.MINES_TILE_COUNT),
+        )
+        for wager, mines, safe_picks in invalid_cases:
+            with self.subTest(wager=wager, mines=mines, safe_picks=safe_picks):
+                with self.assertRaises(ValueError):
+                    casino_games.calculate_mines_payout(wager, mines, safe_picks)
 
 
 class HighCardTests(unittest.TestCase):
