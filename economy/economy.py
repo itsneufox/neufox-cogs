@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 import random
@@ -25,6 +26,21 @@ from .casino_games import (
     parse_casino_exclusion_duration,
     roulette_bet_label,
     roulette_number_color,
+)
+from .lwdmillions import (
+    LWD_MILLIONS_PRIZE_MULTIPLIERS,
+    LWD_MILLIONS_PRIZE_TIER_ORDER,
+    calculate_lwdmillions_prize,
+    committed_lwdmillions_draw,
+    format_lwdmillions_ticket,
+    lwdmillions_commitment,
+    lwdmillions_match_label,
+    match_lwdmillions_ticket,
+    next_lwdmillions_draw,
+    parse_lwdmillions_ticket,
+    random_lwdmillions_ticket,
+    validate_lwdmillions_ticket,
+    verify_lwdmillions_draw,
 )
 from .slots import (
     SLOT_EMOJIS,
@@ -58,6 +74,14 @@ DEFAULT_CASINO_MIN_BET = 10
 DEFAULT_CASINO_MAX_BET = 10000
 CASINO_COINFLIP_PAYOUT_PERCENT = 195
 CASINO_DICE_PAYOUT_PERCENT = 570
+DEFAULT_LWDMILLIONS_TICKET_PRICE = 100
+DEFAULT_LWDMILLIONS_SEED_JACKPOT = 1_000_000
+DEFAULT_LWDMILLIONS_JACKPOT_CONTRIBUTION_PERCENT = 50
+MAX_LWDMILLIONS_LINES_PER_PLAYER = 20
+MAX_LWDMILLIONS_TOTAL_TICKETS = 10_000
+LWDMILLIONS_HISTORY_LIMIT = 10
+LWDMILLIONS_HISTORY_WINNER_LIMIT = 100
+LWDMILLIONS_DRAW_POLL_SECONDS = 30
 MAX_LEDGER_ENTRIES = 500
 MAX_AMOUNT = 10**15
 TOP_LIMIT = 10
@@ -160,6 +184,21 @@ class Economy(commands.Cog):
             shop_channels={},
             shop_messages={},
             log_channels={},
+            lwdmillions={
+                "enabled": True,
+                "ticket_price": DEFAULT_LWDMILLIONS_TICKET_PRICE,
+                "seed_jackpot": DEFAULT_LWDMILLIONS_SEED_JACKPOT,
+                "jackpot": DEFAULT_LWDMILLIONS_SEED_JACKPOT,
+                "jackpot_contribution_percent": DEFAULT_LWDMILLIONS_JACKPOT_CONTRIBUTION_PERCENT,
+                "draw_number": 1,
+                "next_draw": 0,
+                "secret": "",
+                "commitment": "",
+                "next_ticket_id": 1,
+                "tickets": [],
+                "history": [],
+                "announcement_channels": {},
+            },
         )
         self._lock = asyncio.Lock()
         self._runner: web.AppRunner | None = None
@@ -169,10 +208,16 @@ class Economy(commands.Cog):
         self._casino_exclusion_lock = asyncio.Lock()
         self._slot_players: set[int] = set()
         self._slot_render_semaphore = asyncio.Semaphore(2)
+        self._lwdmillions_draw_lock = asyncio.Lock()
+        self._lwdmillions_notification_tasks: set[asyncio.Task] = set()
         self._startup_task = self.bot.loop.create_task(self._start_api_if_enabled())
+        self._lwdmillions_task = self.bot.loop.create_task(self._lwdmillions_draw_loop())
 
     def cog_unload(self):
         self._startup_task.cancel()
+        self._lwdmillions_task.cancel()
+        for task in list(self._lwdmillions_notification_tasks):
+            task.cancel()
         for view in list(self._blackjack_views.values()):
             self.bot.loop.create_task(view.cancel_and_refund())
         self.bot.loop.create_task(self._stop_api())
@@ -188,7 +233,10 @@ class Economy(commands.Cog):
         prefix = ctx.clean_prefix
         embed = discord.Embed(
             title="Economy Help",
-            description="Global LWD$ balances with claims, transfers, shop items, and API access.",
+            description=(
+                "Global LWD$ balances with claims, transfers, LWDMillions, shop items, "
+                "and API access."
+            ),
             color=discord.Color.gold(),
         )
         embed.add_field(
@@ -209,6 +257,7 @@ class Economy(commands.Cog):
                     f"`{prefix}eco gift <member> <item> [quantity]` - gift an inventory item",
                     f"`{prefix}eco inventory [member]` - show inventory",
                     f"`{prefix}eco codes` - DM your unredeemed in-game item codes",
+                    f"`{prefix}eco lwdmillions` - play the twice-weekly LWD$ lottery",
                     f"`{prefix}eco casino` - play virtual-currency casino games",
                 ]
             ),
@@ -225,6 +274,7 @@ class Economy(commands.Cog):
                     f"`{prefix}inventory [member]`, `{prefix}inv [member]`",
                     f"`{prefix}gift <member> <item> [quantity]`",
                     f"`{prefix}codes`, `{prefix}ecotop`",
+                    f"`{prefix}lwdmillions`, `{prefix}lwdm`, `{prefix}millions`",
                     f"`{prefix}casino` - casino games and payout rules",
                 ]
             ),
@@ -307,6 +357,59 @@ class Economy(commands.Cog):
     async def economy_top_short(self, ctx: commands.Context):
         """Shortcut for eco top."""
         await ctx.invoke(self.economy_top)
+
+    @commands.group(
+        name="lwdmillions",
+        aliases=["lwdm", "millions"],
+        invoke_without_command=True,
+    )
+    async def economy_lwdmillions_short(self, ctx: commands.Context):
+        """Shortcut for eco lwdmillions."""
+        await ctx.invoke(self.economy_lwdmillions)
+
+    @economy_lwdmillions_short.command(name="play", aliases=["pick", "buy"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_lwdmillions_play_short(self, ctx: commands.Context, *, numbers: str):
+        """Shortcut for eco lwdmillions play."""
+        await ctx.invoke(self.economy_lwdmillions_play, numbers=numbers)
+
+    @economy_lwdmillions_short.command(name="quickpick", aliases=["quick", "random"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_lwdmillions_quickpick_short(
+        self,
+        ctx: commands.Context,
+        lines: int = 1,
+    ):
+        """Shortcut for eco lwdmillions quickpick."""
+        await ctx.invoke(self.economy_lwdmillions_quickpick, lines=lines)
+
+    @economy_lwdmillions_short.command(name="tickets", aliases=["ticket", "mine"])
+    async def economy_lwdmillions_tickets_short(self, ctx: commands.Context):
+        """Shortcut for eco lwdmillions tickets."""
+        await ctx.invoke(self.economy_lwdmillions_tickets)
+
+    @economy_lwdmillions_short.command(name="prizes", aliases=["payouts", "rules"])
+    async def economy_lwdmillions_prizes_short(self, ctx: commands.Context):
+        """Shortcut for eco lwdmillions prizes."""
+        await ctx.invoke(self.economy_lwdmillions_prizes)
+
+    @economy_lwdmillions_short.command(name="results", aliases=["result", "history"])
+    async def economy_lwdmillions_results_short(
+        self,
+        ctx: commands.Context,
+        draw_number: int | None = None,
+    ):
+        """Shortcut for eco lwdmillions results."""
+        await ctx.invoke(self.economy_lwdmillions_results, draw_number=draw_number)
+
+    @economy_lwdmillions_short.command(name="verify", aliases=["proof", "fairness"])
+    async def economy_lwdmillions_verify_short(
+        self,
+        ctx: commands.Context,
+        draw_number: int | None = None,
+    ):
+        """Shortcut for eco lwdmillions verify."""
+        await ctx.invoke(self.economy_lwdmillions_verify, draw_number=draw_number)
 
     @commands.group(name="casino", aliases=["gamble"], invoke_without_command=True)
     async def economy_casino_short(self, ctx: commands.Context):
@@ -660,6 +763,251 @@ class Economy(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @economy.group(
+        name="lwdmillions",
+        aliases=["lwdm", "millions"],
+        invoke_without_command=True,
+    )
+    async def economy_lwdmillions(self, ctx: commands.Context):
+        """Play the scheduled LWDMillions lottery with virtual LWD$."""
+        state = await self._lwdmillions_state_snapshot()
+        next_draw = int(state["next_draw"])
+        tickets = [ticket for ticket in state["tickets"] if isinstance(ticket, dict)]
+        players = {int(ticket.get("user_id", 0)) for ticket in tickets}
+        status = "Open" if state["enabled"] else "Ticket sales closed"
+        prefix = ctx.clean_prefix
+
+        embed = discord.Embed(
+            title="LWDMillions",
+            description=(
+                "Pick **5 main numbers from 1-50** and **2 Lucky Stars from 1-12**. "
+                "This game uses virtual LWD$ only."
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Current Jackpot",
+            value=f"**{int(state['jackpot']):,} {CURRENCY_NAME}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Ticket",
+            value=f"{int(state['ticket_price']):,} {CURRENCY_NAME} per line",
+            inline=True,
+        )
+        embed.add_field(name="Sales", value=status, inline=True)
+        embed.add_field(
+            name=f"Draw #{int(state['draw_number']):,}",
+            value=f"<t:{next_draw}:F> (<t:{next_draw}:R>)",
+            inline=False,
+        )
+        embed.add_field(
+            name="Play",
+            value=(
+                f"`{prefix}lwdmillions play 1 2 3 4 5 | 1 2`\n"
+                f"`{prefix}lwdmillions quickpick [lines]`\n"
+                f"`{prefix}lwdmillions tickets`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Information",
+            value=(
+                f"`{prefix}lwdmillions prizes` — prize table\n"
+                f"`{prefix}lwdmillions results [draw]` — recent results\n"
+                f"`{prefix}lwdmillions verify [draw]` — reproduce a completed draw"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Published Draw Commitment",
+            value=f"`{state['commitment']}`",
+            inline=False,
+        )
+        embed.set_footer(
+            text=(
+                f"{len(tickets):,} lines from {len(players):,} players | "
+                "Draws Tuesday and Friday at 20:00 UTC"
+            )
+        )
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    @economy_lwdmillions.command(name="play", aliases=["pick", "buy"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_lwdmillions_play(self, ctx: commands.Context, *, numbers: str):
+        """Buy one line using five main numbers and two Lucky Stars."""
+        try:
+            ticket = parse_lwdmillions_ticket(numbers)
+            purchased, account, state = await self._purchase_lwdmillions_tickets(ctx, [ticket])
+        except (EconomyError, ValueError) as error:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(str(error))
+            return
+        await self._send_lwdmillions_purchase_receipt(ctx, purchased, account, state)
+
+    @economy_lwdmillions.command(name="quickpick", aliases=["quick", "random"])
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    async def economy_lwdmillions_quickpick(
+        self,
+        ctx: commands.Context,
+        lines: int = 1,
+    ):
+        """Buy one or more securely generated Quick Pick lines."""
+        if lines < 1 or lines > MAX_LWDMILLIONS_LINES_PER_PLAYER:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(
+                f"Choose from 1 to {MAX_LWDMILLIONS_LINES_PER_PLAYER} Quick Pick lines."
+            )
+            return
+        selections = [random_lwdmillions_ticket() for _ in range(lines)]
+        try:
+            purchased, account, state = await self._purchase_lwdmillions_tickets(
+                ctx,
+                selections,
+            )
+        except EconomyError as error:
+            ctx.command.reset_cooldown(ctx)
+            await ctx.send(str(error))
+            return
+        await self._send_lwdmillions_purchase_receipt(ctx, purchased, account, state)
+
+    @economy_lwdmillions.command(name="tickets", aliases=["ticket", "mine"])
+    async def economy_lwdmillions_tickets(self, ctx: commands.Context):
+        """Show your lines for the upcoming draw."""
+        state = await self._lwdmillions_state_snapshot()
+        tickets = [
+            ticket
+            for ticket in state["tickets"]
+            if isinstance(ticket, dict) and int(ticket.get("user_id", 0)) == ctx.author.id
+        ]
+        if not tickets:
+            await ctx.send("You have no tickets in the upcoming LWDMillions draw.")
+            return
+
+        lines = []
+        for ticket in tickets:
+            try:
+                formatted = format_lwdmillions_ticket(ticket["main"], ticket["stars"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            lines.append(f"`#{int(ticket.get('id', 0))}` {formatted}")
+        embed = discord.Embed(
+            title=f"Your LWDMillions Tickets — Draw #{int(state['draw_number']):,}",
+            description="\n".join(lines) or "No readable tickets.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Draw Time",
+            value=f"<t:{int(state['next_draw'])}:F> (<t:{int(state['next_draw'])}:R>)",
+            inline=False,
+        )
+        embed.set_footer(text=f"{len(tickets):,}/{MAX_LWDMILLIONS_LINES_PER_PLAYER} lines")
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    @economy_lwdmillions.command(name="prizes", aliases=["payouts", "rules"])
+    async def economy_lwdmillions_prizes(self, ctx: commands.Context):
+        """Show the LWDMillions prize tiers."""
+        state = await self._lwdmillions_state_snapshot()
+        price = int(state["ticket_price"])
+        lines = []
+        for tier in LWD_MILLIONS_PRIZE_TIER_ORDER:
+            label = lwdmillions_match_label(*tier)
+            if tier == (5, 2):
+                prize = f"share of **{int(state['jackpot']):,} {CURRENCY_NAME}**"
+            else:
+                prize = f"{price * LWD_MILLIONS_PRIZE_MULTIPLIERS[tier]:,} {CURRENCY_NAME}"
+            lines.append(f"**{label}:** {prize}")
+
+        embed = discord.Embed(
+            title="LWDMillions Prize Table",
+            description="\n".join(lines),
+            color=discord.Color.gold(),
+        )
+        embed.add_field(
+            name="Jackpot",
+            value=(
+                "All 5 + 2 winning lines split the current jackpot. If there are none, "
+                f"it rolls over. {int(state['jackpot_contribution_percent'])}% of every "
+                "ticket price is added to it."
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text=(
+                f"Current ticket price: {price:,} {CURRENCY_NAME} | "
+                "Jackpot odds per line: 1 in 139,838,160"
+            )
+        )
+        await ctx.send(embed=embed)
+
+    @economy_lwdmillions.command(name="results", aliases=["result", "history"])
+    async def economy_lwdmillions_results(
+        self,
+        ctx: commands.Context,
+        draw_number: int | None = None,
+    ):
+        """Show a recent LWDMillions result."""
+        state = await self._lwdmillions_state_snapshot()
+        record = self._find_lwdmillions_history(state, draw_number)
+        if record is None:
+            message = (
+                "There are no completed LWDMillions draws yet."
+                if draw_number is None
+                else f"Draw #{draw_number:,} is not in the recent history."
+            )
+            await ctx.send(message)
+            return
+        await ctx.send(
+            embed=self._lwdmillions_result_embed(record, ctx.clean_prefix),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    @economy_lwdmillions.command(name="verify", aliases=["proof", "fairness"])
+    async def economy_lwdmillions_verify(
+        self,
+        ctx: commands.Context,
+        draw_number: int | None = None,
+    ):
+        """Verify a recent result against its pre-published commitment."""
+        state = await self._lwdmillions_state_snapshot()
+        record = self._find_lwdmillions_history(state, draw_number)
+        if record is None:
+            message = (
+                "There are no completed LWDMillions draws to verify."
+                if draw_number is None
+                else f"Draw #{draw_number:,} is not in the recent history."
+            )
+            await ctx.send(message)
+            return
+
+        try:
+            valid = verify_lwdmillions_draw(
+                str(record["secret"]),
+                int(record["draw_number"]),
+                str(record["commitment"]),
+                record["main"],
+                record["stars"],
+            )
+        except (KeyError, TypeError, ValueError):
+            valid = False
+        embed = discord.Embed(
+            title=f"LWDMillions Draw #{int(record.get('draw_number', 0)):,} Verification",
+            description=(
+                "✅ The revealed secret reproduces the published commitment and winning numbers."
+                if valid
+                else "❌ This stored draw does not pass commitment verification."
+            ),
+            color=discord.Color.green() if valid else discord.Color.red(),
+        )
+        embed.add_field(name="Commitment", value=f"`{record.get('commitment', '')}`", inline=False)
+        embed.add_field(name="Revealed Secret", value=f"`{record.get('secret', '')}`", inline=False)
+        embed.add_field(
+            name="Winning Numbers",
+            value=format_lwdmillions_ticket(record.get("main", []), record.get("stars", [])),
+            inline=False,
+        )
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
     @economy.group(name="casino", aliases=["gamble"], invoke_without_command=True)
     async def economy_casino(self, ctx: commands.Context):
         """Play casino games with virtual LWD$."""
@@ -730,7 +1078,7 @@ class Economy(commands.Cog):
             f"`{prefix}casino selfexclude <duration|permanent> confirm`",
             f"`{prefix}casino exclusion` — check your exclusion status.",
             "Durations use `m`, `h`, `d`, `w`, or `y` (for example `30d` or `1y`). "
-            "A self-exclusion cannot be shortened or removed.",
+            "Players cannot shorten or remove their own exclusion; a server admin can lift it.",
         ]
         if active_exclusions:
             protection_lines.extend(
@@ -745,7 +1093,7 @@ class Economy(commands.Cog):
             name="Administrator Controls",
             value=(
                 f"`{prefix}casino exclude <member> <duration|permanent> [reason]`\n"
-                f"`{prefix}casino unexclude <member>`\n"
+                f"`{prefix}casino unexclude <member>` — remove admin and self-exclusions\n"
                 f"`{prefix}casino exclusion [member]`"
             ),
             inline=False,
@@ -768,7 +1116,8 @@ class Economy(commands.Cog):
             return
         if confirmation.casefold() != "confirm":
             await ctx.send(
-                "Self-exclusion cannot be canceled or shortened. If you are certain, run "
+                "You cannot cancel or shorten a self-exclusion yourself, although a server "
+                "admin can remove it. If you are certain, run "
                 f"`{ctx.clean_prefix}{ctx.command.qualified_name} {duration} confirm`."
             )
             return
@@ -784,7 +1133,7 @@ class Economy(commands.Cog):
                         await ctx.send("Your permanent casino self-exclusion is already active.")
                         return
                     await ctx.send(
-                        "Your self-exclusion cannot be shortened. It currently ends "
+                        "You cannot shorten your self-exclusion. It currently ends "
                         f"<t:{current_expiry}:F> (<t:{current_expiry}:R>)."
                     )
                     return
@@ -800,11 +1149,13 @@ class Economy(commands.Cog):
         if expires_at:
             await ctx.send(
                 "Your casino self-exclusion is now active until "
-                f"<t:{expires_at}:F> (<t:{expires_at}:R>). It cannot be canceled or shortened."
+                f"<t:{expires_at}:F> (<t:{expires_at}:R>). You cannot cancel or shorten it "
+                "yourself; a server admin can remove it."
             )
         else:
             await ctx.send(
-                "Your permanent casino self-exclusion is now active. It cannot be canceled."
+                "Your permanent casino self-exclusion is now active. You cannot cancel it "
+                "yourself; a server admin can remove it."
             )
 
     @economy_casino.command(name="exclusion", aliases=["excluded", "status"])
@@ -880,26 +1231,20 @@ class Economy(commands.Cog):
         ctx: commands.Context,
         member: discord.Member,
     ):
-        """Remove an administrator-imposed casino exclusion."""
-        removed = await self._clear_admin_casino_exclusion(member.id)
+        """Remove all active casino exclusions, including a player's self-exclusion."""
+        removed = await self._clear_casino_exclusions(member.id)
         if not removed:
-            active = await self._active_casino_exclusions(member.id)
-            if "self" in active:
-                await ctx.send(
-                    f"{member.mention} has no administrator-imposed exclusion. "
-                    "Their self-exclusion cannot be removed."
-                )
-            else:
-                await ctx.send(f"{member.mention} has no administrator-imposed casino exclusion.")
+            await ctx.send(f"{member.mention} has no active casino exclusion.")
             return
-        active = await self._active_casino_exclusions(member.id)
-        if "self" in active:
-            await ctx.send(
-                f"The administrator-imposed exclusion for {member.mention} was removed, "
-                "but their self-exclusion remains active."
-            )
-        else:
-            await ctx.send(f"The administrator-imposed casino exclusion for {member.mention} was removed.")
+        labels = []
+        if "self" in removed:
+            labels.append("self-exclusion")
+        if "admin" in removed:
+            labels.append("administrator-imposed exclusion")
+        await ctx.send(
+            f"Removed the {' and '.join(labels)} for {member.mention}. They can use chance "
+            "games again."
+        )
 
     @economy_casino.command(name="coinflip", aliases=["coin", "flip"])
     @commands.cooldown(1, 3, commands.BucketType.user)
@@ -1129,7 +1474,9 @@ class Economy(commands.Cog):
         prefix = ctx.clean_prefix
         embed = discord.Embed(
             title="Economy Admin Help",
-            description="Owner-only balance, claim, casino, shop, log, and API commands.",
+            description=(
+                "Owner-only balance, claim, casino, LWDMillions, shop, log, and API commands."
+            ),
             color=discord.Color.gold(),
         )
         embed.add_field(
@@ -1170,6 +1517,23 @@ class Economy(commands.Cog):
                     f"`{prefix}casino exclude <member> <duration|permanent> [reason]`",
                     f"`{prefix}casino unexclude <member>`",
                     f"`{prefix}casino exclusion [member]`",
+                ]
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="LWDMillions",
+            value="\n".join(
+                [
+                    f"`{prefix}eco admin lwdmillions show`",
+                    f"`{prefix}eco admin lwdmillions toggle`",
+                    f"`{prefix}eco admin lwdmillions ticketprice <amount>`",
+                    f"`{prefix}eco admin lwdmillions contribution <0-100>`",
+                    f"`{prefix}eco admin lwdmillions seed <amount>`",
+                    f"`{prefix}eco admin lwdmillions jackpot <amount>`",
+                    f"`{prefix}eco admin lwdmillions channel [channel]`",
+                    f"`{prefix}eco admin lwdmillions clearchannel`",
+                    f"`{prefix}eco admin lwdmillions draw confirm`",
                 ]
             ),
             inline=False,
@@ -1377,6 +1741,166 @@ class Economy(commands.Cog):
         await self.config.casino_min_bet.set(minimum)
         await self.config.casino_max_bet.set(maximum)
         await ctx.send(f"Casino bet limits set to {minimum:,}-{maximum:,} {CURRENCY_NAME}.")
+
+    @economy_admin.group(
+        name="lwdmillions",
+        aliases=["lwdm", "lottery"],
+        invoke_without_command=True,
+    )
+    @commands.is_owner()
+    async def economy_admin_lwdmillions(self, ctx: commands.Context):
+        """Manage LWDMillions settings and draws."""
+        await ctx.invoke(self.economy_admin_lwdmillions_show)
+
+    @economy_admin_lwdmillions.command(name="show")
+    @commands.is_owner()
+    async def economy_admin_lwdmillions_show(self, ctx: commands.Context):
+        """Show LWDMillions settings."""
+        state = await self._lwdmillions_state_snapshot()
+        channels = state.get("announcement_channels", {})
+        await ctx.send(
+            "LWDMillions settings:\n"
+            f"Sales: {'enabled' if state['enabled'] else 'disabled'}\n"
+            f"Ticket price: {int(state['ticket_price']):,} {CURRENCY_NAME}\n"
+            f"Current jackpot: {int(state['jackpot']):,} {CURRENCY_NAME}\n"
+            f"Seed jackpot: {int(state['seed_jackpot']):,} {CURRENCY_NAME}\n"
+            f"Jackpot contribution: {int(state['jackpot_contribution_percent'])}% per ticket\n"
+            f"Upcoming draw: #{int(state['draw_number']):,} at "
+            f"<t:{int(state['next_draw'])}:F> (<t:{int(state['next_draw'])}:R>)\n"
+            f"Tickets sold: {len(state['tickets']):,}/{MAX_LWDMILLIONS_TOTAL_TICKETS:,}\n"
+            f"Announcement channels: {len(channels):,}\n"
+            f"Commitment: `{state['commitment']}`"
+        )
+
+    @economy_admin_lwdmillions.command(name="toggle")
+    @commands.is_owner()
+    async def economy_admin_lwdmillions_toggle(self, ctx: commands.Context):
+        """Open or close LWDMillions ticket sales."""
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                state["enabled"] = not bool(state["enabled"])
+                enabled = bool(state["enabled"])
+        await ctx.send(f"LWDMillions ticket sales are now {'open' if enabled else 'closed'}.")
+
+    @economy_admin_lwdmillions.command(name="ticketprice", aliases=["price"])
+    @commands.is_owner()
+    async def economy_admin_lwdmillions_ticket_price(
+        self,
+        ctx: commands.Context,
+        amount: int,
+    ):
+        """Set the price of newly purchased LWDMillions lines."""
+        maximum = MAX_AMOUNT // max(LWD_MILLIONS_PRIZE_MULTIPLIERS.values())
+        if amount <= 0 or amount > maximum:
+            await ctx.send(f"Ticket price must be from 1 to {maximum:,} {CURRENCY_NAME}.")
+            return
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                state["ticket_price"] = int(amount)
+        await ctx.send(f"New LWDMillions lines now cost {amount:,} {CURRENCY_NAME}.")
+
+    @economy_admin_lwdmillions.command(name="contribution", aliases=["jackpotshare"])
+    @commands.is_owner()
+    async def economy_admin_lwdmillions_contribution(
+        self,
+        ctx: commands.Context,
+        percentage: int,
+    ):
+        """Set how much of each new line is added to the jackpot."""
+        if percentage < 0 or percentage > 100:
+            await ctx.send("Jackpot contribution must be from 0 to 100 percent.")
+            return
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                state["jackpot_contribution_percent"] = int(percentage)
+        await ctx.send(f"{percentage}% of each new LWDMillions line will enter the jackpot.")
+
+    @economy_admin_lwdmillions.command(name="seed")
+    @commands.is_owner()
+    async def economy_admin_lwdmillions_seed(self, ctx: commands.Context, amount: int):
+        """Set the jackpot amount used after a jackpot win."""
+        if amount <= 0 or amount > MAX_AMOUNT:
+            await ctx.send(f"Seed jackpot must be from 1 to {MAX_AMOUNT:,} {CURRENCY_NAME}.")
+            return
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                state["seed_jackpot"] = int(amount)
+        await ctx.send(f"The LWDMillions seed jackpot is now {amount:,} {CURRENCY_NAME}.")
+
+    @economy_admin_lwdmillions.command(name="jackpot", aliases=["pot"])
+    @commands.is_owner()
+    async def economy_admin_lwdmillions_jackpot(self, ctx: commands.Context, amount: int):
+        """Set the current rolling jackpot."""
+        if amount <= 0 or amount > MAX_AMOUNT:
+            await ctx.send(f"Jackpot must be from 1 to {MAX_AMOUNT:,} {CURRENCY_NAME}.")
+            return
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                state["jackpot"] = int(amount)
+        await ctx.send(f"The current LWDMillions jackpot is now {amount:,} {CURRENCY_NAME}.")
+
+    @economy_admin_lwdmillions.command(name="channel")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_lwdmillions_channel(
+        self,
+        ctx: commands.Context,
+        channel: discord.TextChannel | None = None,
+    ):
+        """Set this server's LWDMillions draw announcement channel."""
+        channel = channel or ctx.channel
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                state["announcement_channels"][str(ctx.guild.id)] = channel.id
+        await ctx.send(f"LWDMillions draw results will be announced in {channel.mention}.")
+
+    @economy_admin_lwdmillions.command(name="clearchannel")
+    @commands.is_owner()
+    @commands.guild_only()
+    async def economy_admin_lwdmillions_clear_channel(self, ctx: commands.Context):
+        """Disable LWDMillions draw announcements in this server."""
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                removed = state["announcement_channels"].pop(str(ctx.guild.id), None)
+        await ctx.send(
+            "LWDMillions draw announcements are disabled in this server."
+            if removed is not None
+            else "This server did not have an LWDMillions announcement channel."
+        )
+
+    @economy_admin_lwdmillions.command(name="draw")
+    @commands.is_owner()
+    @commands.max_concurrency(1, per=commands.BucketType.default, wait=False)
+    async def economy_admin_lwdmillions_draw(
+        self,
+        ctx: commands.Context,
+        confirmation: str = "",
+    ):
+        """Close and settle the current LWDMillions draw immediately."""
+        if confirmation.casefold() != "confirm":
+            await ctx.send(
+                "This immediately closes the current draw and settles every ticket. Run "
+                f"`{ctx.clean_prefix}eco admin lwdmillions draw confirm` to continue."
+            )
+            return
+        record = await self._run_lwdmillions_draw(
+            force=True,
+            skip_channel_id=ctx.channel.id,
+        )
+        if record is None:
+            await ctx.send("The LWDMillions draw could not be completed.")
+            return
+        await ctx.send(
+            embed=self._lwdmillions_result_embed(record, ctx.clean_prefix),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
 
     @economy_admin.group(name="shop", invoke_without_command=True)
     @commands.is_owner()
@@ -1907,6 +2431,628 @@ class Economy(commands.Cog):
         await interaction.response.send_message(content, ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
         await self._refresh_shop_panel(interaction.guild)
 
+    @staticmethod
+    def _normalize_lwdmillions_state(state: dict[str, Any]):
+        """Fill missing lottery state without replacing tickets from older installs."""
+
+        def positive_integer(key: str, default: int, maximum: int = MAX_AMOUNT) -> int:
+            try:
+                value = int(state.get(key, default))
+            except (TypeError, ValueError):
+                value = default
+            if value <= 0 or value > maximum:
+                value = default
+            state[key] = value
+            return value
+
+        state["enabled"] = bool(state.get("enabled", True))
+        maximum_price = MAX_AMOUNT // max(LWD_MILLIONS_PRIZE_MULTIPLIERS.values())
+        positive_integer("ticket_price", DEFAULT_LWDMILLIONS_TICKET_PRICE, maximum_price)
+        positive_integer("seed_jackpot", DEFAULT_LWDMILLIONS_SEED_JACKPOT)
+        positive_integer("jackpot", DEFAULT_LWDMILLIONS_SEED_JACKPOT)
+        draw_number = positive_integer("draw_number", 1)
+        positive_integer("next_ticket_id", 1)
+
+        try:
+            contribution = int(
+                state.get(
+                    "jackpot_contribution_percent",
+                    DEFAULT_LWDMILLIONS_JACKPOT_CONTRIBUTION_PERCENT,
+                )
+            )
+        except (TypeError, ValueError):
+            contribution = DEFAULT_LWDMILLIONS_JACKPOT_CONTRIBUTION_PERCENT
+        if contribution < 0 or contribution > 100:
+            contribution = DEFAULT_LWDMILLIONS_JACKPOT_CONTRIBUTION_PERCENT
+        state["jackpot_contribution_percent"] = contribution
+
+        try:
+            next_draw = int(state.get("next_draw", 0))
+        except (TypeError, ValueError):
+            next_draw = 0
+        if next_draw <= 0:
+            next_draw = int(next_lwdmillions_draw().timestamp())
+        state["next_draw"] = next_draw
+
+        if not isinstance(state.get("tickets"), list):
+            state["tickets"] = []
+        if not isinstance(state.get("history"), list):
+            state["history"] = []
+        else:
+            del state["history"][:-LWDMILLIONS_HISTORY_LIMIT]
+        if not isinstance(state.get("announcement_channels"), dict):
+            state["announcement_channels"] = {}
+
+        secret = str(state.get("secret", ""))
+        if not secret:
+            secret = secrets.token_hex(32)
+            state["secret"] = secret
+        commitment = str(state.get("commitment", ""))
+        if not commitment:
+            state["commitment"] = lwdmillions_commitment(secret, draw_number)
+        elif (
+            not secrets.compare_digest(
+                commitment,
+                lwdmillions_commitment(secret, draw_number),
+            )
+            and not state["tickets"]
+        ):
+            # With no sold tickets, a corrupt proof can be rotated without affecting players.
+            secret = secrets.token_hex(32)
+            state["secret"] = secret
+            state["commitment"] = lwdmillions_commitment(secret, draw_number)
+
+    async def _lwdmillions_state_snapshot(self) -> dict[str, Any]:
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                return copy.deepcopy(dict(state))
+
+    @staticmethod
+    def _find_lwdmillions_history(
+        state: dict[str, Any],
+        draw_number: int | None,
+    ) -> dict[str, Any] | None:
+        history = [record for record in state.get("history", []) if isinstance(record, dict)]
+        if draw_number is None:
+            return history[-1] if history else None
+        for record in reversed(history):
+            if int(record.get("draw_number", 0)) == int(draw_number):
+                return record
+        return None
+
+    async def _purchase_lwdmillions_tickets(
+        self,
+        ctx: commands.Context,
+        selections: list[tuple[tuple[int, ...], tuple[int, ...]]],
+    ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
+        if not selections:
+            raise EconomyError("Choose at least one LWDMillions line.")
+        if len(selections) > MAX_LWDMILLIONS_LINES_PER_PLAYER:
+            raise EconomyError(
+                f"You can hold at most {MAX_LWDMILLIONS_LINES_PER_PLAYER} lines per draw."
+            )
+        validated = [validate_lwdmillions_ticket(*selection) for selection in selections]
+
+        exclusions = await self._active_casino_exclusions(ctx.author.id)
+        if exclusions:
+            details = " ".join(self._casino_exclusion_status_lines(exclusions))
+            raise EconomyError(
+                f"You cannot buy chance-game tickets while casino-excluded. {details}"
+            )
+
+        # Settle an overdue draw before allowing a line into the next one.
+        await self._run_lwdmillions_draw(force=False)
+        now = int(time.time())
+        guild_id = ctx.guild.id if ctx.guild else None
+        channel_id = ctx.channel.id if ctx.channel else None
+
+        async with self._lock:
+            async with self.config.lwdmillions() as state:
+                self._normalize_lwdmillions_state(state)
+                if now >= int(state["next_draw"]):
+                    raise EconomyError("The draw is being settled. Please try again in a moment.")
+                if not state["enabled"]:
+                    raise EconomyError("LWDMillions ticket sales are currently closed.")
+                if not secrets.compare_digest(
+                    str(state["commitment"]),
+                    lwdmillions_commitment(str(state["secret"]), int(state["draw_number"])),
+                ):
+                    raise EconomyError(
+                        "LWDMillions ticket sales are paused because the draw proof needs repair."
+                    )
+
+                existing_count = sum(
+                    1
+                    for ticket in state["tickets"]
+                    if isinstance(ticket, dict)
+                    and int(ticket.get("user_id", 0)) == ctx.author.id
+                )
+                if existing_count + len(validated) > MAX_LWDMILLIONS_LINES_PER_PLAYER:
+                    remaining = MAX_LWDMILLIONS_LINES_PER_PLAYER - existing_count
+                    raise EconomyError(
+                        f"You can hold at most {MAX_LWDMILLIONS_LINES_PER_PLAYER} lines per draw. "
+                        f"You have room for {max(0, remaining)} more."
+                    )
+                if len(state["tickets"]) + len(validated) > MAX_LWDMILLIONS_TOTAL_TICKETS:
+                    raise EconomyError("This LWDMillions draw has reached its ticket limit.")
+
+                ticket_price = int(state["ticket_price"])
+                total = ticket_price * len(validated)
+                if total > MAX_AMOUNT:
+                    raise EconomyError(f"Purchase total cannot exceed {MAX_AMOUNT:,} {CURRENCY_NAME}.")
+
+                async with self.config.balances() as balances:
+                    account = self._account_from_mapping(balances, ctx.author.id)
+                    if account[CASH] < total:
+                        raise EconomyError(
+                            f"Insufficient funds. {len(validated):,} line"
+                            f"{'s cost' if len(validated) != 1 else ' costs'} "
+                            f"{total:,} {CURRENCY_NAME}."
+                        )
+                    account[CASH] -= total
+                    balances[str(ctx.author.id)] = account
+
+                next_ticket_id = int(state["next_ticket_id"])
+                purchased = []
+                for offset, (main_numbers, lucky_stars) in enumerate(validated):
+                    ticket = {
+                        "id": next_ticket_id + offset,
+                        "user_id": ctx.author.id,
+                        "main": list(main_numbers),
+                        "stars": list(lucky_stars),
+                        "price": ticket_price,
+                        "purchased_at": now,
+                        "guild_id": guild_id,
+                        "channel_id": channel_id,
+                    }
+                    state["tickets"].append(ticket)
+                    purchased.append(ticket)
+                state["next_ticket_id"] = next_ticket_id + len(purchased)
+
+                requested_contribution = (
+                    total * int(state["jackpot_contribution_percent"]) // 100
+                )
+                previous_jackpot = int(state["jackpot"])
+                state["jackpot"] = min(
+                    MAX_AMOUNT,
+                    previous_jackpot + requested_contribution,
+                )
+                contribution = int(state["jackpot"]) - previous_jackpot
+                draw_number = int(state["draw_number"])
+                snapshot = copy.deepcopy(dict(state))
+
+            try:
+                await self._append_ledger(
+                    "lwdmillions_ticket",
+                    from_user_id=ctx.author.id,
+                    to_user_id=None,
+                    amount=total,
+                    actor_id=ctx.author.id,
+                    guild_id=guild_id,
+                    reason=(
+                        f"LWDMillions draw {draw_number}; {len(purchased)} line(s); "
+                        f"{contribution} added to jackpot"
+                    ),
+                )
+            except Exception:
+                log.exception(
+                    "Could not append LWDMillions draw %s ticket purchase for user %s",
+                    draw_number,
+                    ctx.author.id,
+                )
+        return copy.deepcopy(purchased), account, snapshot
+
+    async def _send_lwdmillions_purchase_receipt(
+        self,
+        ctx: commands.Context,
+        tickets: list[dict[str, Any]],
+        account: dict[str, int],
+        state: dict[str, Any],
+    ):
+        lines = [
+            f"`#{int(ticket['id'])}` {format_lwdmillions_ticket(ticket['main'], ticket['stars'])}"
+            for ticket in tickets
+        ]
+        total = sum(int(ticket.get("price", 0)) for ticket in tickets)
+        embed = discord.Embed(
+            title=f"LWDMillions — {len(tickets):,} Line{'s' if len(tickets) != 1 else ''} Bought",
+            description="\n".join(lines),
+            color=discord.Color.green(),
+        )
+        embed.add_field(
+            name=f"Draw #{int(state['draw_number']):,}",
+            value=f"<t:{int(state['next_draw'])}:F> (<t:{int(state['next_draw'])}:R>)",
+            inline=True,
+        )
+        embed.add_field(name="Paid", value=f"{total:,} {CURRENCY_NAME}", inline=True)
+        embed.add_field(
+            name="Jackpot",
+            value=f"{int(state['jackpot']):,} {CURRENCY_NAME}",
+            inline=True,
+        )
+        embed.add_field(
+            name="Draw Commitment",
+            value=f"`{state['commitment']}`",
+            inline=False,
+        )
+        embed.set_footer(text=f"Balance: {account[CASH]:,} {CURRENCY_NAME}")
+        await ctx.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+    def _lwdmillions_result_embed(
+        self,
+        record: dict[str, Any],
+        prefix: str = "[p]",
+    ) -> discord.Embed:
+        winners = [winner for winner in record.get("winners", []) if isinstance(winner, dict)]
+        winner_count = int(record.get("winner_count", len(winners)))
+        try:
+            timestamp = datetime.fromtimestamp(int(record.get("drawn_at", 0)), timezone.utc)
+        except (OSError, OverflowError, TypeError, ValueError):
+            timestamp = discord.utils.utcnow()
+        embed = discord.Embed(
+            title=f"LWDMillions — Draw #{int(record.get('draw_number', 0)):,}",
+            color=discord.Color.green() if winner_count else discord.Color.gold(),
+            timestamp=timestamp,
+        )
+        embed.add_field(
+            name="Winning Numbers",
+            value=format_lwdmillions_ticket(record.get("main", []), record.get("stars", [])),
+            inline=False,
+        )
+
+        jackpot_before = int(record.get("jackpot_before", 0))
+        jackpot_after = int(record.get("jackpot_after", 0))
+        jackpot_winning_lines = int(record.get("jackpot_winning_lines", 0))
+        if jackpot_winning_lines:
+            jackpot_text = (
+                f"**{jackpot_winning_lines:,} winning line"
+                f"{'s' if jackpot_winning_lines != 1 else ''}** split "
+                f"{jackpot_before:,} {CURRENCY_NAME}.\n"
+                f"Next jackpot: {jackpot_after:,} {CURRENCY_NAME}."
+            )
+        else:
+            jackpot_text = (
+                f"No 5 + 2 winner — **{jackpot_before:,} {CURRENCY_NAME} rolls over**."
+            )
+        embed.add_field(name="Jackpot", value=jackpot_text, inline=False)
+
+        tier_counts = record.get("tier_counts", {})
+        tier_lines = []
+        if isinstance(tier_counts, dict):
+            for main_matches, star_matches in LWD_MILLIONS_PRIZE_TIER_ORDER:
+                count = int(tier_counts.get(f"{main_matches}+{star_matches}", 0))
+                if count:
+                    tier_lines.append(
+                        f"**{lwdmillions_match_label(main_matches, star_matches)}:** "
+                        f"{count:,} line{'s' if count != 1 else ''}"
+                    )
+        embed.add_field(
+            name="Winning Tiers",
+            value="\n".join(tier_lines) or "No winning lines this draw.",
+            inline=False,
+        )
+
+        if winners:
+            top_winners = sorted(
+                winners,
+                key=lambda winner: int(winner.get("amount", 0)),
+                reverse=True,
+            )[:10]
+            winner_lines = [
+                f"<@{int(winner.get('user_id', 0))}> — "
+                f"**{int(winner.get('amount', 0)):,} {CURRENCY_NAME}**"
+                for winner in top_winners
+            ]
+            if winner_count > len(top_winners):
+                winner_lines.append(f"…and {winner_count - len(top_winners):,} more winners")
+            embed.add_field(name="Winners", value="\n".join(winner_lines), inline=False)
+
+        embed.add_field(
+            name="Draw Summary",
+            value=(
+                f"{int(record.get('ticket_count', 0)):,} lines from "
+                f"{int(record.get('player_count', 0)):,} players\n"
+                f"Total prizes: {int(record.get('total_paid', 0)):,} {CURRENCY_NAME}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Commit-Reveal Proof",
+            value=(
+                f"Commitment: `{record.get('commitment', '')}`\n"
+                f"Secret: `{record.get('secret', '')}`\n"
+                f"Run `{prefix}lwdmillions verify {int(record.get('draw_number', 0))}`."
+            ),
+            inline=False,
+        )
+        return embed
+
+    async def _run_lwdmillions_draw(
+        self,
+        *,
+        force: bool,
+        skip_channel_id: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically settle the current draw and open the next ticket period."""
+        async with self._lwdmillions_draw_lock:
+            now = int(time.time())
+            async with self._lock:
+                async with self.config.lwdmillions() as state:
+                    self._normalize_lwdmillions_state(state)
+                    scheduled_for = int(state["next_draw"])
+                    if not force and now < scheduled_for:
+                        return None
+
+                    draw_number = int(state["draw_number"])
+                    secret = str(state["secret"])
+                    commitment = str(state["commitment"])
+                    expected_commitment = lwdmillions_commitment(secret, draw_number)
+                    if not secrets.compare_digest(expected_commitment, commitment):
+                        log.error(
+                            "Refusing to settle LWDMillions draw %s: commitment mismatch",
+                            draw_number,
+                        )
+                        return None
+
+                    draw_main, draw_stars = committed_lwdmillions_draw(secret, draw_number)
+                    tickets = [
+                        copy.deepcopy(ticket)
+                        for ticket in state["tickets"]
+                        if isinstance(ticket, dict)
+                    ]
+                    jackpot_before = int(state["jackpot"])
+                    evaluations: list[dict[str, Any]] = []
+                    players: set[int] = set()
+                    for ticket in tickets:
+                        try:
+                            user_id = int(ticket["user_id"])
+                            main_numbers, lucky_stars = validate_lwdmillions_ticket(
+                                ticket["main"],
+                                ticket["stars"],
+                            )
+                            ticket_price = int(ticket["price"])
+                            if user_id <= 0 or ticket_price <= 0:
+                                raise ValueError("invalid stored ticket")
+                        except (KeyError, TypeError, ValueError):
+                            log.warning(
+                                "Ignoring malformed LWDMillions ticket %r in draw %s",
+                                ticket.get("id"),
+                                draw_number,
+                            )
+                            continue
+                        tier = match_lwdmillions_ticket(
+                            main_numbers,
+                            lucky_stars,
+                            draw_main,
+                            draw_stars,
+                        )
+                        players.add(user_id)
+                        evaluations.append(
+                            {
+                                "ticket": ticket,
+                                "user_id": user_id,
+                                "price": ticket_price,
+                                "tier": tier,
+                                "payout": 0,
+                            }
+                        )
+
+                    jackpot_winners = sorted(
+                        (entry for entry in evaluations if entry["tier"] == (5, 2)),
+                        key=lambda entry: int(entry["ticket"].get("id", 0)),
+                    )
+                    if jackpot_winners:
+                        base_share, extra_shares = divmod(jackpot_before, len(jackpot_winners))
+                        for index, entry in enumerate(jackpot_winners):
+                            entry["payout"] = base_share + int(index < extra_shares)
+
+                    payout_by_user: dict[int, int] = {}
+                    winner_details: dict[int, dict[str, Any]] = {}
+                    tier_counts: dict[str, int] = {}
+                    winning_ticket_count = 0
+                    for entry in evaluations:
+                        main_matches, star_matches = entry["tier"]
+                        tier_key = f"{main_matches}+{star_matches}"
+                        if entry["tier"] in LWD_MILLIONS_PRIZE_TIER_ORDER:
+                            tier_counts[tier_key] = tier_counts.get(tier_key, 0) + 1
+                            winning_ticket_count += 1
+                        if entry["tier"] != (5, 2):
+                            entry["payout"] = calculate_lwdmillions_prize(
+                                entry["price"],
+                                main_matches,
+                                star_matches,
+                            )
+                        payout = int(entry["payout"])
+                        if payout <= 0:
+                            continue
+                        user_id = int(entry["user_id"])
+                        payout_by_user[user_id] = payout_by_user.get(user_id, 0) + payout
+                        detail = winner_details.setdefault(
+                            user_id,
+                            {"amount": 0, "tiers": {}},
+                        )
+                        detail["amount"] = int(detail["amount"]) + payout
+                        detail["tiers"][tier_key] = int(detail["tiers"].get(tier_key, 0)) + 1
+
+                    async with self.config.balances() as balances:
+                        for user_id, payout in payout_by_user.items():
+                            account = self._account_from_mapping(balances, user_id)
+                            account[CASH] += payout
+                            balances[str(user_id)] = account
+
+                    jackpot_after = (
+                        int(state["seed_jackpot"])
+                        if jackpot_winners
+                        else jackpot_before
+                    )
+                    state["jackpot"] = jackpot_after
+                    state["tickets"] = []
+                    state["draw_number"] = draw_number + 1
+                    schedule_after = max(now, scheduled_for) if force else now
+                    state["next_draw"] = int(next_lwdmillions_draw(schedule_after).timestamp())
+                    next_secret = secrets.token_hex(32)
+                    state["secret"] = next_secret
+                    state["commitment"] = lwdmillions_commitment(
+                        next_secret,
+                        int(state["draw_number"]),
+                    )
+
+                    all_winners = sorted(
+                        (
+                            {"user_id": user_id, "amount": payout}
+                            for user_id, payout in payout_by_user.items()
+                        ),
+                        key=lambda winner: int(winner["amount"]),
+                        reverse=True,
+                    )
+                    record = {
+                        "draw_number": draw_number,
+                        "scheduled_for": scheduled_for,
+                        "drawn_at": now,
+                        "main": list(draw_main),
+                        "stars": list(draw_stars),
+                        "commitment": commitment,
+                        "secret": secret,
+                        "ticket_count": len(evaluations),
+                        "player_count": len(players),
+                        "winning_ticket_count": winning_ticket_count,
+                        "winner_count": len(all_winners),
+                        "winners": all_winners[:LWDMILLIONS_HISTORY_WINNER_LIMIT],
+                        "tier_counts": tier_counts,
+                        "jackpot_before": jackpot_before,
+                        "jackpot_winning_lines": len(jackpot_winners),
+                        "jackpot_after": jackpot_after,
+                        "total_paid": sum(payout_by_user.values()),
+                    }
+                    state["history"].append(record)
+                    del state["history"][:-LWDMILLIONS_HISTORY_LIMIT]
+                    announcement_channels = copy.deepcopy(state["announcement_channels"])
+
+                for user_id, payout in payout_by_user.items():
+                    try:
+                        await self._append_ledger(
+                            "lwdmillions_win",
+                            from_user_id=None,
+                            to_user_id=user_id,
+                            amount=payout,
+                            actor_id=None,
+                            guild_id=None,
+                            reason=f"LWDMillions draw {draw_number} prize",
+                            log_to_channel=False,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Could not append the LWDMillions draw %s payout for user %s",
+                            draw_number,
+                            user_id,
+                        )
+
+            await self._announce_lwdmillions_draw(
+                record,
+                announcement_channels,
+                skip_channel_id=skip_channel_id,
+            )
+            notification_task = self.bot.loop.create_task(
+                self._notify_lwdmillions_winners(record, winner_details)
+            )
+            self._lwdmillions_notification_tasks.add(notification_task)
+            notification_task.add_done_callback(
+                self._lwdmillions_notification_tasks.discard
+            )
+            return copy.deepcopy(record)
+
+    async def _announce_lwdmillions_draw(
+        self,
+        record: dict[str, Any],
+        announcement_channels: dict[str, Any],
+        *,
+        skip_channel_id: int | None,
+    ):
+        embed = self._lwdmillions_result_embed(record)
+        for guild_id, channel_id in announcement_channels.items():
+            try:
+                guild = self.bot.get_guild(int(guild_id))
+                if guild is None or int(channel_id) == skip_channel_id:
+                    continue
+                channel = guild.get_channel(int(channel_id))
+                if not isinstance(channel, discord.TextChannel):
+                    continue
+                await channel.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except (TypeError, ValueError, discord.HTTPException):
+                log.exception(
+                    "Could not announce LWDMillions draw %s in guild %s",
+                    record.get("draw_number"),
+                    guild_id,
+                )
+
+    async def _notify_lwdmillions_winners(
+        self,
+        record: dict[str, Any],
+        winner_details: dict[int, dict[str, Any]],
+    ):
+        for user_id, details in winner_details.items():
+            try:
+                user = self.bot.get_user(user_id) or await self.bot.fetch_user(user_id)
+                tier_lines = []
+                for main_matches, star_matches in LWD_MILLIONS_PRIZE_TIER_ORDER:
+                    count = int(details["tiers"].get(f"{main_matches}+{star_matches}", 0))
+                    if count:
+                        tier_lines.append(
+                            f"{count:,}x {lwdmillions_match_label(main_matches, star_matches)}"
+                        )
+                embed = discord.Embed(
+                    title=f"You won LWDMillions Draw #{int(record['draw_number']):,}!",
+                    description=(
+                        f"Your winning lines paid **{int(details['amount']):,} {CURRENCY_NAME}**."
+                    ),
+                    color=discord.Color.green(),
+                )
+                embed.add_field(
+                    name="Winning Numbers",
+                    value=format_lwdmillions_ticket(record["main"], record["stars"]),
+                    inline=False,
+                )
+                embed.add_field(
+                    name="Your Winning Tiers",
+                    value="\n".join(tier_lines),
+                    inline=False,
+                )
+                await user.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            except (discord.Forbidden, discord.HTTPException, AttributeError):
+                log.info(
+                    "Could not DM LWDMillions draw %s winner %s",
+                    record.get("draw_number"),
+                    user_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception(
+                    "Unexpected error while notifying LWDMillions draw %s winner %s",
+                    record.get("draw_number"),
+                    user_id,
+                )
+
+    async def _lwdmillions_draw_loop(self):
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                state = await self._lwdmillions_state_snapshot()
+                delay = int(state["next_draw"]) - int(time.time())
+                if delay <= 0:
+                    await self._run_lwdmillions_draw(force=False)
+                else:
+                    await asyncio.sleep(min(delay, LWDMILLIONS_DRAW_POLL_SECONDS))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Unhandled error while processing an LWDMillions draw")
+                await asyncio.sleep(LWDMILLIONS_DRAW_POLL_SECONDS)
+
     async def _active_casino_exclusions(self, user_id: int) -> dict[str, dict[str, Any]]:
         """Return active exclusions and lazily discard expired records."""
         now = int(time.time())
@@ -1960,18 +3106,23 @@ class Economy(commands.Cog):
             }
             exclusions[user_key] = stored
 
-    async def _clear_admin_casino_exclusion(self, user_id: int) -> bool:
+    async def _clear_casino_exclusions(self, user_id: int) -> set[str]:
+        """Remove both player and administrator exclusions for an admin command."""
         user_key = str(user_id)
         async with self.config.casino_exclusions() as exclusions:
             stored = exclusions.get(user_key)
-            if not isinstance(stored, dict) or "admin" not in stored:
-                return False
-            stored.pop("admin", None)
+            if not isinstance(stored, dict):
+                if stored is not None:
+                    exclusions.pop(user_key, None)
+                return set()
+            removed = {source for source in ("self", "admin") if source in stored}
+            for source in removed:
+                stored.pop(source, None)
             if stored:
                 exclusions[user_key] = stored
             else:
                 exclusions.pop(user_key, None)
-            return True
+            return removed
 
     @staticmethod
     def _casino_exclusion_status_lines(active: dict[str, dict[str, Any]]) -> list[str]:

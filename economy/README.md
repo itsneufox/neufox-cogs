@@ -19,6 +19,13 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco gift <member> <item> [quantity]` - gift an allowed inventory item.
 - `[p]eco inventory [member]` - show inventory items.
 - `[p]eco codes` - DM your unredeemed in-game item codes.
+- `[p]eco lwdmillions` - show the current jackpot, draw time, and lottery commands.
+- `[p]eco lwdmillions play <5 numbers> | <2 stars>` - buy a chosen LWDMillions line.
+- `[p]eco lwdmillions quickpick [lines]` - buy securely randomized lines.
+- `[p]eco lwdmillions tickets` - show your lines in the upcoming draw.
+- `[p]eco lwdmillions prizes` - show all 13 match tiers and current payouts.
+- `[p]eco lwdmillions results [draw]` - show a recent result.
+- `[p]eco lwdmillions verify [draw]` - verify a result against its published commitment.
 - `[p]eco casino` - show casino games, bet limits, and payout rules.
 - `[p]eco casino coinflip <bet> [heads|tails]` - bet on a coin flip.
 - `[p]eco casino dice <bet> <1-6>` - guess a six-sided die roll.
@@ -26,6 +33,9 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco casino roulette <bet> <choice>` - spin a European roulette wheel.
 - `[p]eco casino slots <bet>` - spin the slot machine.
 - `[p]eco casino blackjack <bet>` - play interactive blackjack.
+- `[p]eco casino selfexclude <duration|permanent> confirm` - block your own chance-game access.
+- `[p]eco casino exclusion [member]` - show active exclusions.
+- `[p]eco casino unexclude <member>` - admins can remove administrator and self-exclusions.
 
 Shortcut commands are also available for common user actions:
 
@@ -38,6 +48,7 @@ Shortcut commands are also available for common user actions:
 - `[p]inventory [member]` / `[p]inv [member]`
 - `[p]codes`
 - `[p]ecotop`
+- `[p]lwdmillions` / `[p]lwdm` / `[p]millions`
 - `[p]casino` / `[p]gamble`
 - `[p]casino coinflip <bet> [heads|tails]`
 - `[p]casino dice <bet> <1-6>`
@@ -46,7 +57,25 @@ Shortcut commands are also available for common user actions:
 - `[p]casino slots <bet>`
 - `[p]casino blackjack <bet>` / `[p]casino bj <bet>`
 
+## LWDMillions
+
+LWDMillions is a global, scheduled lottery using virtual LWD$. Each line contains five distinct main numbers from 1-50 and two distinct Lucky Stars from 1-12. Draws close automatically every Tuesday and Friday at 20:00 UTC. A player may hold up to 20 lines in one draw; a draw accepts up to 10,000 total lines.
+
+The default line price is 100 LWD$. Half of every ticket is added to a rolling 1,000,000 LWD$ jackpot. Lines matching all five main numbers and both Lucky Stars split that jackpot; without a jackpot winner, it rolls over. The other 12 match tiers pay fixed multiples of the price recorded when each line was bought. This means changing the price does not change payouts on existing tickets.
+
+Example entries:
+
+```text
+[p]lwdmillions play 4 9 12 31 50 | 3 12
+[p]lwdmillions quickpick 5
+[p]lwdmillions tickets
+```
+
+Every ticket period publishes a SHA-256 commitment before the draw. At settlement, the bot reveals the committed secret and derives the result deterministically with unbiased sampling. `[p]lwdmillions verify` independently recalculates both the commitment and winning numbers. Ticket purchases are blocked for users with an active casino self-exclusion or administrator exclusion.
+
 Casino games use the same global LWD$ balance as the rest of the economy. They use secure random draws, settle each wager atomically, and record the net result in the transaction ledger. The defaults allow bets from 10 to 10,000 LWD$, with a short per-game anti-spam cooldown.
+
+Players cannot shorten or remove their own self-exclusion. A server administrator can lift either a self-exclusion or an administrator-imposed exclusion with `[p]casino unexclude <member>`.
 
 Payouts include the original wager: coin flip returns 1.95x on a win, and an exact dice guess returns 5.7x. High Card returns 2x when your card outranks the dealer and pushes on equal ranks. Animated slots use the machine's printed exact-triple payouts: lemon 4x, cherry 5x, bell 10x, coin 25x, diamond 40x, and seven 80x. Exactly one cherry on an otherwise unmatched spin returns half the wager.
 
@@ -74,6 +103,15 @@ Blackjack card/table artwork and slot-machine artwork are used under the bundled
 - `[p]eco admin casino show`
 - `[p]eco admin casino toggle`
 - `[p]eco admin casino limits <minimum> <maximum>`
+- `[p]eco admin lwdmillions show`
+- `[p]eco admin lwdmillions toggle`
+- `[p]eco admin lwdmillions ticketprice <amount>`
+- `[p]eco admin lwdmillions contribution <0-100>`
+- `[p]eco admin lwdmillions seed <amount>`
+- `[p]eco admin lwdmillions jackpot <amount>`
+- `[p]eco admin lwdmillions channel [channel]`
+- `[p]eco admin lwdmillions clearchannel`
+- `[p]eco admin lwdmillions draw confirm`
 - `[p]eco admin shop add <name> <price> [stock] [description]`
 - `[p]eco admin shop remove <name>`
 - `[p]eco admin shop role <name> [role]`
