@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Any
 
 import discord
@@ -24,22 +25,311 @@ WARNING_PUNISHMENT_PRIORITY = {
     "ban": 40,
 }
 
+NATURAL_ACTION_PATTERNS = (
+    (
+        "clearwarnings",
+        re.compile(
+            r"\b(?:clear|remove|reset|limpar|remover|resetar)\s+(?:all\s+|todos?\s+|todas?\s+)?"
+            r"(?:the\s+|os?\s+|as?\s+|manual\s+)?(?:warnings?|warns?|avisos?|advert[eê]ncias?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "untimeout",
+        re.compile(
+            r"\b(?:un[\s-]?timeout|un[\s-]?mute|desmutar|desmute|dessilenciar|"
+            r"remove\s+(?:the\s+|o\s+|a\s+)?(?:timeout|mute)|"
+            r"remov(?:er|a)\s+(?:o\s+|a\s+)?(?:silêncio|silencio|mute|timeout)|"
+            r"take\s+off\s+(?:the\s+)?(?:timeout|mute))\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("softban", re.compile(r"\bsoft[\s-]?ban\b", re.IGNORECASE)),
+    (
+        "userinfo",
+        re.compile(
+            r"\b(?:user[\s-]?info|who\s+is|info\s+(?:do|da)(?:\s+usuário)?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("modstats", re.compile(r"\bmod(?:eration)?[\s-]?stats?\b", re.IGNORECASE)),
+    ("warnings", re.compile(r"\b(?:warnings?|avisos)\b", re.IGNORECASE)),
+    ("hackban", re.compile(r"\b(?:hack[\s-]?ban|force[\s-]?ban)\b", re.IGNORECASE)),
+    ("purge", re.compile(r"\b(?:purge|prune|limpar)\b", re.IGNORECASE)),
+    (
+        "timeout",
+        re.compile(
+            r"\b(?:time[\s-]?out|mute|mutar|muta|silenciar|silencie|silencia|calar|cale)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("unban", re.compile(r"\b(?:un[\s-]?ban|desbanir|desban)\b", re.IGNORECASE)),
+    ("ban", re.compile(r"\b(?:ban(?:ned|ning)?|banir|bane)\b", re.IGNORECASE)),
+    ("kick", re.compile(r"\b(?:kick(?:ed|ing)?|expulsar|expulse|chutar|chute)\b", re.IGNORECASE)),
+    ("cases", re.compile(r"\bcases?\b", re.IGNORECASE)),
+    (
+        "warn",
+        re.compile(
+            r"\b(?:warn(?:ed|ing)?|aviso|avisar|avise|advert[eê]ncia|advertir|advirta)\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+USER_MENTION_PATTERN = re.compile(r"<@!?(\d+)>")
+TIMEOUT_DURATION_PATTERN = re.compile(
+    r"\b(?:(?:for|por|during|durante)\s+)?(\d+)\s*"
+    r"(seconds?|secs?|s|segundos?|segs?|seg|minutes?|mins?|m|minutos?|min|"
+    r"hours?|hrs?|h|horas?|days?|d|dias?)\b",
+    re.IGNORECASE,
+)
+BAN_DELETE_DAYS_PATTERN = re.compile(
+    r"\b(?:delete|remove|clear|apagar|remover|limpar)\s+([0-7])\s*"
+    r"(?:days?|day|dias?|dia)\b(?:\s+(?:(?:of|de)\s+)?(?:messages?|mensagens?))?",
+    re.IGNORECASE,
+)
+BAN_BARE_DAYS_PATTERN = re.compile(r"\b([0-7])\s*(?:days?|day|dias?|dia)\b", re.IGNORECASE)
+PORTUGUESE_LANGUAGE_PATTERN = re.compile(
+    r"(?:\b(?:durante|por|porque|"
+    r"apagar|apague|avisar|avise|avisos|banir|bane|calar|cale|chutar|chute|"
+    r"desban|desbanir|desmute|desmutar|dessilenciar|dias?|devido|expulse|"
+    r"expulsar|horas?|limpar|minutos?|muta|mutar|remover|segundos?|"
+    r"silencia|silenciar|silencie|usuário|usuários|advertência|advertências)\b"
+    r"|[ãáâàçéêíóôõú])",
+    re.IGNORECASE,
+)
+PORTUGUESE_ARTICLE_PATTERN = re.compile(
+    r"\b(?:a|as|da|das|do|dos|o|os|um|uma|uns|umas)\s+(?=<@!?\d+>)",
+    re.IGNORECASE,
+)
+
+NATURAL_COMMAND_METHODS = {
+    "purge": "purge_messages",
+    "userinfo": "userinfo_member",
+    "timeout": "timeout_member",
+    "untimeout": "untimeout_member",
+    "kick": "kick_member",
+    "ban": "ban_member",
+    "hackban": "hackban_user",
+    "unban": "unban_user",
+    "softban": "softban_member",
+    "warn": "warn_member",
+    "warnings": "warnings_member",
+    "clearwarnings": "clearwarnings_member",
+    "cases": "cases_member",
+    "modstats": "modstats_member",
+}
+NATURAL_MEMBER_ACTIONS = {
+    "userinfo",
+    "timeout",
+    "untimeout",
+    "kick",
+    "softban",
+    "warn",
+    "warnings",
+    "clearwarnings",
+    "cases",
+    "modstats",
+}
+NATURAL_OPTIONAL_TARGET_ACTIONS = {"userinfo", "purge"}
+
+
+def parse_natural_moderation_request(content: str, bot_id: int) -> dict[str, Any] | None:
+    """Parse a bot-mention moderation request without making any decisions or API calls."""
+    if not content or not bot_id:
+        return None
+
+    bot_mention = re.match(r"^\s*<@!?(\d+)>\s*", content)
+    if bot_mention is None or int(bot_mention.group(1)) != bot_id:
+        return None
+
+    request = content[bot_mention.end() :].strip()
+    if not request:
+        return None
+
+    mention_matches = list(USER_MENTION_PATTERN.finditer(request))
+    target_mentions = [match for match in mention_matches if int(match.group(1)) != bot_id]
+    target_ids = list(dict.fromkeys(int(match.group(1)) for match in target_mentions))
+    first_target = target_mentions[0] if target_mentions else None
+    action_search_end = first_target.start() if first_target is not None else len(request)
+
+    action = None
+    action_match = None
+    for candidate, pattern in NATURAL_ACTION_PATTERNS:
+        match = pattern.search(request, 0, action_search_end)
+        if match is not None:
+            action = candidate
+            action_match = match
+            break
+
+    if action is None or action_match is None:
+        return None
+
+    # The grammar intentionally expects the action before the target. This avoids
+    # interpreting ordinary text such as "@member was banned" as a command.
+    if first_target is not None and first_target.start() < action_match.start():
+        return None
+
+    tail = request[action_match.end() :]
+    tail_mentions = [
+        match
+        for match in target_mentions
+        if match.start() >= action_match.end()
+    ]
+    tail_without_mentions = _remove_matches(tail, [
+        (match.start() - action_match.end(), match.end() - action_match.end())
+        for match in tail_mentions
+    ])
+
+    minutes = None
+    duration_seconds = None
+    duration_text = None
+    duration_match = None
+    if action == "timeout":
+        duration_match = TIMEOUT_DURATION_PATTERN.search(tail_without_mentions)
+        if duration_match is not None:
+            amount = int(duration_match.group(1))
+            unit = duration_match.group(2).lower()
+            if unit.startswith("second") or unit.startswith("sec") or unit.startswith("seg") or unit == "s":
+                duration_seconds = amount
+                duration_text = _format_duration_label(amount, unit)
+            elif unit.startswith("hour") or unit.startswith("hr") or unit.startswith("hora") or unit == "h":
+                duration_seconds = amount * 3600
+                duration_text = _format_duration_label(amount, unit)
+            elif unit.startswith("day") or unit.startswith("dia") or unit == "d":
+                duration_seconds = amount * 86400
+                duration_text = _format_duration_label(amount, unit)
+            else:
+                duration_seconds = amount * 60
+                duration_text = _format_duration_label(amount, unit)
+            minutes = max(1, (duration_seconds + 59) // 60) if duration_seconds > 0 else 0
+        else:
+            # `timeout @user 10` is a useful shorthand for ten minutes.
+            bare_duration = re.search(r"\b(\d+)\b", tail_without_mentions)
+            if bare_duration is not None:
+                minutes = int(bare_duration.group(1))
+                duration_seconds = minutes * 60
+                duration_text = f"{minutes} minute(s)"
+                duration_match = bare_duration
+
+    delete_days = None
+    delete_days_match = None
+    if action in {"ban", "hackban"}:
+        delete_days_match = BAN_DELETE_DAYS_PATTERN.search(tail_without_mentions)
+        if delete_days_match is None:
+            delete_days_match = BAN_BARE_DAYS_PATTERN.search(tail_without_mentions)
+        if delete_days_match is not None:
+            delete_days = int(delete_days_match.group(1))
+
+    reason_text = tail_without_mentions
+    matches_to_remove = []
+    if duration_match is not None:
+        matches_to_remove.append(duration_match.span())
+    if delete_days_match is not None:
+        matches_to_remove.append(delete_days_match.span())
+    reason_text = _remove_matches(reason_text, matches_to_remove)
+    reason_text = re.sub(r"\b(?:now|please|immediately)\b", " ", reason_text, flags=re.IGNORECASE)
+    reason_text = re.sub(
+        r"^\s*(?:(?:the|a|an|o|os|as|um|uma|do|da)\s+)+",
+        "",
+        reason_text,
+        flags=re.IGNORECASE,
+    )
+    reason_text = re.sub(
+        r"^\s*(?:for|because|porque|since|due\s+to|devido\s+a|as|from|of|por|durante|"
+        r"reason(?:\s+is)?)\s*:?[\s-]*",
+        "",
+        reason_text,
+        flags=re.IGNORECASE,
+    )
+    reason_text = re.sub(r"\s+", " ", reason_text).strip(" .,!?:;-\t\r\n")
+
+    amount = None
+    if action == "purge":
+        amount_match = re.search(r"\b(\d+)\b", tail_without_mentions)
+        if amount_match is not None:
+            amount = int(amount_match.group(1))
+
+    return {
+        "action": action,
+        "language": _detect_natural_language(content),
+        "target_id": target_ids[0] if len(target_ids) == 1 else None,
+        "target_ids": target_ids,
+        "minutes": minutes,
+        "duration_seconds": duration_seconds,
+        "duration_text": duration_text,
+        "amount": amount,
+        "delete_days": delete_days,
+        "reason": reason_text or DEFAULT_REASON,
+    }
+
+
+def _detect_natural_language(content: str) -> str:
+    """Return the response language for a mention-based request."""
+    text = content or ""
+    return "pt" if PORTUGUESE_LANGUAGE_PATTERN.search(text) or PORTUGUESE_ARTICLE_PATTERN.search(text) else "en"
+
+
+def _remove_matches(value: str, spans: list[tuple[int, int]]) -> str:
+    for start, end in sorted(spans, reverse=True):
+        value = f"{value[:start]} {value[end:]}"
+    return value
+
+
+def _format_duration_label(amount: int, unit: str) -> str:
+    if unit.startswith("seg"):
+        label = "segundo" if amount == 1 else "segundos"
+    elif unit.startswith("min"):
+        label = "minuto" if amount == 1 else "minutos"
+    elif unit.startswith("hora"):
+        label = "hora" if amount == 1 else "horas"
+    elif unit.startswith("dia"):
+        label = "dia" if amount == 1 else "dias"
+    elif unit.startswith("second") or unit.startswith("sec") or unit == "s":
+        label = "second" if amount == 1 else "seconds"
+    elif unit.startswith("hour") or unit.startswith("hr") or unit == "h":
+        label = "hour" if amount == 1 else "hours"
+    elif unit.startswith("day") or unit == "d":
+        label = "day" if amount == 1 else "days"
+    else:
+        label = "minute" if amount == 1 else "minutes"
+    return f"{amount} {label}"
+
 
 class ConfirmActionView(discord.ui.View):
-    def __init__(self, author_id: int, action_text: str, reason: str, moderator_name: str, thumbnail_url: str):
+    def __init__(
+        self,
+        author_id: int,
+        action_text: str,
+        reason: str,
+        moderator_name: str,
+        thumbnail_url: str,
+        language: str = "en",
+    ):
         super().__init__(timeout=30)
         self.author_id = author_id
         self.action_text = action_text
         self.reason = reason or DEFAULT_REASON
         self.moderator_name = moderator_name
         self.thumbnail_url = thumbnail_url
+        self.language = language
         self.value: bool | None = None
         self.message: discord.Message | None = None
+        if self.language == "pt":
+            for child in self.children:
+                if getattr(child, "label", None) == "Confirm":
+                    child.label = "Confirmar"
+                elif getattr(child, "label", None) == "Cancel":
+                    child.label = "Cancelar"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.author_id:
             return True
-        await interaction.response.send_message("Only the moderator who ran this command can use this prompt.", ephemeral=True)
+        message = (
+            "Somente o moderador que executou este comando pode usar esta confirmação."
+            if self.language == "pt"
+            else "Only the moderator who ran this command can use this prompt."
+        )
+        await interaction.response.send_message(message, ephemeral=True)
         return False
 
     @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
@@ -69,6 +359,21 @@ class ConfirmActionView(discord.ui.View):
             child.disabled = True
 
     def prompt_embed(self) -> discord.Embed:
+        if self.language == "pt":
+            embed = discord.Embed(
+                title="Última confirmação",
+                description="Esta ação de moderação está prestes a ser executada. Confira uma última vez.",
+                color=discord.Color.red(),
+            )
+            embed.add_field(name="Ação", value=self._embed_value(self.action_text), inline=False)
+            embed.add_field(name="Motivo", value=self._embed_value(self.reason), inline=False)
+            embed.add_field(name="Moderador", value=self.moderator_name, inline=True)
+            embed.add_field(name="Expira em", value="30 segundos", inline=True)
+            embed.set_footer(text="Confirmar executa a ação. Cancelar não altera nada.")
+            if self.thumbnail_url:
+                embed.set_thumbnail(url=self.thumbnail_url)
+            return embed
+
         embed = discord.Embed(
             title="Last Check",
             description="This moderation action is about to go through. Give it one clean look first.",
@@ -84,6 +389,29 @@ class ConfirmActionView(discord.ui.View):
         return embed
 
     def _result_embed(self, status: str, color: discord.Color) -> discord.Embed:
+        if self.language == "pt":
+            descriptions = {
+                "Confirmed": "Tudo certo. A ação está sendo executada.",
+                "Cancelled": "Cancelado. Nada foi alterado.",
+                "Expired": "Sem confirmação, sem ação. O pedido expirou.",
+            }
+            translated_status = {
+                "Confirmed": "confirmada",
+                "Cancelled": "cancelada",
+                "Expired": "expirada",
+            }.get(status, status)
+            embed = discord.Embed(
+                title=f"Ação de moderação {translated_status}",
+                description=descriptions.get(status, ""),
+                color=color,
+            )
+            embed.add_field(name="Ação", value=self._embed_value(self.action_text), inline=False)
+            embed.add_field(name="Motivo", value=self._embed_value(self.reason), inline=False)
+            embed.add_field(name="Moderador", value=self.moderator_name, inline=True)
+            if self.thumbnail_url:
+                embed.set_thumbnail(url=self.thumbnail_url)
+            return embed
+
         descriptions = {
             "Confirmed": "Locked in. The action is being carried out.",
             "Cancelled": "Called off. Nothing was changed.",
@@ -118,6 +446,7 @@ class AdminHelper(commands.Cog):
             log_channel_id=None,
             dm_users=True,
             name_tracking_enabled=True,
+            natural_language_enabled=True,
             softban_delete_message_days=1,
             ban_delete_message_days=0,
             next_case_id=1,
@@ -133,6 +462,10 @@ class AdminHelper(commands.Cog):
             warnings=[],
             previous_nicknames=[],
         )
+        for method_name in set(NATURAL_COMMAND_METHODS.values()):
+            command = getattr(type(self), method_name, None)
+            if command is not None:
+                command.on_error = type(self)._natural_command_error
 
     @commands.group(name="adminhelper", aliases=["ah"], invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
@@ -146,6 +479,11 @@ class AdminHelper(commands.Cog):
         embed.add_field(name="Log channel", value=log_channel.mention if log_channel else "Not set", inline=True)
         embed.add_field(name="DM users", value="Yes" if settings["dm_users"] else "No", inline=True)
         embed.add_field(name="Name tracking", value="Yes" if settings["name_tracking_enabled"] else "No", inline=True)
+        embed.add_field(
+            name="Natural-language mentions",
+            value="Enabled" if settings["natural_language_enabled"] else "Disabled",
+            inline=True,
+        )
         embed.add_field(name="Ban cleanup", value=f"{settings['ban_delete_message_days']} day(s)", inline=True)
         embed.add_field(name="Softban cleanup", value=f"{settings['softban_delete_message_days']} day(s)", inline=True)
         warn_punishment_count = len(settings.get("warning_punishments", []))
@@ -166,6 +504,7 @@ class AdminHelper(commands.Cog):
     async def adminhelper_modcommands(self, ctx: commands.Context):
         """Post a moderator-facing command reference."""
         prefix = await self._prefix(ctx)
+        bot_mention = ctx.guild.me.mention if ctx.guild.me is not None else "@bot"
         embed = discord.Embed(
             title="Moderator Commands",
             description="Quick reference for day-to-day moderation actions.",
@@ -180,6 +519,19 @@ class AdminHelper(commands.Cog):
                 f"`{prefix}ban @user [0-7 days] <reason>` - ban with optional message cleanup override\n"
                 f"`{prefix}softban @user <reason>` - ban/unban to clean recent messages\n"
                 f"`{prefix}unban <user id/name> <reason>` - unban a user"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Natural-language mentions",
+            value=(
+                f"`{bot_mention} ban @user [reason]`\n"
+                f"`{bot_mention} kick @user [reason]`\n"
+                f"`{bot_mention} timeout @user 10 minutes [reason]`\n"
+                f"`{bot_mention} mute o @user por 10 segundos`\n"
+                f"`{bot_mention} warn @user [reason]`\n"
+                "English and common Portuguese forms are accepted; you can also say `please`, `because`, `por`, or `for`. These requests use the same checks and confirmation prompts.\n"
+                f"Toggle with `{prefix}ah natural on|off`."
             ),
             inline=False,
         )
@@ -223,6 +575,18 @@ class AdminHelper(commands.Cog):
         """Enable or disable DM notices to moderated users."""
         await self.config.guild(ctx.guild).dm_users.set(enabled)
         await ctx.send(f"User DM notices {'enabled' if enabled else 'disabled'}.")
+
+    @adminhelper.command(name="natural", aliases=["natural-language", "nl"])
+    @commands.admin_or_permissions(manage_guild=True)
+    @commands.guild_only()
+    async def adminhelper_natural(self, ctx: commands.Context, enabled: bool | None = None):
+        """View or toggle mention-based natural-language moderation."""
+        setting = self.config.guild(ctx.guild).natural_language_enabled
+        if enabled is None:
+            await ctx.send(f"Natural-language moderation is {'enabled' if await setting() else 'disabled'}.")
+            return
+        await setting.set(enabled)
+        await ctx.send(f"Natural-language moderation {'enabled' if enabled else 'disabled'}.")
 
     @adminhelper.command(name="nametracking")
     @commands.admin_or_permissions(manage_guild=True)
@@ -270,16 +634,28 @@ class AdminHelper(commands.Cog):
     async def purge_messages(self, ctx: commands.Context, amount: int, member: discord.Member | None = None):
         """Delete recent messages from this channel. Optionally limit cleanup to one member."""
         if amount < 1 or amount > 200:
-            await ctx.send("Purge amount must be between 1 and 200.")
+            await self._send_moderation_response(
+                ctx,
+                "Purge amount must be between 1 and 200.",
+                "A quantidade deve estar entre 1 e 200.",
+            )
             return
 
         purge = getattr(ctx.channel, "purge", None)
         if purge is None:
-            await ctx.send("This channel does not support message purging.")
+            await self._send_moderation_response(
+                ctx,
+                "This channel does not support message purging.",
+                "Este canal não permite apagar mensagens.",
+            )
             return
 
         if ctx.guild.me is None or not ctx.guild.me.guild_permissions.manage_messages:
-            await ctx.send("Unable to purge: I am missing the `manage_messages` permission.")
+            await self._send_moderation_response(
+                ctx,
+                "Unable to purge: I am missing the `manage_messages` permission.",
+                "Não foi possível limpar: estou sem a permissão `manage_messages`.",
+            )
             return
 
         channel_text = getattr(ctx.channel, "mention", str(ctx.channel))
@@ -313,7 +689,11 @@ class AdminHelper(commands.Cog):
                 reason=self._audit_reason(ctx.author, "Manual message purge"),
             )
         except (discord.Forbidden, discord.HTTPException):
-            await ctx.send("Unable to purge messages in this channel.")
+            await self._send_moderation_response(
+                ctx,
+                "Unable to purge messages in this channel.",
+                "Não foi possível limpar as mensagens neste canal.",
+            )
             return
 
         try:
@@ -323,7 +703,13 @@ class AdminHelper(commands.Cog):
 
         await self._log_purge(ctx.guild, ctx.author, ctx.channel, len(deleted), member)
         scope = f" from {member.mention}" if member is not None else ""
-        await ctx.send(f"Purged {len(deleted)} message(s){scope}.", delete_after=10)
+        portuguese_scope = f" de {member.mention}" if member is not None else ""
+        await self._send_moderation_response(
+            ctx,
+            f"Purged {len(deleted)} message(s){scope}.",
+            f"{len(deleted)} mensagem(ns) apagada(s){portuguese_scope}.",
+            delete_after=10,
+        )
 
     @commands.command(name="userinfo", aliases=["ui", "whois"])
     @commands.admin_or_permissions(manage_messages=True)
@@ -331,12 +717,18 @@ class AdminHelper(commands.Cog):
     async def userinfo_member(self, ctx: commands.Context, member: discord.Member = None):
         """Show account, server, and moderation stats for a member."""
         member = member or ctx.author
+        await self._maybe_set_natural_context(ctx)
+        portuguese = self._natural_language(ctx) == "pt"
         warnings = await self.config.member(member).warnings()
         antiabuse_warnings = await self._antiabuse_warning_count(member)
         timeout_until = getattr(member, "communication_disabled_until", None)
         timeout_text = None
         if timeout_until and timeout_until.timestamp() > datetime.now(timezone.utc).timestamp():
-            timeout_text = f"Timed out until {self._format_profile_timestamp(timeout_until)}"
+            timeout_text = (
+                f"Silenciado até {self._format_profile_timestamp(timeout_until)}"
+                if portuguese
+                else f"Timed out until {self._format_profile_timestamp(timeout_until)}"
+            )
 
         roles = [role for role in member.roles if role != ctx.guild.default_role]
         sorted_roles = sorted(roles, key=lambda role: role.position, reverse=True)
@@ -347,6 +739,13 @@ class AdminHelper(commands.Cog):
 
         status_icon = self._status_icon(member.status)
         status_text = self._status_text(member)
+        if portuguese:
+            status_text = {
+                "offline": "Descansando no modo offline",
+                "online": "Online",
+                "idle": "Ausente",
+                "dnd": "Não perturbe",
+            }.get(str(member.status), status_text)
         name_tracking_enabled = await self.config.guild(ctx.guild).name_tracking_enabled()
         user_history = await self.config.user(member).all()
         member_history = await self.config.member(member).all()
@@ -354,9 +753,9 @@ class AdminHelper(commands.Cog):
             f"{status_icon} **{member.display_name}**",
             status_text,
             "",
-            "**Joined Discord on**",
+            "**Entrou no Discord em**" if portuguese else "**Joined Discord on**",
             self._format_profile_timestamp(member.created_at),
-            "**Joined this server on**",
+            "**Entrou neste servidor em**" if portuguese else "**Joined this server on**",
             self._format_profile_timestamp(member.joined_at),
         ]
 
@@ -367,33 +766,66 @@ class AdminHelper(commands.Cog):
             embed.set_thumbnail(url=avatar_url)
         else:
             embed.set_author(name=str(member))
-        embed.add_field(name="User", value=f"{member.mention}\n`{member.id}`", inline=True)
         embed.add_field(
-            name="Flags",
+            name="Usuário" if portuguese else "User",
+            value=f"{member.mention}\n`{member.id}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Sinalizadores" if portuguese else "Flags",
             value=(
-                f"Bot: {'Yes' if member.bot else 'No'}\n"
-                f"Admin: {'Yes' if member.guild_permissions.administrator else 'No'}"
+                f"Bot: {'Sim' if member.bot else 'Não'}\n"
+                f"Admin: {'Sim' if member.guild_permissions.administrator else 'Não'}"
+                if portuguese
+                else (
+                    f"Bot: {'Yes' if member.bot else 'No'}\n"
+                    f"Admin: {'Yes' if member.guild_permissions.administrator else 'No'}"
+                )
             ),
             inline=True,
         )
-        embed.add_field(name="Boosting since", value=self._format_timestamp(member.premium_since), inline=True)
         embed.add_field(
-            name="Moderation",
+            name="Impulsionando desde" if portuguese else "Boosting since",
+            value=self._format_timestamp(member.premium_since),
+            inline=True,
+        )
+        embed.add_field(
+            name="Moderação" if portuguese else "Moderation",
             value=(
-                f"Timed out: {timeout_text or 'No'}\n"
-                f"Warnings: {len(warnings)} manual\n"
-                f"AutoMod strikes: {antiabuse_warnings}"
+                f"Silenciado: {timeout_text or 'Não'}\n"
+                f"Avisos: {len(warnings)} manual(is)\n"
+                f"Infrações do AutoMod: {antiabuse_warnings}"
+                if portuguese
+                else (
+                    f"Timed out: {timeout_text or 'No'}\n"
+                    f"Warnings: {len(warnings)} manual\n"
+                    f"AutoMod strikes: {antiabuse_warnings}"
+                )
             ),
             inline=False,
         )
-        embed.add_field(name=f"Roles ({len(roles)})", value=displayed_roles[:1024], inline=False)
         embed.add_field(
-            name="Name history",
-            value=self._format_name_history(user_history, member_history, name_tracking_enabled),
+            name=f"Cargos ({len(roles)})" if portuguese else f"Roles ({len(roles)})",
+            value=displayed_roles[:1024],
+            inline=False,
+        )
+        embed.add_field(
+            name="Histórico de nomes" if portuguese else "Name history",
+            value=(
+                self._format_name_history_portuguese(user_history, member_history, name_tracking_enabled)
+                if portuguese
+                else self._format_name_history(user_history, member_history, name_tracking_enabled)
+            ),
             inline=False,
         )
         member_number = self._member_number(ctx.guild, member)
-        embed.set_footer(text=f"Member #{member_number} | User ID: {member.id}")
+        embed.set_footer(
+            text=(
+                f"Membro nº {member_number} | ID do usuário: {member.id}"
+                if portuguese
+                else f"Member #{member_number} | User ID: {member.id}"
+            )
+        )
         await ctx.send(embed=embed)
 
     @commands.command(name="timeout", aliases=["to", "mute"])
@@ -408,26 +840,95 @@ class AdminHelper(commands.Cog):
         reason: str = DEFAULT_REASON,
     ):
         """Timeout a member for a number of minutes."""
+        bot_user = self.bot.user
+        message = getattr(ctx, "message", None)
+        if bot_user is not None and message is not None and message.guild is not None:
+            natural_request = parse_natural_moderation_request(message.content, bot_user.id)
+            if (
+                natural_request is not None
+                and natural_request["action"] == "timeout"
+                and natural_request["target_id"] == member.id
+                and natural_request["duration_seconds"] is not None
+                and await self.config.guild(message.guild).natural_language_enabled()
+            ):
+                self._set_natural_context(ctx, natural_request)
+                await self._apply_timeout(
+                    ctx,
+                    member,
+                    timedelta(seconds=natural_request["duration_seconds"]),
+                    natural_request["duration_text"] or f"{natural_request['minutes']} minute(s)",
+                    natural_request["reason"],
+                )
+                return
+
         if minutes <= 0:
-            await ctx.send("Timeout duration must be greater than 0.")
+            await self._send_moderation_response(
+                ctx,
+                "Timeout duration must be greater than 0.",
+                "A duração do silêncio deve ser maior que 0.",
+            )
             return
-        allowed, failure = await self._can_moderate_member(ctx.guild, member, "timeout", actor=ctx.author)
-        if not allowed:
-            await ctx.send(f"Unable to timeout {member.mention}: {failure}")
+        await self._apply_timeout(
+            ctx,
+            member,
+            timedelta(minutes=minutes),
+            f"{minutes} minute(s)",
+            reason,
+        )
+
+    async def _apply_timeout(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+        duration: timedelta,
+        duration_text: str,
+        reason: str,
+    ):
+        """Apply a timeout after the command-level permission check has run."""
+        if duration.total_seconds() <= 0:
+            await self._send_moderation_response(
+                ctx,
+                "Timeout duration must be greater than 0.",
+                "A duração do silêncio deve ser maior que 0.",
+            )
             return
 
-        until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+        allowed, failure = await self._can_moderate_member(ctx.guild, member, "timeout", actor=ctx.author)
+        if not allowed:
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to timeout {member.mention}: {failure}",
+                f"Não foi possível silenciar {member.mention}: {self._natural_failure(failure)}",
+            )
+            return
+
+        until = datetime.now(timezone.utc) + duration
         audit_reason = self._audit_reason(ctx.author, reason)
         try:
             await member.edit(communication_disabled_until=until, reason=audit_reason)
         except (discord.Forbidden, discord.HTTPException):
-            await ctx.send(f"Unable to timeout {member.mention}.")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to timeout {member.mention}.",
+                f"Não foi possível silenciar {member.mention}.",
+            )
             return
 
-        await self._maybe_dm(member, ctx.guild, "timeout", reason, duration=f"{minutes} minute(s)")
-        case_id = await self._create_case(ctx.guild, ctx.author, member, "Timeout", reason, duration=f"{minutes} minute(s)")
-        await self._log_action(ctx.guild, ctx.author, member, "Timeout", reason, duration=f"{minutes} minute(s)", case_id=case_id)
-        await ctx.send(f"{member.mention} has been timed out for {minutes} minute(s).")
+        await self._maybe_dm(
+            member,
+            ctx.guild,
+            "timeout",
+            reason,
+            duration=duration_text,
+            language=self._natural_language(ctx),
+        )
+        case_id = await self._create_case(ctx.guild, ctx.author, member, "Timeout", reason, duration=duration_text)
+        await self._log_action(ctx.guild, ctx.author, member, "Timeout", reason, duration=duration_text, case_id=case_id)
+        await self._send_moderation_response(
+            ctx,
+            f"{member.mention} has been timed out for {duration_text}.",
+            f"{member.mention} ficou em silêncio por {duration_text}.",
+        )
 
     @commands.command(name="untimeout", aliases=["unmute"])
     @commands.admin_or_permissions(moderate_members=True)
@@ -442,18 +943,30 @@ class AdminHelper(commands.Cog):
         """Remove a member timeout."""
         allowed, failure = await self._can_moderate_member(ctx.guild, member, "timeout", actor=ctx.author)
         if not allowed:
-            await ctx.send(f"Unable to remove timeout from {member.mention}: {failure}")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to remove timeout from {member.mention}: {failure}",
+                f"Não foi possível remover o silêncio de {member.mention}: {self._natural_failure(failure)}",
+            )
             return
 
         try:
             await member.edit(communication_disabled_until=None, reason=self._audit_reason(ctx.author, reason))
         except (discord.Forbidden, discord.HTTPException):
-            await ctx.send(f"Unable to remove timeout from {member.mention}.")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to remove timeout from {member.mention}.",
+                f"Não foi possível remover o silêncio de {member.mention}.",
+            )
             return
 
         case_id = await self._create_case(ctx.guild, ctx.author, member, "Untimeout", reason)
         await self._log_action(ctx.guild, ctx.author, member, "Untimeout", reason, case_id=case_id)
-        await ctx.send(f"Timeout removed from {member.mention}.")
+        await self._send_moderation_response(
+            ctx,
+            f"Timeout removed from {member.mention}.",
+            f"O silêncio de {member.mention} foi removido.",
+        )
 
     @commands.command(name="kick")
     @commands.admin_or_permissions(kick_members=True)
@@ -462,21 +975,33 @@ class AdminHelper(commands.Cog):
         """Kick a member."""
         allowed, failure = await self._can_moderate_member(ctx.guild, member, "kick", actor=ctx.author)
         if not allowed:
-            await ctx.send(f"Unable to kick {member.mention}: {failure}")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to kick {member.mention}: {failure}",
+                f"Não foi possível expulsar {member.mention}: {self._natural_failure(failure)}",
+            )
             return
         if not await self._confirm_action(ctx, f"kick {member.mention}", reason=reason, target=member):
             return
 
-        await self._maybe_dm(member, ctx.guild, "kick", reason)
+        await self._maybe_dm(member, ctx.guild, "kick", reason, language=self._natural_language(ctx))
         try:
             await member.kick(reason=self._audit_reason(ctx.author, reason))
         except (discord.Forbidden, discord.HTTPException):
-            await ctx.send(f"Unable to kick {member.mention}.")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to kick {member.mention}.",
+                f"Não foi possível expulsar {member.mention}.",
+            )
             return
 
         case_id = await self._create_case(ctx.guild, ctx.author, member, "Kick", reason)
         await self._log_action(ctx.guild, ctx.author, member, "Kick", reason, case_id=case_id)
-        await ctx.send(f"{member.mention} has been kicked.")
+        await self._send_moderation_response(
+            ctx,
+            f"{member.mention} has been kicked.",
+            f"{member.mention} foi expulso.",
+        )
 
     @commands.command(name="ban")
     @commands.admin_or_permissions(ban_members=True)
@@ -485,13 +1010,21 @@ class AdminHelper(commands.Cog):
         """Ban a member. Optionally start the reason with 0-7 delete days."""
         allowed, failure = await self._can_moderate_member(ctx.guild, member, "ban", actor=ctx.author)
         if not allowed:
-            await ctx.send(f"Unable to ban {member.mention}: {failure}")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to ban {member.mention}: {failure}",
+                f"Não foi possível banir {member.mention}: {self._natural_failure(failure)}",
+            )
             return
 
         default_delete_days = await self.config.guild(ctx.guild).ban_delete_message_days()
         parsed = self._parse_delete_days_reason(reason, default_delete_days)
         if isinstance(parsed, str):
-            await ctx.send(parsed)
+            await self._send_moderation_response(
+                ctx,
+                parsed,
+                "Os dias de exclusão das mensagens devem estar entre 0 e 7.",
+            )
             return
         delete_days, reason = parsed
         if not await self._confirm_action(
@@ -501,17 +1034,25 @@ class AdminHelper(commands.Cog):
             target=member,
         ):
             return
-        await self._maybe_dm(member, ctx.guild, "ban", reason)
+        await self._maybe_dm(member, ctx.guild, "ban", reason, language=self._natural_language(ctx))
         try:
             await member.ban(delete_message_days=delete_days, reason=self._audit_reason(ctx.author, reason))
         except (discord.Forbidden, discord.HTTPException):
-            await ctx.send(f"Unable to ban {member.mention}.")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to ban {member.mention}.",
+                f"Não foi possível banir {member.mention}.",
+            )
             return
 
         extra = f"Deleted {delete_days} day(s) of messages"
         case_id = await self._create_case(ctx.guild, ctx.author, member, "Ban", reason, extra=extra)
         await self._log_action(ctx.guild, ctx.author, member, "Ban", reason, extra=extra, case_id=case_id)
-        await ctx.send(f"{member.mention} has been banned.")
+        await self._send_moderation_response(
+            ctx,
+            f"{member.mention} has been banned.",
+            f"{member.mention} foi banido.",
+        )
 
     @commands.command(name="hackban", aliases=["forceban"])
     @commands.admin_or_permissions(ban_members=True)
@@ -522,16 +1063,28 @@ class AdminHelper(commands.Cog):
         if member is not None:
             allowed, failure = await self._can_moderate_member(ctx.guild, member, "ban", actor=ctx.author)
             if not allowed:
-                await ctx.send(f"Unable to ban {member.mention}: {failure}")
+                await self._send_moderation_response(
+                    ctx,
+                    f"Unable to ban {member.mention}: {failure}",
+                    f"Não foi possível banir {member.mention}: {self._natural_failure(failure)}",
+                )
                 return
         elif ctx.guild.me is None or not ctx.guild.me.guild_permissions.ban_members:
-            await ctx.send("Unable to ban: I am missing the `ban_members` permission.")
+            await self._send_moderation_response(
+                ctx,
+                "Unable to ban: I am missing the `ban_members` permission.",
+                "Não foi possível banir: estou sem a permissão `ban_members`.",
+            )
             return
 
         default_delete_days = await self.config.guild(ctx.guild).ban_delete_message_days()
         parsed = self._parse_delete_days_reason(reason, default_delete_days)
         if isinstance(parsed, str):
-            await ctx.send(parsed)
+            await self._send_moderation_response(
+                ctx,
+                parsed,
+                "Os dias de exclusão das mensagens devem estar entre 0 e 7.",
+            )
             return
         delete_days, reason = parsed
         if not await self._confirm_action(
@@ -544,13 +1097,21 @@ class AdminHelper(commands.Cog):
         try:
             await ctx.guild.ban(user, delete_message_days=delete_days, reason=self._audit_reason(ctx.author, reason))
         except (discord.Forbidden, discord.HTTPException):
-            await ctx.send(f"Unable to ban {user}.")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to ban {user}.",
+                f"Não foi possível banir {user}.",
+            )
             return
 
         extra = f"Deleted {delete_days} day(s) of messages"
         case_id = await self._create_case(ctx.guild, ctx.author, user, "Hackban", reason, extra=extra)
         await self._log_action(ctx.guild, ctx.author, user, "Hackban", reason, extra=extra, case_id=case_id)
-        await ctx.send(f"{user} has been banned.")
+        await self._send_moderation_response(
+            ctx,
+            f"{user} has been banned.",
+            f"{user} foi banido.",
+        )
 
     @commands.command(name="unban")
     @commands.admin_or_permissions(ban_members=True)
@@ -558,17 +1119,29 @@ class AdminHelper(commands.Cog):
     async def unban_user(self, ctx: commands.Context, user: discord.User, *, reason: str = DEFAULT_REASON):
         """Unban a user."""
         if ctx.guild.me is None or not ctx.guild.me.guild_permissions.ban_members:
-            await ctx.send("Unable to unban: I am missing the `ban_members` permission.")
+            await self._send_moderation_response(
+                ctx,
+                "Unable to unban: I am missing the `ban_members` permission.",
+                "Não foi possível desbanir: estou sem a permissão `ban_members`.",
+            )
             return
         try:
             await ctx.guild.unban(user, reason=self._audit_reason(ctx.author, reason))
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            await ctx.send(f"Unable to unban {user}.")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to unban {user}.",
+                f"Não foi possível desbanir {user}.",
+            )
             return
 
         case_id = await self._create_case(ctx.guild, ctx.author, user, "Unban", reason)
         await self._log_action(ctx.guild, ctx.author, user, "Unban", reason, case_id=case_id)
-        await ctx.send(f"{user} has been unbanned.")
+        await self._send_moderation_response(
+            ctx,
+            f"{user} has been unbanned.",
+            f"{user} foi desbanido.",
+        )
 
     @commands.command(name="softban")
     @commands.admin_or_permissions(ban_members=True)
@@ -577,7 +1150,11 @@ class AdminHelper(commands.Cog):
         """Ban then immediately unban a member to clean recent messages."""
         allowed, failure = await self._can_moderate_member(ctx.guild, member, "ban", actor=ctx.author)
         if not allowed:
-            await ctx.send(f"Unable to softban {member.mention}: {failure}")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to softban {member.mention}: {failure}",
+                f"Não foi possível aplicar softban em {member.mention}: {self._natural_failure(failure)}",
+            )
             return
 
         delete_days = await self.config.guild(ctx.guild).softban_delete_message_days()
@@ -589,27 +1166,47 @@ class AdminHelper(commands.Cog):
         ):
             return
         audit_reason = self._audit_reason(ctx.author, f"Softban: {reason}")
-        await self._maybe_dm(member, ctx.guild, "softban", reason, extra=f"Deleted {delete_days} day(s) of messages")
+        await self._maybe_dm(
+            member,
+            ctx.guild,
+            "softban",
+            reason,
+            extra=f"Deleted {delete_days} day(s) of messages",
+            language=self._natural_language(ctx),
+        )
         try:
             await member.ban(delete_message_days=delete_days, reason=audit_reason)
             await ctx.guild.unban(member, reason=audit_reason)
         except (discord.Forbidden, discord.HTTPException):
-            await ctx.send(f"Unable to softban {member.mention}.")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to softban {member.mention}.",
+                f"Não foi possível aplicar softban em {member.mention}.",
+            )
             return
 
         extra = f"Deleted {delete_days} day(s) of messages"
         case_id = await self._create_case(ctx.guild, ctx.author, member, "Softban", reason, extra=extra)
         await self._log_action(ctx.guild, ctx.author, member, "Softban", reason, extra=extra, case_id=case_id)
-        await ctx.send(f"{member.mention} has been softbanned.")
+        await self._send_moderation_response(
+            ctx,
+            f"{member.mention} has been softbanned.",
+            f"Softban aplicado em {member.mention}.",
+        )
 
     @commands.command(name="warn")
     @commands.admin_or_permissions(manage_messages=True)
     @commands.guild_only()
     async def warn_member(self, ctx: commands.Context, member: discord.Member, *, reason: str = DEFAULT_REASON):
         """Warn a member and store the warning."""
+        await self._maybe_set_natural_context(ctx)
         allowed, failure = await self._can_moderate_member(ctx.guild, member, "warn", actor=ctx.author)
         if not allowed:
-            await ctx.send(f"Unable to warn {member.mention}: {failure}")
+            await self._send_moderation_response(
+                ctx,
+                f"Unable to warn {member.mention}: {failure}",
+                f"Não foi possível avisar {member.mention}: {self._natural_failure(failure)}",
+            )
             return
 
         current_warnings = await self.config.member(member).warnings()
@@ -637,44 +1234,78 @@ class AdminHelper(commands.Cog):
             warnings.append(warning)
             count = len(warnings)
 
-        await self._maybe_dm(member, ctx.guild, "warn", reason)
+        await self._maybe_dm(member, ctx.guild, "warn", reason, language=self._natural_language(ctx))
         await self._log_action(ctx.guild, ctx.author, member, "Warn", reason, extra=f"Warning #{count}", case_id=case_id)
-        await ctx.send(f"{member.mention} has been warned. This is warning #{count}.")
+        await self._send_moderation_response(
+            ctx,
+            f"{member.mention} has been warned. This is warning #{count}.",
+            f"{member.mention} recebeu um aviso. Este é o aviso nº {count}.",
+        )
         if triggered_punishments:
             results = await self._apply_warning_punishments(ctx, member, count, triggered_punishments)
             if results:
-                await ctx.send("\n".join(results))
+                await self._send_moderation_response(
+                    ctx,
+                    "\n".join(results),
+                    "\n".join(self._translate_warning_result(result) for result in results),
+                )
 
     @commands.command(name="warnings")
     @commands.admin_or_permissions(manage_messages=True)
     @commands.guild_only()
     async def warnings_member(self, ctx: commands.Context, member: discord.Member):
         """Show stored warnings for a member."""
+        await self._maybe_set_natural_context(ctx)
         warnings = await self.config.member(member).warnings()
         antiabuse_warnings = await self._antiabuse_warning_count(member)
         if not warnings:
             if antiabuse_warnings:
-                await ctx.send(
+                await self._send_moderation_response(
+                    ctx,
                     f"{member.mention} has no manual AdminHelper warnings.\n"
-                    f"AutoMod strikes: {antiabuse_warnings}."
+                    f"AutoMod strikes: {antiabuse_warnings}.",
+                    f"{member.mention} não tem avisos manuais do AdminHelper.\n"
+                    f"Infrações do AutoMod: {antiabuse_warnings}.",
                 )
                 return
-            await ctx.send(f"{member.mention} has no manual AdminHelper warnings or AutoMod strikes.")
+            await self._send_moderation_response(
+                ctx,
+                f"{member.mention} has no manual AdminHelper warnings or AutoMod strikes.",
+                f"{member.mention} não tem avisos manuais do AdminHelper nem infrações do AutoMod.",
+            )
             return
 
         lines = []
+        portuguese_lines = []
         for idx, warning in enumerate(warnings, start=1):
             moderator = ctx.guild.get_member(warning.get("moderator_id"))
             moderator_text = moderator.mention if moderator else str(warning.get("moderator_id", "unknown"))
             created_at = warning.get("created_at", 0)
             timestamp = f"<t:{created_at}:R>" if created_at else "unknown time"
-            lines.append(f"`#{idx}` {timestamp} by {moderator_text}: {warning.get('reason', DEFAULT_REASON)}")
+            warning_reason = warning.get("reason", DEFAULT_REASON)
+            lines.append(f"`#{idx}` {timestamp} by {moderator_text}: {warning_reason}")
+            portuguese_timestamp = f"<t:{created_at}:R>" if created_at else "horário desconhecido"
+            portuguese_lines.append(
+                f"`#{idx}` {portuguese_timestamp} por {moderator_text}: {warning_reason}"
+            )
+
+        portuguese = self._natural_language(ctx) == "pt"
+        header = (
+            f"Avisos manuais para {member.mention} ({len(warnings)} no total):"
+            if portuguese
+            else f"Manual warnings for {member.mention} ({len(warnings)} total):"
+        )
+        footer = (
+            f"Infrações do AutoMod: {antiabuse_warnings}."
+            if portuguese
+            else f"AutoMod strikes: {antiabuse_warnings}."
+        )
 
         await self._send_chunked_lines(
             ctx,
-            f"Manual warnings for {member.mention} ({len(warnings)} total):",
-            lines,
-            footer=f"AutoMod strikes: {antiabuse_warnings}.",
+            header,
+            portuguese_lines if portuguese else lines,
+            footer=footer,
         )
 
     @commands.command(name="clearwarnings", aliases=["clearwarns"])
@@ -685,7 +1316,11 @@ class AdminHelper(commands.Cog):
         previous_manual = len(await self.config.member(member).warnings())
         previous_automod = await self._antiabuse_warning_count(member)
         if not previous_manual and not previous_automod:
-            await ctx.send(f"{member.mention} has no manual AdminHelper warnings or AutoMod strikes.")
+            await self._send_moderation_response(
+                ctx,
+                f"{member.mention} has no manual AdminHelper warnings or AutoMod strikes.",
+                f"{member.mention} não tem avisos manuais do AdminHelper nem infrações do AutoMod.",
+            )
             return
 
         if not await self._confirm_action(
@@ -703,9 +1338,12 @@ class AdminHelper(commands.Cog):
         extra = f"Cleared {previous_manual} manual warning(s) and {previous_automod} AutoMod strike(s)"
         case_id = await self._create_case(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=extra)
         await self._log_action(ctx.guild, ctx.author, member, "Clear Warnings", reason, extra=extra, case_id=case_id)
-        await ctx.send(
+        await self._send_moderation_response(
+            ctx,
             f"Cleared {previous_manual} manual warning(s) and "
-            f"{previous_automod} AutoMod strike(s) for {member.mention}."
+            f"{previous_automod} AutoMod strike(s) for {member.mention}.",
+            f"Foram limpos {previous_manual} aviso(s) manual(is) e "
+            f"{previous_automod} infração(ões) do AutoMod de {member.mention}.",
         )
 
     @adminhelper.command(name="case")
@@ -724,13 +1362,27 @@ class AdminHelper(commands.Cog):
     @commands.guild_only()
     async def cases_member(self, ctx: commands.Context, member: discord.Member):
         """Show recent cases for a member."""
+        await self._maybe_set_natural_context(ctx)
         cases = await self.config.guild(ctx.guild).cases()
         matches = [case for case in cases if case.get("target_id") == member.id]
         if not matches:
-            await ctx.send(f"No cases found for {member.mention}.")
+            await self._send_moderation_response(
+                ctx,
+                f"No cases found for {member.mention}.",
+                f"Nenhum caso foi encontrado para {member.mention}.",
+            )
             return
-        lines = [self._format_case_line(case) for case in matches[-10:]]
-        await ctx.send(f"Recent cases for {member.mention} ({len(matches)} total):\n" + "\n".join(lines))
+        portuguese = self._natural_language(ctx) == "pt"
+        lines = [
+            self._format_case_line_portuguese(case) if portuguese else self._format_case_line(case)
+            for case in matches[-10:]
+        ]
+        header = (
+            f"Casos recentes de {member.mention} ({len(matches)} no total):"
+            if portuguese
+            else f"Recent cases for {member.mention} ({len(matches)} total):"
+        )
+        await ctx.send(header + "\n" + "\n".join(lines))
 
     @adminhelper.command(name="reason")
     @commands.admin_or_permissions(manage_messages=True)
@@ -752,16 +1404,43 @@ class AdminHelper(commands.Cog):
     @commands.guild_only()
     async def modstats_member(self, ctx: commands.Context, member: discord.Member):
         """Show moderation actions done by and received by a member."""
+        await self._maybe_set_natural_context(ctx)
         cases = await self.config.guild(ctx.guild).cases()
         as_moderator = [case for case in cases if case.get("moderator_id") == member.id]
         as_target = [case for case in cases if case.get("target_id") == member.id]
         moderator_counts = self._count_cases_by_action(as_moderator)
         target_counts = self._count_cases_by_action(as_target)
 
-        embed = discord.Embed(title=f"Mod Stats: {member}", color=member.color or DEFAULT_COLOR)
-        embed.add_field(name="Actions performed", value=self._format_action_counts(moderator_counts), inline=False)
-        embed.add_field(name="Actions received", value=self._format_action_counts(target_counts), inline=False)
-        embed.set_footer(text=f"Performed {len(as_moderator)} case(s) | Received {len(as_target)} case(s)")
+        portuguese = self._natural_language(ctx) == "pt"
+        embed = discord.Embed(
+            title=f"Estatísticas de moderação: {member}" if portuguese else f"Mod Stats: {member}",
+            color=member.color or DEFAULT_COLOR,
+        )
+        embed.add_field(
+            name="Ações realizadas" if portuguese else "Actions performed",
+            value=(
+                self._format_action_counts_portuguese(moderator_counts)
+                if portuguese
+                else self._format_action_counts(moderator_counts)
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Ações recebidas" if portuguese else "Actions received",
+            value=(
+                self._format_action_counts_portuguese(target_counts)
+                if portuguese
+                else self._format_action_counts(target_counts)
+            ),
+            inline=False,
+        )
+        embed.set_footer(
+            text=(
+                f"Realizadas: {len(as_moderator)} caso(s) | Recebidas: {len(as_target)} caso(s)"
+                if portuguese
+                else f"Performed {len(as_moderator)} case(s) | Received {len(as_target)} case(s)"
+            )
+        )
         await ctx.send(embed=embed)
 
     @adminhelper.group(
@@ -869,6 +1548,394 @@ class AdminHelper(commands.Cog):
             return
         if before.nick and before.nick != after.nick:
             await self._append_history(self.config.member(after).previous_nicknames, before.nick)
+
+    @commands.Cog.listener()
+    async def on_message_without_command(self, message: discord.Message):
+        """Handle moderation requests addressed to the bot without a prefix."""
+        if message.guild is None or message.author.bot or message.webhook_id is not None:
+            return
+
+        bot_user = self.bot.user
+        if bot_user is None:
+            return
+        if not await self.config.guild(message.guild).natural_language_enabled():
+            return
+
+        request = parse_natural_moderation_request(message.content, bot_user.id)
+        if request is None:
+            return
+
+        await self._handle_natural_request(message, request)
+
+    async def _handle_natural_request(
+        self,
+        message: discord.Message,
+        request: dict[str, Any],
+    ):
+        bot_user = self.bot.user
+        if bot_user is None or message.guild is None:
+            return
+
+        action = request["action"]
+        language = request.get("language", "en")
+        target_ids = request["target_ids"]
+        if len(target_ids) > 1:
+            await self._send_natural_reply(
+                message,
+                "Please mention exactly one user for a moderation action.",
+                "Mencione exatamente um usuário para a ação de moderação.",
+                language=language,
+            )
+            return
+
+        target_id = request["target_id"]
+        if target_id is None and action not in NATURAL_OPTIONAL_TARGET_ACTIONS:
+            await self._send_natural_reply(
+                message,
+                f"Please mention the member you want to {action}, for example: `{bot_user.mention} {action} @member`.",
+                f"Mencione o membro que deseja moderar, por exemplo: `{bot_user.mention} {action} @membro`.",
+                language=language,
+            )
+            return
+
+        if action == "timeout" and request["duration_seconds"] is None:
+            await self._send_natural_reply(
+                message,
+                f"Please include a timeout duration, for example: `{bot_user.mention} timeout @member 10 minutes`.",
+                f"Inclua uma duração para o silêncio, por exemplo: `{bot_user.mention} mute @membro por 10 minutos`.",
+                language=language,
+            )
+            return
+
+        if action == "purge" and request["amount"] is None:
+            await self._send_natural_reply(
+                message,
+                f"Please include a purge amount, for example: `{bot_user.mention} purge 10 messages`.",
+                f"Inclua uma quantidade para limpar, por exemplo: `{bot_user.mention} purge 10 mensagens`.",
+                language=language,
+            )
+            return
+
+        try:
+            ctx = await self.bot.get_context(message)
+        except Exception:
+            return
+        self._set_natural_context(ctx, request)
+
+        target = None
+        if target_id is not None:
+            target = await self._resolve_natural_target(message, target_id, action)
+            if target is None:
+                await self._send_natural_reply(
+                    message,
+                    "I could not resolve that user in this server.",
+                    "Não consegui encontrar esse usuário neste servidor.",
+                    language=language,
+                )
+                return
+
+        command_action = action
+        if action == "ban" and not isinstance(target, discord.Member):
+            command_action = "hackban"
+
+        reason = request["reason"]
+        if command_action in {"ban", "hackban"} and request["delete_days"] is not None:
+            reason = f"{request['delete_days']} {reason}"
+
+        args = ()
+        kwargs: dict[str, Any] = {}
+        if command_action in {"kick", "ban", "hackban", "unban", "softban", "warn", "warnings", "clearwarnings", "cases", "modstats"}:
+            args = (target,)
+            if command_action in {"kick", "ban", "hackban", "unban", "softban", "warn", "clearwarnings"}:
+                kwargs["reason"] = reason
+        elif command_action == "timeout":
+            await self._invoke_natural_command(
+                ctx,
+                command_action,
+                target,
+                request,
+                callback_override=self._run_natural_timeout,
+            )
+            return
+        elif command_action == "untimeout":
+            args = (target,)
+            kwargs["reason"] = reason
+        elif command_action == "purge":
+            args = (request["amount"], target)
+        elif command_action == "userinfo":
+            args = (target,) if target is not None else ()
+
+        await self._invoke_natural_command(ctx, command_action, *args, **kwargs)
+
+    async def _natural_command_error(self, ctx: commands.Context, error: commands.CommandError):
+        """Turn malformed mention-prefixed command invocations into natural requests."""
+        message = getattr(ctx, "message", None)
+        bot_user = self.bot.user
+        request = None
+        if message is not None and bot_user is not None:
+            request = parse_natural_moderation_request(message.content, bot_user.id)
+
+        if request is not None and message.guild is not None:
+            if await self.config.guild(message.guild).natural_language_enabled():
+                await self._handle_natural_request(message, request)
+                return
+
+        if isinstance(error, commands.UserInputError):
+            await ctx.send_help()
+            return
+        await ctx.send("I could not run that moderation command.")
+
+    async def _resolve_natural_target(
+        self,
+        message: discord.Message,
+        target_id: int,
+        action: str,
+    ) -> discord.Member | discord.User | None:
+        guild = message.guild
+        if guild is None:
+            return None
+
+        member = guild.get_member(target_id)
+        mentioned_user = next(
+            (user for user in getattr(message, "mentions", ()) if getattr(user, "id", None) == target_id),
+            None,
+        )
+        if member is None and isinstance(mentioned_user, discord.Member):
+            member = mentioned_user
+
+        if action in NATURAL_MEMBER_ACTIONS or action == "purge":
+            return member
+        if member is not None:
+            return member
+        if mentioned_user is not None:
+            return mentioned_user
+
+        user = self.bot.get_user(target_id)
+        if user is not None:
+            return user
+
+        fetch_user = getattr(self.bot, "fetch_user", None)
+        if fetch_user is None:
+            return None
+        try:
+            return await fetch_user(target_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
+            return None
+
+    async def _invoke_natural_command(
+        self,
+        ctx: commands.Context,
+        action: str,
+        *args,
+        callback_override=None,
+        **kwargs,
+    ):
+        method_name = NATURAL_COMMAND_METHODS.get(action)
+        if method_name is None:
+            return
+
+        command = getattr(type(self), method_name, None)
+        callback = getattr(command, "callback", None)
+        if command is None or callback is None:
+            return
+
+        previous_command = getattr(ctx, "command", None)
+        ctx.command = command
+        try:
+            if not await self.bot.can_run(ctx, call_once=True):
+                await self._send_moderation_response(
+                    ctx,
+                    f"You do not have permission to use `{action}`.",
+                    f"Você não tem permissão para usar `{action}`.",
+                )
+                return
+            if not await command.can_run(ctx):
+                await self._send_moderation_response(
+                    ctx,
+                    f"You do not have permission to use `{action}`.",
+                    f"Você não tem permissão para usar `{action}`.",
+                )
+                return
+            if callback_override is None:
+                await callback(self, ctx, *args, **kwargs)
+            else:
+                await callback_override(ctx, *args, **kwargs)
+        except commands.CheckFailure:
+            await self._send_moderation_response(
+                ctx,
+                f"You do not have permission to use `{action}`.",
+                f"Você não tem permissão para usar `{action}`.",
+            )
+        except commands.CommandError as error:
+            detail = str(error).strip()
+            await self._send_moderation_response(
+                ctx,
+                detail or f"I could not run `{action}`.",
+                detail or f"Não consegui executar `{action}`.",
+            )
+        finally:
+            ctx.command = previous_command
+
+    async def _run_natural_timeout(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+        request: dict[str, Any],
+    ):
+        await self._apply_timeout(
+            ctx,
+            member,
+            timedelta(seconds=request["duration_seconds"]),
+            request["duration_text"] or f"{request['minutes']} minute(s)",
+            request["reason"],
+        )
+
+    @staticmethod
+    def _set_natural_context(ctx: commands.Context, request: dict[str, Any]):
+        ctx._adminhelper_natural_language = request.get("language", "en")
+        ctx._adminhelper_natural_action = request.get("action")
+
+    async def _maybe_set_natural_context(self, ctx: commands.Context):
+        if hasattr(ctx, "_adminhelper_natural_language"):
+            return
+        message = getattr(ctx, "message", None)
+        bot_user = self.bot.user
+        if message is None or bot_user is None or message.guild is None:
+            return
+        request = parse_natural_moderation_request(message.content, bot_user.id)
+        if request is None:
+            return
+        if not await self.config.guild(message.guild).natural_language_enabled():
+            return
+        self._set_natural_context(ctx, request)
+
+    @staticmethod
+    def _natural_language(ctx: commands.Context) -> str:
+        return getattr(ctx, "_adminhelper_natural_language", "en")
+
+    async def _send_moderation_response(
+        self,
+        ctx: commands.Context,
+        english: str,
+        portuguese: str,
+        **kwargs,
+    ):
+        await self._maybe_set_natural_context(ctx)
+        content = portuguese if self._natural_language(ctx) == "pt" else english
+        await ctx.send(content, **kwargs)
+
+    @staticmethod
+    def _natural_failure(failure: str) -> str:
+        translations = {
+            "this command can only be used in a server.": "este comando só pode ser usado em um servidor.",
+            "that member is not in this server.": "esse membro não está neste servidor.",
+            "I cannot moderate the server owner.": "não posso moderar o dono do servidor.",
+            "I cannot find my server member record.": "não consigo encontrar meu registro de membro neste servidor.",
+            "I cannot moderate myself.": "não posso me moderar.",
+            "I cannot moderate a bot owner.": "não posso moderar o dono de um bot.",
+            "you cannot moderate yourself.": "você não pode se moderar.",
+            "that member's top role is higher than or equal to mine.": (
+                "o cargo mais alto desse membro é maior ou igual ao meu."
+            ),
+            "that member's top role is higher than or equal to yours.": (
+                "o cargo mais alto desse membro é maior ou igual ao seu."
+            ),
+            "unknown moderation action.": "ação de moderação desconhecida.",
+        }
+        if failure in translations:
+            return translations[failure]
+        permission_match = re.fullmatch(r"I am missing the `([^`]+)` permission\.", failure)
+        if permission_match:
+            return f"estou sem a permissão `{permission_match.group(1)}`."
+        if failure == "the warning moderator is missing `manage_roles`.":
+            return "o moderador do aviso está sem a permissão `manage_roles`."
+        if failure == "that role is higher than or equal to mine.":
+            return "esse cargo é maior ou igual ao meu."
+        if failure == "that role is higher than or equal to the warning moderator's top role.":
+            return "esse cargo é maior ou igual ao cargo mais alto do moderador do aviso."
+        return failure
+
+    @staticmethod
+    def _natural_action_summary(action_text: str) -> str:
+        if action_text.startswith("softban "):
+            translated = "aplicar softban em " + action_text[len("softban ") :]
+        elif action_text.startswith("ban "):
+            translated = "banir " + action_text[len("ban ") :]
+        elif action_text.startswith("kick "):
+            translated = "expulsar " + action_text[len("kick ") :]
+        elif action_text.startswith("warn "):
+            translated = "avisar " + action_text[len("warn ") :]
+        elif action_text.startswith("clear "):
+            translated = "limpar " + action_text[len("clear ") :]
+        elif action_text.startswith("purge up to "):
+            translated = "limpar até " + action_text[len("purge up to ") :]
+        else:
+            translated = action_text
+
+        replacements = (
+            ("message(s)", "mensagem(ns)"),
+            (" from ", " de "),
+            (" in ", " em "),
+            (" and delete ", " e apagar "),
+            (" and ", " e "),
+            (" day(s) of messages", " dia(s) de mensagens"),
+            (" manual warning(s)", " aviso(s) manual(is)"),
+            ("AutoMod strike(s)", "infração(ões) do AutoMod"),
+            ("warning #", "aviso nº "),
+            (" triggers ", " aciona "),
+            ("Timeout ", "Silenciamento "),
+            ("Add role ", "Adicionar cargo "),
+            ("Remove role ", "Remover cargo "),
+            (" for ", " em "),
+        )
+        for english, portuguese in replacements:
+            translated = translated.replace(english, portuguese)
+        return translated
+
+    @staticmethod
+    def _translate_warning_result(result: str) -> str:
+        replacements = (
+            ("Punishment #", "Punição #"),
+            (" skipped: ", " ignorada: "),
+            (" failed: ", " falhou: "),
+            (" applied: ", " aplicada: "),
+            ("configured role no longer exists", "a função configurada não existe mais"),
+            ("already has ", "já possui "),
+            ("does not have ", "não possui "),
+            ("unable to timeout ", "não foi possível silenciar "),
+            ("unable to add ", "não foi possível adicionar "),
+            ("unable to remove ", "não foi possível remover "),
+            ("unable to kick ", "não foi possível expulsar "),
+            ("unable to ban ", "não foi possível banir "),
+            ("timed out ", "silenciou "),
+            ("kicked ", "expulsou "),
+            ("banned ", "baniu "),
+            ("added ", "adicionou "),
+            ("removed ", "removeu "),
+            (" for ", " em "),
+            ("unknown action.", "ação desconhecida."),
+        )
+        translated = result
+        for english, portuguese in replacements:
+            translated = translated.replace(english, portuguese)
+        return translated
+
+    async def _send_natural_reply(
+        self,
+        message: discord.Message,
+        english: str,
+        portuguese: str | None = None,
+        *,
+        language: str = "en",
+    ):
+        content = portuguese if language == "pt" and portuguese is not None else english
+        try:
+            await message.channel.send(
+                content,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            return
 
     async def _can_moderate_member(
         self,
@@ -1125,7 +2192,15 @@ class AdminHelper(commands.Cog):
                 return f"Punishment #{punishment_id} failed: unable to timeout {member.mention}.", False
 
             duration = f"{minutes} minute(s)"
-            await self._maybe_dm(member, ctx.guild, "timeout", reason, duration=duration, extra=extra)
+            await self._maybe_dm(
+                member,
+                ctx.guild,
+                "timeout",
+                reason,
+                duration=duration,
+                extra=extra,
+                language=self._natural_language(ctx),
+            )
             case_id = await self._create_case(
                 ctx.guild,
                 ctx.author,
@@ -1172,7 +2247,14 @@ class AdminHelper(commands.Cog):
 
             action_name = "Warning Role Add" if is_add else "Warning Role Remove"
             case_id = await self._create_case(ctx.guild, ctx.author, member, action_name, reason, extra=f"{extra}; role {role}")
-            await self._maybe_dm(member, ctx.guild, action_name.lower(), reason, extra=f"{extra}; role: {role.name}")
+            await self._maybe_dm(
+                member,
+                ctx.guild,
+                action_name.lower(),
+                reason,
+                extra=f"{extra}; role: {role.name}",
+                language=self._natural_language(ctx),
+            )
             await self._log_action(
                 ctx.guild,
                 ctx.author,
@@ -1189,7 +2271,14 @@ class AdminHelper(commands.Cog):
             failure = await self._warning_member_action_failure(ctx, member, "kick")
             if failure:
                 return f"Punishment #{punishment_id} skipped: {failure}", False
-            await self._maybe_dm(member, ctx.guild, "kick", reason, extra=extra)
+            await self._maybe_dm(
+                member,
+                ctx.guild,
+                "kick",
+                reason,
+                extra=extra,
+                language=self._natural_language(ctx),
+            )
             try:
                 await member.kick(reason=self._audit_reason(ctx.author, reason))
             except (discord.Forbidden, discord.HTTPException):
@@ -1203,7 +2292,14 @@ class AdminHelper(commands.Cog):
             if failure:
                 return f"Punishment #{punishment_id} skipped: {failure}", False
             delete_days = int(punishment.get("delete_days", 0))
-            await self._maybe_dm(member, ctx.guild, "ban", reason, extra=extra)
+            await self._maybe_dm(
+                member,
+                ctx.guild,
+                "ban",
+                reason,
+                extra=extra,
+                language=self._natural_language(ctx),
+            )
             try:
                 await member.ban(delete_message_days=delete_days, reason=self._audit_reason(ctx.author, reason))
             except (discord.Forbidden, discord.HTTPException):
@@ -1223,8 +2319,19 @@ class AdminHelper(commands.Cog):
         reason: str = DEFAULT_REASON,
         target: discord.abc.User | None = None,
     ) -> bool:
+        await self._maybe_set_natural_context(ctx)
         thumbnail_url = self._avatar_url(target) if target is not None else self._avatar_url(ctx.author)
-        view = ConfirmActionView(ctx.author.id, action_text, reason, str(ctx.author), thumbnail_url)
+        language = self._natural_language(ctx)
+        if language == "pt":
+            action_text = self._natural_action_summary(action_text)
+        view = ConfirmActionView(
+            ctx.author.id,
+            action_text,
+            reason,
+            str(ctx.author),
+            thumbnail_url,
+            language=language,
+        )
         view.message = await ctx.send(embed=view.prompt_embed(), view=view)
         await view.wait()
         return view.value is True
@@ -1298,6 +2405,26 @@ class AdminHelper(commands.Cog):
             reason = reason[:77] + "..."
         return f"`#{case.get('case_id')}` **{case.get('action', 'Unknown')}** {timestamp}: {reason}"
 
+    def _format_case_line_portuguese(self, case: dict[str, Any]) -> str:
+        action_names = {
+            "Timeout": "Silenciamento",
+            "Untimeout": "Remoção de silêncio",
+            "Kick": "Expulsão",
+            "Ban": "Banimento",
+            "Hackban": "Hackban",
+            "Unban": "Desbanimento",
+            "Softban": "Softban",
+            "Warn": "Aviso",
+            "Clear Warnings": "Limpeza de avisos",
+        }
+        created_at = case.get("created_at", 0)
+        timestamp = f"<t:{created_at}:R>" if created_at else "horário desconhecido"
+        reason = case.get("reason") or DEFAULT_REASON
+        if len(reason) > 80:
+            reason = reason[:77] + "..."
+        action = action_names.get(case.get("action"), case.get("action", "Desconhecido"))
+        return f"`#{case.get('case_id')}` **{action}** {timestamp}: {reason}"
+
     @staticmethod
     def _count_cases_by_action(cases: list[dict[str, Any]]) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -1311,6 +2438,26 @@ class AdminHelper(commands.Cog):
         if not counts:
             return "None"
         return "\n".join(f"{action}: {count}" for action, count in sorted(counts.items()))
+
+    @staticmethod
+    def _format_action_counts_portuguese(counts: dict[str, int]) -> str:
+        if not counts:
+            return "Nenhuma"
+        action_names = {
+            "Timeout": "Silenciamento",
+            "Untimeout": "Remoção de silêncio",
+            "Kick": "Expulsão",
+            "Ban": "Banimento",
+            "Hackban": "Hackban",
+            "Unban": "Desbanimento",
+            "Softban": "Softban",
+            "Warn": "Aviso",
+            "Clear Warnings": "Limpeza de avisos",
+        }
+        return "\n".join(
+            f"{action_names.get(action, action)}: {count}"
+            for action, count in sorted(counts.items())
+        )
 
     @staticmethod
     def _normalize_warning_punishment_action(action: str) -> str | None:
@@ -1457,6 +2604,28 @@ class AdminHelper(commands.Cog):
             ]
         )
 
+    def _format_name_history_portuguese(
+        self,
+        user_history: dict[str, Any],
+        member_history: dict[str, Any],
+        tracking_enabled: bool,
+    ) -> str:
+        if not tracking_enabled:
+            return "Rastreamento desativado"
+
+        def history(values: list[str]) -> str:
+            if not values:
+                return "Ainda não rastreado"
+            return ", ".join(values[-10:])
+
+        return "\n".join(
+            [
+                f"Nomes de usuário: {history(user_history['previous_usernames'])}",
+                f"Nomes globais: {history(user_history['previous_global_names'])}",
+                f"Apelidos: {history(member_history['previous_nicknames'])}",
+            ]
+        )
+
     async def _append_history(self, config_value, value: str | None):
         if not value:
             return
@@ -1538,24 +2707,57 @@ class AdminHelper(commands.Cog):
         duration: str | None = None,
         extra: str | None = None,
         case_id: int | None = None,
+        language: str = "en",
     ):
         if not await self.config.guild(guild).dm_users():
             return
 
-        lines = [
-            f"You received a moderation action in **{guild.name}**.",
-            f"Action: **{action}**",
-        ]
+        if language == "pt":
+            action_names = {
+                "timeout": "silenciamento",
+                "kick": "expulsão",
+                "ban": "banimento",
+                "hackban": "hackban",
+                "softban": "softban",
+                "warn": "aviso",
+            }
+            lines = [
+                f"Você recebeu uma ação de moderação em **{guild.name}**.",
+                f"Ação: **{action_names.get(action, action)}**",
+            ]
+        else:
+            lines = [
+                f"You received a moderation action in **{guild.name}**.",
+                f"Action: **{action}**",
+            ]
         if duration:
-            lines.append(f"Duration: {duration}")
+            lines.append(f"Duração: {duration}" if language == "pt" else f"Duration: {duration}")
         if extra:
-            lines.append(extra)
-        lines.append(f"Reason: {reason or DEFAULT_REASON}")
+            lines.append(self._translate_dm_extra(extra) if language == "pt" else extra)
+        lines.append(
+            f"Motivo: {reason or DEFAULT_REASON}"
+            if language == "pt"
+            else f"Reason: {reason or DEFAULT_REASON}"
+        )
 
         try:
             await member.send("\n".join(lines))
         except (discord.Forbidden, discord.HTTPException):
             return
+
+    @staticmethod
+    def _translate_dm_extra(extra: str) -> str:
+        replacements = (
+            ("Deleted ", "Excluídas "),
+            (" day(s) of messages", " dia(s) de mensagens"),
+            ("Triggered by warning ", "Acionado pelo aviso "),
+            (" (punishment ", " (punição "),
+            ("; role:", "; cargo:"),
+        )
+        translated = extra
+        for english, portuguese in replacements:
+            translated = translated.replace(english, portuguese)
+        return translated
 
     async def _log_action(
         self,

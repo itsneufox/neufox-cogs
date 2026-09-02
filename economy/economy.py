@@ -3113,19 +3113,24 @@ class Economy(commands.Cog):
     ) -> discord.Embed:
         winners = [winner for winner in record.get("winners", []) if isinstance(winner, dict)]
         winner_count = int(record.get("winner_count", len(winners)))
+        draw_number = int(record.get("draw_number", 0))
         try:
             timestamp = datetime.fromtimestamp(int(record.get("drawn_at", 0)), timezone.utc)
         except (OSError, OverflowError, TypeError, ValueError):
             timestamp = discord.utils.utcnow()
+
+        formatted_numbers = format_lwdmillions_ticket(
+            record.get("main", []), record.get("stars", [])
+        )
+        main_numbers, lucky_stars = formatted_numbers.split(" | ⭐ ", 1)
         embed = discord.Embed(
-            title=f"LWDMillions — Draw #{int(record.get('draw_number', 0)):,}",
+            title=f"LWDMillions — Draw #{draw_number:,}",
             color=discord.Color.green() if winner_count else discord.Color.gold(),
             timestamp=timestamp,
-        )
-        embed.add_field(
-            name="Winning Numbers",
-            value=format_lwdmillions_ticket(record.get("main", []), record.get("stars", [])),
-            inline=False,
+            description=(
+                "**Winning Numbers**\n"
+                f"`{main_numbers}`  ·  ⭐ `{lucky_stars}`"
+            ),
         )
 
         jackpot_before = int(record.get("jackpot_before", 0))
@@ -3133,16 +3138,24 @@ class Economy(commands.Cog):
         jackpot_winning_lines = int(record.get("jackpot_winning_lines", 0))
         if jackpot_winning_lines:
             jackpot_text = (
-                f"**{jackpot_winning_lines:,} winning line"
-                f"{'s' if jackpot_winning_lines != 1 else ''}** split "
-                f"{jackpot_before:,} {CURRENCY_NAME}.\n"
-                f"Next jackpot: {jackpot_after:,} {CURRENCY_NAME}."
+                f"**{jackpot_before:,} {CURRENCY_NAME}** split\n"
+                f"{jackpot_winning_lines:,} winning line"
+                f"{'s' if jackpot_winning_lines != 1 else ''} · "
+                f"Next: {jackpot_after:,} {CURRENCY_NAME}"
             )
         else:
-            jackpot_text = (
-                f"No 5 + 2 winner — **{jackpot_before:,} {CURRENCY_NAME} rolls over**."
-            )
-        embed.add_field(name="Jackpot", value=jackpot_text, inline=False)
+            jackpot_text = f"**{jackpot_before:,} {CURRENCY_NAME}** rolls over\nNo 5 + 2 winner"
+        embed.add_field(name="💰 Jackpot", value=jackpot_text, inline=True)
+
+        embed.add_field(
+            name="📋 Draw Summary",
+            value=(
+                f"{int(record.get('ticket_count', 0)):,} lines · "
+                f"{int(record.get('player_count', 0)):,} players\n"
+                f"**{int(record.get('total_paid', 0)):,} {CURRENCY_NAME}** paid"
+            ),
+            inline=True,
+        )
 
         tier_counts = record.get("tier_counts", {})
         tier_lines = []
@@ -3151,11 +3164,11 @@ class Economy(commands.Cog):
                 count = int(tier_counts.get(f"{main_matches}+{star_matches}", 0))
                 if count:
                     tier_lines.append(
-                        f"**{lwdmillions_match_label(main_matches, star_matches)}:** "
+                        f"**{lwdmillions_match_label(main_matches, star_matches)}** · "
                         f"{count:,} line{'s' if count != 1 else ''}"
                     )
         embed.add_field(
-            name="Winning Tiers",
+            name="🏅 Winning Tiers",
             value="\n".join(tier_lines) or "No winning lines this draw.",
             inline=False,
         )
@@ -3166,62 +3179,46 @@ class Economy(commands.Cog):
                 key=lambda winner: int(winner.get("amount", 0)),
                 reverse=True,
             )[:10]
+            medals = ("🥇", "🥈", "🥉")
             winner_lines = [
+                f"{medals[index] if index < len(medals) else '•'} "
                 f"<@{int(winner.get('user_id', 0))}> — "
                 f"**{int(winner.get('amount', 0)):,} {CURRENCY_NAME}**"
-                for winner in top_winners
+                for index, winner in enumerate(top_winners)
             ]
             if winner_count > len(top_winners):
-                winner_lines.append(f"…and {winner_count - len(top_winners):,} more winners")
-            embed.add_field(name="Winners", value="\n".join(winner_lines), inline=False)
+                winner_lines.append(f"…and {winner_count - len(top_winners):,} more")
+            embed.add_field(name="🏆 Winners", value="\n".join(winner_lines), inline=False)
 
-        embed.add_field(
-            name="Draw Summary",
-            value=(
-                f"{int(record.get('ticket_count', 0)):,} lines from "
-                f"{int(record.get('player_count', 0)):,} players\n"
-                f"Total prizes: {int(record.get('total_paid', 0)):,} {CURRENCY_NAME}"
-            ),
-            inline=False,
-        )
         try:
             proof_version = int(record.get("proof_version", 1))
         except (TypeError, ValueError):
             proof_version = 0
         if proof_version == 1:
-            proof_note = "Original v1 proof preserved for this completed draw.\n"
+            proof_status = "✅ Commitment/reveal proof published."
         elif proof_version == 3:
-            proof_note = (
-                "Paid v1 draw upgraded to public entropy; this is still its original "
-                "commitment.\n"
-            )
+            proof_status = "✅ Original commitment + public Quicknet beacon verified."
+        elif proof_version == 2:
+            proof_status = "✅ Commitment + public Quicknet beacon verified."
         else:
-            proof_note = ""
-        embed.add_field(
-            name="Commit-Reveal Proof",
-            value=(
-                f"{proof_note}Commitment: `{record.get('commitment', '')}`\n"
-                f"Secret: `{record.get('secret', '')}`\n"
-                f"Run `{prefix}lwdmillions verify {int(record.get('draw_number', 0))}`."
-            ),
-            inline=False,
-        )
-        if proof_version in (2, 3):
-            beacon_round = int(record.get("beacon_round", 0))
+            proof_status = "⚠️ Proof details are available from the verification command."
+
+        proof_lines = [
+            proof_status,
+            f"Run `{prefix}lwdmillions verify {draw_number}` for the full proof details.",
+        ]
+        beacon_round = int(record.get("beacon_round", 0))
+        if proof_version in (2, 3) and beacon_round > 0:
             beacon_url = (
                 f"https://api.drand.sh/{DRAND_QUICKNET_CHAIN_HASH}/public/{beacon_round}"
             )
-            source_count = len(record.get("beacon_sources", []))
-            embed.add_field(
-                name=f"Verified Public Beacon — Quicknet #{beacon_round:,}",
-                value=(
-                    f"Randomness: `{record.get('beacon_randomness', '')}`\n"
-                    f"Signature: `{record.get('beacon_signature', '')}`\n"
-                    f"BLS verified with {source_count:,} matching relays · "
-                    f"[Open beacon]({beacon_url})"
-                ),
-                inline=False,
-            )
+            proof_lines.append(f"[Open public beacon]({beacon_url})")
+        embed.add_field(
+            name="🔐 Verification",
+            value="\n".join(proof_lines),
+            inline=False,
+        )
+        embed.set_footer(text="Full commitment, secret, and beacon data: use the verify command")
         return embed
 
     @staticmethod
