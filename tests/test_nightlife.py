@@ -308,5 +308,108 @@ class NightlifeTests(unittest.TestCase):
         self.assertEqual(nightlife.title_for(player["encounters"]), "Nightlife Legend")
 
 
+class PlayerEncounterTests(unittest.TestCase):
+    def setUp(self):
+        self.now = 10_000
+        self.first = nightlife.new_profile(self.now)
+        self.second = nightlife.new_profile(self.now)
+        self.first["inventory"] = {"condom": 2}
+
+    def act(self, *, balance=1000, rolls=(0, 0, 99), **kwargs):
+        values = iter(rolls)
+
+        def draw(limit):
+            value = next(values)
+            self.assertTrue(0 <= value < limit)
+            return value
+
+        return nightlife.apply_player_encounter(
+            self.first, self.second, balance, now=self.now, randbelow=draw, **kwargs,
+        )
+
+    def infect(self, player, key):
+        player["infections"][key] = {"detectable_at": 0, "diagnosed": True}
+
+    def test_inviter_pays_venue_and_supplies_one_condom_for_both(self):
+        originals = copy.deepcopy((self.first, self.second))
+        first, second, balance, cost, protection, _, _ = self.act()
+        self.assertEqual((balance, cost, first["spent"], second["spent"]), (900, 100, 100, 0))
+        self.assertEqual((first["inventory"]["condom"], second["inventory"]), (1, {}))
+        for player in (first, second):
+            self.assertEqual((player["encounters"], player["last_encounter"], player["stamina"]), (1, self.now, 75))
+        self.assertEqual(protection, "Condom held.")
+        self.assertEqual((self.first, self.second), originals)
+
+    def test_fresh_partner_needs_no_registration_or_balance(self):
+        result = nightlife.apply_player_encounter(self.first, None, 100, now=self.now, randbelow=lambda n: n - 1)
+        self.assertEqual((result[1]["encounters"], result[2]), (1, 0))
+
+    def test_both_players_must_be_ready_before_any_state_changes(self):
+        for target in (self.first, self.second):
+            for key, value in (("recovery_until", self.now + 600), ("medical_bill", 500), ("stamina", 0), ("last_encounter", self.now)):
+                with self.subTest(target=target is self.first, key=key):
+                    original_value = target[key]
+                    target[key] = value
+                    original = copy.deepcopy((self.first, self.second))
+                    with self.assertRaises(ValueError):
+                        self.act(rolls=())
+                    self.assertEqual((self.first, self.second), original)
+                    target[key] = original_value
+
+    def test_no_funds_no_condom_and_invalid_venue_never_resolve(self):
+        with self.assertRaisesRegex(ValueError, "Insufficient funds"):
+            self.act(balance=99, rolls=())
+        with self.assertRaisesRegex(ValueError, "venue"):
+            self.act(venue="unknown", rolls=())
+        self.first["inventory"]["condom"] = 0
+        with self.assertRaisesRegex(ValueError, "needs a condom"):
+            self.act(rolls=())
+
+    def test_healthy_players_do_not_generate_disease(self):
+        first, second, *_ = self.act(protected=False, rolls=(0, 0))
+        self.assertEqual((first["infections"], second["infections"]), ({}, {}))
+        self.assertEqual(first["inventory"]["condom"], 2)
+
+    def test_disease_can_transmit_in_both_directions_after_breakage(self):
+        self.infect(self.first, "syphilis")
+        self.infect(self.second, "chlamydia")
+        first, second, _, _, protection, _, _ = self.act(rolls=(0, 0, 0, 0, 0, 0, 0))
+        self.assertIn("broke", protection)
+        for player, new_key in ((first, "chlamydia"), (second, "syphilis")):
+            self.assertEqual(set(player["infections"]), {"syphilis", "chlamydia"})
+            self.assertEqual(player["infections"][new_key], {"detectable_at": self.now + 600, "diagnosed": False})
+
+    def test_intact_condom_blocks_transmission_from_either_player(self):
+        self.infect(self.first, "syphilis")
+        self.infect(self.second, "chlamydia")
+        first, second, *_ = self.act(rolls=(0, 0, 2))
+        self.assertEqual(list(first["infections"]), ["syphilis"])
+        self.assertEqual(list(second["infections"]), ["chlamydia"])
+
+    def test_unprotected_transmission_does_not_consume_protection(self):
+        self.infect(self.first, "hpv")
+        first, second, *_ = self.act(protected=False, rolls=(0, 0, 0, 0))
+        self.assertIn("hpv", second["infections"])
+        self.assertEqual(first["inventory"]["condom"], 2)
+
+    def test_substances_and_hospital_bills_belong_to_the_user_who_used_them(self):
+        self.first["boosts"] = ["lube"]
+        self.second["boosts"] = ["poppers", "viagra"]
+        first, second, _, _, _, first_after, second_after = self.act()
+        self.assertEqual((first["medical_bill"], second["medical_bill"]), (0, 5000))
+        self.assertEqual((first["stamina"], second["stamina"]), (75, 0))
+        self.assertEqual((first["boosts"], second["boosts"]), ([], []))
+        self.assertFalse(first_after)
+        self.assertIn("Poppers and Viagra", second_after)
+
+    def test_substances_are_not_combined_across_players(self):
+        self.first["boosts"] = ["poppers"]
+        self.second["boosts"] = ["viagra"]
+        first, second, *_ = self.act(rolls=(0, 0, 99, 99))
+        self.assertEqual((first["medical_bill"], second["medical_bill"]), (0, 0))
+        self.assertGreater(first["recovery_until"], self.now)
+        self.assertEqual(second["recovery_until"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

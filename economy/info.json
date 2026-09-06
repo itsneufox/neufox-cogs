@@ -1,7 +1,7 @@
 {
     "name": "Economy",
     "short": "Global LWD$ economy with API access.",
-    "description": "Provides global user LWD$ balances, claim rewards, virtual-currency casino games, the scheduled publicly verifiable LWDMillions lottery, an interactive server shop with buttons and inventory, an adult NPC nightlife game in server channels, owner-controlled balance management, economy logs, an internal cog API, and an optional token-protected HTTP API for other bots or external services.",
+    "description": "Provides global user LWD$ balances, claim rewards, virtual-currency casino games, the scheduled publicly verifiable LWDMillions lottery, an interactive server shop with buttons and inventory, a nightlife game with NPCs and accepted player invitations in server channels, owner-controlled balance management, economy logs, an internal cog API, and an optional token-protected HTTP API for other bots or external services.",
     "author": ["itsneufox"],
     "min_bot_version": "3.5.0",
     "install_msg": "Economy loaded! Use `[p]eco daily`, `[p]eco weekly`, `[p]eco monthly`, `[p]eco annual`, `[p]eco work`, `[p]eco lwdmillions`, `[p]eco casino`, `[p]eco shop`, `[p]eco balance`, `[p]eco pay`, and owner-only `[p]eco admin` / `[p]eco api` commands.",

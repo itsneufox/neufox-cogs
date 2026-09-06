@@ -62,7 +62,7 @@ Shortcut commands are also available for common user actions:
 
 ## Nightlife
 
-`[p]sex` starts a non-graphic encounter with a consenting adult NPC. This game is available in server channels (including their threads) and spends the existing global LWD$ balance. NPC fees, venue fees, supplies and clinic bills remove currency; satisfaction and titles never pay currency back. Profiles, cooldowns and supplies are global across servers.
+`[p]sex` starts an encounter with an NPC. `[p]sex @member` invites another player. This game is available in server channels (including their threads) and spends the existing global LWD$ balance. NPC fees, venue fees, supplies and clinic bills remove currency; satisfaction and titles never pay currency back. Profiles, cooldowns and supplies are global across servers.
 
 With a `.` prefix, get started using:
 
@@ -76,9 +76,10 @@ The default encounter books Alex at the motel for 350 LWD$ and consumes one cond
 Commands:
 
 - `[p]sex` - book the default protected encounter.
+- `[p]sex @member` - invite a player to the motel with a condom.
 - `[p]sex help` - show setup, commands and game rules.
 - `[p]sex escorts` / `[p]sex hookers` - list adult NPCs and venue fees.
-- `[p]sex encounter [escort] [venue] [protected]` - customize an encounter. Example: `[p]sex encounter blair penthouse true`. Use `false` for the final argument to explicitly choose an unprotected encounter.
+- `[p]sex encounter [escort|@member] [venue] [protected]` - customize an NPC or player encounter. Examples: `[p]sex encounter blair penthouse true`, `[p]sex encounter @member hotel false`.
 - `[p]sex shop` - view consumables.
 - `[p]sex buy <item> [quantity]` - buy supplies; hold up to 100 of each item.
 - `[p]sex use <item>` - use supplies.
@@ -88,6 +89,10 @@ Commands:
 - `[p]sex clinic cure` - pay the combined treatment fees for all diagnosed conditions.
 - `[p]sex clinic pay` - pay outstanding hospital bills.
 - `[p]eco admin sex <true|false>` - bot owner can enable or disable the game in the current server. Enabled by default in server channels.
+
+Player invitations show the venue, condom choice and price. The invited player has 90 seconds to accept or decline; the inviter can cancel. Only acceptance starts the encounter. The inviter pays the venue fee (100 LWD$ for the motel) and supplies one condom for a protected encounter; the partner pays no booking fee. Declining, cancelling, expiry and cog reloads do not charge either player. Each player can have one pending invitation; finish it before starting another encounter or using supplies.
+
+Both players must have enough stamina, be out of recovery and cooldown, and have no unpaid hospital bills. These checks and the inviter's balance are rechecked on acceptance. Both players get their own cooldown, stamina costs and substance consequences. An intact condom protects both; if it breaks or the encounter is unprotected, existing infections can spread in either direction. Newly transmitted conditions require a clinic test to reveal. Each player's prepared substances affect only that player, including their own hospital bills.
 
 The shop stocks condoms, Viagra, lube, energy, weed, cocaine, ecstasy, shrooms, poppers, champagne, flowers, perfume, chocolate, coffee and snacks. Use the single-word item names shown in the shop. Aliases include `condoms`, `cannabis`, `marijuana`, `coke`, `mdma`, `mushrooms`, `chocolates` and `snacks`.
 

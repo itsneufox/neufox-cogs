@@ -149,6 +149,101 @@ def title_for(encounters: int) -> str:
     return "Newcomer"
 
 
+def validate_encounter(player: dict, now: int, *, needs_condom: bool = False):
+    if player["recovery_until"] > now:
+        raise ValueError(f"You are recovering. Rest until <t:{player['recovery_until']}:R>.")
+    if player["medical_bill"]:
+        raise ValueError(f"You owe {player['medical_bill']:,} LWD$ in hospital bills. Pay with `sex clinic pay` first.")
+    last = player["last_encounter"]
+    if last is not None and now - last < ENCOUNTER_COOLDOWN:
+        raise ValueError(f"Rest for {ENCOUNTER_COOLDOWN - (now - last)} more seconds.")
+    if player["stamina"] < ENCOUNTER_STAMINA:
+        raise ValueError("You need 25 stamina. Rest or use an energy item.")
+    if needs_condom and player["inventory"].get("condom", 0) < 1:
+        raise ValueError("A protected encounter needs a condom. Buy one with `sex buy condoms`.")
+
+
+def encounter_score(player: dict, bonus: int, draw) -> int:
+    penalty = sum(DISEASES[key]["penalty"] for key in player["infections"])
+    score = 35 + draw(26) + bonus
+    score += sum(ITEMS.get(key, {}).get("satisfaction", 0) for key in player["boosts"])
+    return max(0, min(100, score - penalty))
+
+
+def finish_encounter(player: dict, score: int, now: int, draw) -> str:
+    """Apply each player's own consumables and consequences; return their aftermath."""
+    fatigue = sum(ITEMS.get(key, {}).get("fatigue", 0) for key in player["boosts"])
+    aftermath = resolve_aftermath(player["boosts"], draw)
+    player["boosts"] = []
+    player["stamina"] = max(0, player["stamina"] - ENCOUNTER_STAMINA - fatigue)
+    if aftermath["recovery"]:
+        player["recovery_until"] = now + aftermath["recovery"]
+        player["recovery_reason"] = "Hospital recovery" if aftermath["hospital"] else "Comedown"
+    if aftermath["hospital"]:
+        player["stamina"] = 0
+        player["stamina_at"] = now
+        player["medical_bill"] += aftermath["bill"]
+        player["hospital_visits"] += 1
+        score = 0
+    player["last_encounter"] = now
+    player["encounters"] += 1
+    player["satisfaction"] += score
+    message = "\n".join(aftermath["lines"])
+    if message:
+        message += f"\nRest until <t:{player['recovery_until']}:R>."
+    if aftermath["bill"]:
+        message += f"\nHospital bill: {aftermath['bill']:,} LWD$. Pay with `sex clinic pay`."
+    return message
+
+
+def prepare_player_encounter(
+    initiator: dict | None, partner: dict | None, balance: int, *, now: int,
+    venue: str = "motel", protected: bool = True,
+) -> tuple[dict, dict, int]:
+    """Validate both players without spending anything or drawing an outcome."""
+    if venue not in VENUES:
+        raise ValueError("Choose a venue: motel, hotel, or penthouse.")
+    first = refreshed_profile(initiator, now)
+    second = refreshed_profile(partner, now)
+    validate_encounter(first, now, needs_condom=protected)
+    try:
+        validate_encounter(second, now)
+    except ValueError:
+        raise ValueError("That player needs to rest, recover, or pay their hospital bill first.") from None
+    cost = VENUES[venue]["price"]
+    if balance < cost:
+        raise ValueError(f"Insufficient funds. You need {cost:,} LWD$.")
+    return first, second, cost
+
+
+def apply_player_encounter(
+    initiator: dict | None, partner: dict | None, balance: int, *, now: int,
+    venue: str = "motel", protected: bool = True, randbelow=None,
+) -> tuple[dict, dict, int, int, str, str, str]:
+    """Resolve an accepted invitation. The inviter pays and supplies one condom."""
+    first, second, cost = prepare_player_encounter(
+        initiator, partner, balance, now=now, venue=venue, protected=protected,
+    )
+    draw = randbelow if randbelow is not None else secrets.randbelow
+    scores = [encounter_score(player, VENUES[venue]["bonus"], draw) for player in (first, second)]
+    broken = protected and draw(100) < CONDOM_BREAK_PERCENT
+    if not protected or broken:
+        # Snapshot both sources: only conditions present before the encounter can spread.
+        sources = (set(first["infections"]), set(second["infections"]))
+        for player, source in ((first, sources[1]), (second, sources[0])):
+            susceptible = [key for key in DISEASES if key in source and key not in player["infections"]]
+            if susceptible and draw(100) < UNPROTECTED_RISK:
+                key = susceptible[draw(len(susceptible))]
+                player["infections"][key] = {"detectable_at": now + INCUBATION_SECONDS, "diagnosed": False}
+    if protected:
+        first["inventory"]["condom"] -= 1
+    first_aftermath = finish_encounter(first, scores[0], now, draw)
+    second_aftermath = finish_encounter(second, scores[1], now, draw)
+    first["spent"] += cost
+    protection = "Your condom broke!" if broken else "Condom held." if protected else "No condom used."
+    return first, second, balance - cost, cost, protection, first_aftermath, second_aftermath
+
+
 def apply_action(
     profile: dict | None,
     balance: int,
@@ -204,25 +299,13 @@ def apply_action(
             message = f"{item.title()} boost ready for your next encounter."
         inventory[item] -= 1
     elif action == "encounter":
-        if player["medical_bill"]:
-            raise ValueError(f"You owe {player['medical_bill']:,} LWD$ in hospital bills. Pay with `sex clinic pay` first.")
         if escort not in ESCORTS or venue not in VENUES:
             raise ValueError("Choose an escort from `sex escorts` and a venue: motel, hotel, or penthouse.")
-        last = player["last_encounter"]
-        if last is not None and now - last < ENCOUNTER_COOLDOWN:
-            raise ValueError(f"Rest for {ENCOUNTER_COOLDOWN - (now - last)} more seconds.")
-        if player["stamina"] < ENCOUNTER_STAMINA:
-            raise ValueError("You need 25 stamina. Rest or use an energy item.")
-        if protected and inventory.get("condom", 0) < 1:
-            raise ValueError("A protected encounter needs a condom. Buy one with `sex buy condoms`.")
+        validate_encounter(player, now, needs_condom=protected)
         cost = ESCORTS[escort]["price"] + VENUES[venue]["price"]
         if balance < cost:
             raise ValueError(f"Insufficient funds. You need {cost:,} LWD$.")
-        penalty = sum(DISEASES[key]["penalty"] for key in player["infections"])
-        score = 35 + draw(26) + ESCORTS[escort]["charm"] + VENUES[venue]["bonus"]
-        score += sum(ITEMS.get(key, {}).get("satisfaction", 0) for key in player["boosts"])
-        fatigue = sum(ITEMS.get(key, {}).get("fatigue", 0) for key in player["boosts"])
-        score = max(0, min(100, score - penalty))
+        score = encounter_score(player, ESCORTS[escort]["charm"] + VENUES[venue]["bonus"], draw)
         broken = protected and draw(100) < CONDOM_BREAK_PERCENT
         susceptible = [key for key in DISEASES if key not in player["infections"]]
         if (not protected or broken) and susceptible and draw(100) < UNPROTECTED_RISK:
@@ -230,30 +313,13 @@ def apply_action(
             player["infections"][key] = {"detectable_at": now + INCUBATION_SECONDS, "diagnosed": False}
         if protected:
             inventory["condom"] -= 1
-        aftermath = resolve_aftermath(player["boosts"], draw)
-        player["boosts"] = []
-        player["stamina"] = max(0, player["stamina"] - ENCOUNTER_STAMINA - fatigue)
-        if aftermath["recovery"]:
-            player["recovery_until"] = now + aftermath["recovery"]
-            player["recovery_reason"] = "Hospital recovery" if aftermath["hospital"] else "Comedown"
-        if aftermath["hospital"]:
-            player["stamina"] = 0
-            player["stamina_at"] = now
-            player["medical_bill"] += aftermath["bill"]
-            player["hospital_visits"] += 1
-            score = 0
-        player["last_encounter"] = now
-        player["encounters"] += 1
-        player["satisfaction"] += score
+        aftermath = finish_encounter(player, score, now, draw)
         message = (
             f"You had sex with {ESCORTS[escort]['name']} at the {venue}.\n"
             f"{'Your condom broke!' if broken else 'Condom held.' if protected else 'No condom used.'}"
         )
-        if aftermath["lines"]:
-            message += "\n" + "\n".join(aftermath["lines"])
-            message += f"\nRest until <t:{player['recovery_until']}:R>."
-        if aftermath["bill"]:
-            message += f"\nHospital bill: {aftermath['bill']:,} LWD$. Pay with `sex clinic pay`."
+        if aftermath:
+            message += "\n" + aftermath
     elif action == "pay":
         cost = player["medical_bill"]
         if not cost:

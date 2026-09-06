@@ -57,6 +57,7 @@ from .lwdmillions import (
     verify_migrated_lwdmillions_draw,
 )
 from .mines import DEFAULT_MINES, MinesView
+from .nightlife_invite import NightlifeInviteView
 from .slots import (
     SLOT_EMOJIS,
     SLOT_TRIPLE_MULTIPLIERS,
@@ -239,6 +240,7 @@ class Economy(commands.Cog):
         self._blackjack_views: dict[int, BlackjackView] = {}
         self._mines_players: set[int] = set()
         self._mines_views: dict[int, MinesView] = {}
+        self._nightlife_invites: dict[int, NightlifeInviteView] = {}
         self._casino_exclusion_lock = asyncio.Lock()
         self._slot_players: set[int] = set()
         self._slot_render_semaphore = asyncio.Semaphore(2)
@@ -248,6 +250,9 @@ class Economy(commands.Cog):
         self._lwdmillions_task = self.bot.loop.create_task(self._lwdmillions_draw_loop())
 
     def cog_unload(self):
+        for view in set(self._nightlife_invites.values()):
+            view.close()
+            self.bot.loop.create_task(view.edit_message("Invitation cancelled because Economy was unloaded."))
         self._startup_task.cancel()
         self._lwdmillions_task.cancel()
         for task in list(self._lwdmillions_notification_tasks):
@@ -1776,6 +1781,8 @@ class Economy(commands.Cog):
             return
         try:
             async with self._lock:
+                if action in ("encounter", "use") and ctx.author.id in self._nightlife_invites:
+                    raise ValueError("Finish or cancel your pending invitation first.")
                 async with self.config.nightlife_players() as players:
                     async with self.config.balances() as balances:
                         account = self._account_from_mapping(balances, ctx.author.id)
@@ -1801,11 +1808,94 @@ class Economy(commands.Cog):
         message = message.replace("`sex", f"`{ctx.clean_prefix}sex")
         await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _invite_nightlife_partner(
+        self, ctx: commands.Context, partner: discord.Member, venue: str = "motel", protected: bool = True,
+    ):
+        if not await self._nightlife_allowed(ctx):
+            return
+        if partner.id == ctx.author.id or partner.bot:
+            await ctx.send("Choose another player, not yourself or a bot.")
+            return
+        if partner.guild.id != ctx.guild.id:
+            await ctx.send("Choose someone in this server.")
+            return
+        if not ctx.channel.permissions_for(partner).view_channel:
+            await ctx.send("That player can't see this channel.")
+            return
+        view = None
+        try:
+            async with self._lock:
+                if any(user_id in self._nightlife_invites for user_id in (ctx.author.id, partner.id)):
+                    raise ValueError("One of you already has a pending invitation.")
+                players = await self.config.nightlife_players()
+                balances = await self.config.balances()
+                _, _, cost = nightlife.prepare_player_encounter(
+                    players.get(str(ctx.author.id)), players.get(str(partner.id)),
+                    self._account_from_mapping(balances, ctx.author.id)[CASH],
+                    now=int(time.time()), venue=venue, protected=protected,
+                )
+                view = NightlifeInviteView(self, ctx, partner, venue, protected)
+                for user_id in view.participant_ids:
+                    self._nightlife_invites[user_id] = view
+            view.message = await ctx.send(
+                f"{partner.mention}, {ctx.author.mention} wants to have sex with you at the {venue}.\n"
+                f"{'With a condom' if protected else 'Without a condom'}. {ctx.author.mention} pays {cost:,} LWD$"
+                f"{' and supplies the condom' if protected else ''}.\nAccept or decline within 90 seconds.",
+                view=view, allowed_mentions=discord.AllowedMentions(users=[partner]),
+            )
+        except ValueError as error:
+            if view is not None:
+                view.close()
+            await ctx.send(str(error).replace("`sex", f"`{ctx.clean_prefix}sex"))
+        except BaseException:
+            if view is not None:
+                view.close()
+            raise
+
+    async def _accept_nightlife_invite(self, view: NightlifeInviteView) -> str:
+        ctx = view.ctx
+        first_id, second_id = view.participant_ids
+        async with self._lock:
+            if (view.closed or time.monotonic() >= view.deadline
+                    or self.bot.get_cog("Economy") is not self
+                    or any(self._nightlife_invites.get(user_id) is not view for user_id in view.participant_ids)):
+                raise ValueError("This invitation has ended.")
+            if ctx.guild.id in await self.config.nightlife_disabled_guilds():
+                raise ValueError("Nightlife is disabled in this server.")
+            for user_id in view.participant_ids:
+                member = ctx.guild.get_member(user_id)
+                if member is None or member.bot or not ctx.channel.permissions_for(member).view_channel:
+                    raise ValueError("Both players must still be in this server and able to see this channel.")
+            async with self.config.nightlife_players() as players:
+                async with self.config.balances() as balances:
+                    account = self._account_from_mapping(balances, first_id)
+                    first, second, remaining, cost, protection, first_after, second_after = nightlife.apply_player_encounter(
+                        players.get(str(first_id)), players.get(str(second_id)), account[CASH],
+                        now=int(time.time()), venue=view.venue, protected=view.protected,
+                    )
+                    players[str(first_id)] = first
+                    players[str(second_id)] = second
+                    account[CASH] = remaining
+                    balances[str(first_id)] = account
+            await self._append_ledger(
+                "nightlife", from_user_id=first_id, to_user_id=None, amount=cost,
+                actor_id=first_id, guild_id=ctx.guild.id, reason="Nightlife player encounter", log_to_channel=False,
+            )
+        lines = [f"<@{first_id}> and <@{second_id}> had sex at the {view.venue}.", protection]
+        for user_id, aftermath in ((first_id, first_after), (second_id, second_after)):
+            if aftermath:
+                lines.append(f"<@{user_id}>: {aftermath}")
+        lines.append(f"<@{first_id}> spent {cost:,} LWD$. Balance: {remaining:,} LWD$.")
+        return "\n".join(lines).replace("`sex", f"`{ctx.clean_prefix}sex")
+
     @commands.group(name="sex", invoke_without_command=True, ignore_extra=False)
     @commands.guild_only()
-    async def nightlife_sex(self, ctx: commands.Context):
+    async def nightlife_sex(self, ctx: commands.Context, member: discord.Member | None = None):
         """Have sex. Use sex help for commands."""
-        await self._nightlife_run(ctx, "encounter")
+        if member is not None:
+            await self._invite_nightlife_partner(ctx, member)
+        else:
+            await self._nightlife_run(ctx, "encounter")
 
     @nightlife_sex.command(name="help")
     async def nightlife_help(self, ctx: commands.Context):
@@ -1819,8 +1909,9 @@ class Economy(commands.Cog):
         )
         embed.add_field(name="Commands", value="\n".join([
             f"`{prefix}sex` — have sex",
+            f"`{prefix}sex @member` — invite a player",
             f"`{prefix}sex hookers` — browse escorts and venues",
-            f"`{prefix}sex encounter <escort> [venue] [true|false]` — book; condom on/off",
+            f"`{prefix}sex encounter <escort|@member> [venue] [true|false]` — book; condom on/off",
             f"`{prefix}sex status` — your profile",
         ]), inline=False)
         embed.add_field(name="Supplies and health", value="\n".join([
@@ -1872,8 +1963,15 @@ class Economy(commands.Cog):
     async def nightlife_encounter(
         self, ctx: commands.Context, escort: str = "alex", venue: str = "motel", protected: bool = True,
     ):
-        """Book an escort and venue. Set protected to true or false to choose condom use."""
-        await self._nightlife_run(ctx, "encounter", escort=escort.lower(), venue=venue.lower(), protected=protected)
+        """Book an escort or invite a player. Set protected to true or false to choose condom use."""
+        if escort.startswith("<@"):
+            if ctx.guild is None:
+                await self._nightlife_allowed(ctx)
+                return
+            partner = await commands.MemberConverter().convert(ctx, escort)
+            await self._invite_nightlife_partner(ctx, partner, venue.lower(), protected)
+        else:
+            await self._nightlife_run(ctx, "encounter", escort=escort.lower(), venue=venue.lower(), protected=protected)
 
     @nightlife_sex.command(name="status", aliases=["profile", "inventory", "inv"])
     async def nightlife_status(self, ctx: commands.Context):
