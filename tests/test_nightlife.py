@@ -17,7 +17,6 @@ class NightlifeTests(unittest.TestCase):
     def setUp(self):
         self.now = 10_000
         self.player = nightlife.new_profile(self.now)
-        self.player["opted_in"] = True
         self.player["inventory"] = {"condom": 5, "viagra": 2, "lube": 1, "energy": 2}
 
     def act(self, action, *, player=None, balance=10_000, now=None, rolls=(), **kwargs):
@@ -34,10 +33,12 @@ class NightlifeTests(unittest.TestCase):
             randbelow=draw, **kwargs,
         )
 
-    def test_opt_in_required_for_all_gameplay(self):
-        for action in ("buy", "use", "encounter", "test", "cure"):
-            with self.subTest(action=action), self.assertRaisesRegex(ValueError, "Join first"):
-                self.act(action, player=nightlife.new_profile(self.now))
+    def test_new_player_can_buy_and_have_an_encounter_immediately(self):
+        player, balance, _, _ = nightlife.apply_action(None, 1000, "buy", now=self.now, item="condom")
+        player, balance, _, _ = self.act("encounter", player=player, balance=balance, rolls=(0, 99))
+        self.assertEqual(balance, 575)
+        self.assertEqual(player["encounters"], 1)
+        self.assertEqual(player["inventory"]["condom"], 0)
 
     def test_buy_deducts_exact_price_and_preserves_input(self):
         original = copy.deepcopy(self.player)
@@ -145,24 +146,166 @@ class NightlifeTests(unittest.TestCase):
 
     def test_combined_treatment_is_all_or_nothing(self):
         self.player["infections"] = {key: {"detectable_at": 0, "diagnosed": True} for key in nightlife.DISEASES}
-        with self.assertRaisesRegex(ValueError, "5,100"):
-            self.act("cure", balance=5099)
-        player, balance, _, cost = self.act("cure", balance=5100)
-        self.assertEqual((player["infections"], balance, cost), ({}, 0, 5100))
+        with self.assertRaisesRegex(ValueError, "14,700"):
+            self.act("cure", balance=14699)
+        player, balance, _, cost = self.act("cure", balance=14700)
+        self.assertEqual((player["infections"], balance, cost), ({}, 0, 14700))
 
-    def test_leaving_and_rejoining_cannot_clear_disease_or_cooldown(self):
+    def test_every_disease_can_be_acquired_tested_and_treated(self):
+        for index, (key, disease) in enumerate(nightlife.DISEASES.items()):
+            with self.subTest(disease=key):
+                player, _, _, _ = self.act("encounter", protected=False, rolls=(0, 0, index))
+                self.assertEqual(list(player["infections"]), [key])
+                player, _, message, _ = self.act("test", player=player, now=self.now + 600)
+                self.assertIn(disease["name"], message)
+                player, balance, _, cost = self.act("cure", player=player, now=self.now + 600)
+                self.assertEqual(player["infections"], {})
+                self.assertEqual((balance, cost), (10000 - disease["treatment"], disease["treatment"]))
+
+    def test_every_new_item_can_be_bought_and_used(self):
+        for key in ("weed", "cocaine", "ecstasy", "shrooms", "poppers", "champagne", "flowers", "perfume", "chocolate", "coffee", "snack"):
+            with self.subTest(item=key):
+                player, balance, _, _ = self.act("buy", item=key)
+                player["stamina"] = 50
+                player, after_use, _, cost = self.act("use", player=player, balance=balance, item=key)
+                self.assertEqual((after_use, cost), (balance, 0))
+                self.assertEqual(player["inventory"][key], 0)
+                if key in ("coffee", "snack"):
+                    self.assertGreater(player["stamina"], 50)
+                else:
+                    self.assertIn(key, player["boosts"])
+                    player, _, _, _ = self.act("encounter", player=player, balance=balance, rolls=(0, 99, 99))
+                    self.assertGreater(player["satisfaction"], 43)
+                    self.assertEqual(player["boosts"], [])
+
+    def test_drug_effect_and_comedown_apply_once(self):
+        player, _, _, _ = self.act("buy", item="cocaine", quantity=2)
+        player, _, _, _ = self.act("use", player=player, item="cocaine")
+        with self.assertRaisesRegex(ValueError, "already ready"):
+            self.act("use", player=player, item="cocaine")
+        player, _, message, _ = self.act("encounter", player=player, rolls=(0, 99, 99))
+        self.assertEqual((player["satisfaction"], player["stamina"]), (73, 55))
+        self.assertIn("cocaine rush ended", message)
+        self.assertEqual(player["inventory"]["cocaine"], 1)
+        with self.assertRaisesRegex(ValueError, "recovering"):
+            self.act("encounter", player=player, now=self.now + 300)
+        player, _, _, _ = self.act("encounter", player=player, now=self.now + 1800, rolls=(0, 99))
+        self.assertEqual((player["satisfaction"], player["stamina"]), (116, 40))
+
+    def test_failed_encounter_preserves_prepared_items(self):
+        self.player["boosts"] = ["weed", "cocaine"]
+        original = copy.deepcopy(self.player)
+        with self.assertRaisesRegex(ValueError, "Insufficient funds"):
+            self.act("encounter", balance=0)
+        self.assertEqual(self.player, original)
+
+    def test_combined_drug_fatigue_cannot_make_stamina_negative(self):
+        self.player["boosts"] = ["weed", "cocaine", "ecstasy", "shrooms", "poppers"]
+        self.player["stamina"] = 25
+        player, _, _, _ = self.act("encounter", rolls=(0, 99, 99))
+        self.assertEqual(player["stamina"], 0)
+        self.assertEqual(player["boosts"], [])
+
+    def test_every_substance_reports_and_persists_its_aftermath(self):
+        for key in nightlife.SUBSTANCE_CONSEQUENCES:
+            with self.subTest(substance=key):
+                self.player["boosts"] = [key]
+                player, _, message, _ = self.act("encounter", rolls=(0, 99, 99))
+                self.assertIn(key, message.lower())
+                self.assertGreater(player["recovery_until"], self.now + nightlife.ENCOUNTER_COOLDOWN)
+                self.assertEqual(player["medical_bill"], 0)
+                refreshed = nightlife.refreshed_profile(player, self.now + 1)
+                self.assertEqual(refreshed["recovery_until"], player["recovery_until"])
+
+    def test_hospital_event_creates_debt_without_overdrawing_wallet(self):
+        self.player["boosts"] = ["poppers"]
+        player, balance, message, cost = self.act("encounter", balance=350, rolls=(0, 99, 0))
+        self.assertEqual((balance, cost), (0, 350))
+        self.assertEqual((player["stamina"], player["satisfaction"]), (0, 0))
+        self.assertEqual((player["medical_bill"], player["hospital_visits"]), (1800, 1))
+        self.assertEqual(player["spent"], 350)
+        self.assertIn("poppers", message)
+        self.assertIn("hospital", message)
+        self.assertIn("1,800", message)
+        with self.assertRaisesRegex(ValueError, "hospital bills"):
+            self.act("encounter", player=player, now=player["recovery_until"])
+
+    def test_poppers_viagra_combination_causes_a_hospital_event(self):
+        self.player["boosts"] = ["viagra", "poppers"]
+        player, _, message, _ = self.act("encounter", rolls=(0, 99))
+        self.assertIn("Poppers and Viagra", message)
+        self.assertEqual(player["medical_bill"], 5000)
+        self.assertEqual(player["recovery_until"], self.now + 7200)
+        self.assertEqual(player["boosts"], [])
+        self.assertEqual(player["satisfaction"], 0)
+
+    def test_mixing_substances_can_trigger_hospital_when_single_use_does_not(self):
+        self.player["boosts"] = ["weed"]
+        single, _, _, _ = self.act("encounter", rolls=(0, 99, 10))
+        self.player["boosts"] = ["weed", "champagne"]
+        mixed, _, _, _ = self.act("encounter", rolls=(0, 99, 10))
+        self.assertEqual(single["medical_bill"], 0)
+        self.assertGreater(mixed["medical_bill"], 0)
+
+    def test_paying_bill_is_atomic_and_does_not_remove_recovery(self):
+        self.player["medical_bill"] = 1800
+        self.player["recovery_until"] = self.now + 3600
+        self.player["recovery_reason"] = "Hospital recovery"
+        original = copy.deepcopy(self.player)
+        with self.assertRaisesRegex(ValueError, "Insufficient funds"):
+            self.act("pay", balance=1799)
+        self.assertEqual(self.player, original)
+        player, balance, message, cost = self.act("pay", balance=2000)
+        self.assertEqual((balance, cost, player["medical_bill"], player["spent"]), (200, 1800, 0, 1800))
+        self.assertIn("Hospital bill paid", message)
+        with self.assertRaisesRegex(ValueError, "recovering"):
+            self.act("encounter", player=player)
+        with self.assertRaisesRegex(ValueError, "no hospital bills"):
+            self.act("pay", player=player)
+
+    def test_stamina_items_cannot_bypass_recovery(self):
+        self.player["stamina"] = 0
+        self.player["recovery_until"] = self.now + 600
+        original = copy.deepcopy(self.player)
+        with self.assertRaisesRegex(ValueError, "recovering"):
+            self.act("use", item="energy")
+        self.assertEqual(self.player, original)
+        player, _, _, _ = self.act("use", item="energy", now=self.now + 600)
+        self.assertEqual(player["recovery_until"], 0)
+        self.assertEqual(player["stamina"], 33)
+
+    def test_old_profiles_gain_consequence_defaults_without_losing_items(self):
+        legacy = copy.deepcopy(self.player)
+        for key in ("recovery_until", "recovery_reason", "medical_bill", "hospital_visits"):
+            legacy.pop(key)
+        refreshed = nightlife.refreshed_profile(legacy, self.now)
+        self.assertEqual(refreshed, self.player)
+
+    def test_item_aliases_work_for_buy_and_use(self):
+        player, _, _, _ = self.act("buy", item=" COKE ")
+        player, _, _, _ = self.act("use", player=player, item="coke")
+        self.assertEqual(player["inventory"]["cocaine"], 0)
+        self.assertEqual(player["boosts"], ["cocaine"])
+        self.assertNotIn("coke", player["inventory"])
+
+    def test_old_participation_flags_are_removed_without_resetting_progress(self):
         player, _, _, _ = self.act("encounter", protected=False, rolls=(0, 0, 0))
         original = copy.deepcopy(player)
-        player, _, _, _ = self.act("leave", player=player)
-        player, _, _, _ = self.act("join", player=player)
-        self.assertEqual(player, original)
+        for opted_in in (True, False):
+            with self.subTest(opted_in=opted_in):
+                legacy = dict(player, opted_in=opted_in)
+                self.assertEqual(nightlife.refreshed_profile(legacy, self.now), original)
+                result, _, _, _ = self.act("buy", player=legacy, item="condom")
+                self.assertNotIn("opted_in", result)
+                self.assertEqual(result["infections"], original["infections"])
+                self.assertEqual(result["last_encounter"], original["last_encounter"])
 
     def test_maximum_satisfaction_and_vanity_title(self):
         self.player["boosts"] = ["viagra", "lube"]
         self.player["encounters"] = 99
-        player, balance, message, cost = self.act("encounter", escort="blair", venue="penthouse", rolls=(25, 99))
+        player, balance, _, cost = self.act("encounter", escort="blair", venue="penthouse", rolls=(25, 99))
         self.assertEqual((player["satisfaction"], balance, cost), (100, 6000, 4000))
-        self.assertIn("Nightlife Legend", message)
+        self.assertEqual(nightlife.title_for(player["encounters"]), "Nightlife Legend")
 
 
 if __name__ == "__main__":

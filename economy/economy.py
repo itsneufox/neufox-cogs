@@ -301,7 +301,7 @@ class Economy(commands.Cog):
         )
         embed.add_field(
             name="Nightlife",
-            value=f"`{prefix}sex help` - NPC encounters, condoms, boosts, and a fictional clinic",
+            value=f"`{prefix}sex help` - escorts, supplies, and clinic",
             inline=False,
         )
         embed.add_field(
@@ -1798,118 +1798,86 @@ class Economy(commands.Cog):
             return
         if cost:
             message += f"\nSpent {cost:,} {CURRENCY_NAME}. Balance: {remaining:,} {CURRENCY_NAME}."
+        message = message.replace("`sex", f"`{ctx.clean_prefix}sex")
         await ctx.send(message, allowed_mentions=discord.AllowedMentions.none())
 
     @commands.group(name="sex", invoke_without_command=True, ignore_extra=False)
     @commands.guild_only()
     async def nightlife_sex(self, ctx: commands.Context):
-        """Have a protected, off-screen NPC encounter. Use sex help for setup."""
+        """Have sex. Use sex help for commands."""
         await self._nightlife_run(ctx, "encounter")
 
     @nightlife_sex.command(name="help")
     async def nightlife_help(self, ctx: commands.Context):
-        """Show Nightlife commands and fictional game rules."""
+        """Show Nightlife commands."""
         if not await self._nightlife_allowed(ctx):
             return
         prefix = ctx.clean_prefix
         embed = discord.Embed(
             title="Nightlife",
-            description=(
-                "A non-graphic game with consenting adult NPCs. Spend LWD$ on evenings out, "
-                "supplies and clinic bills. Satisfaction and titles have no cash value.\n"
-                "Uses real disease names with fictional game effects, test timings and treatment rules."
-            ),
             color=discord.Color.purple(),
         )
-        embed.add_field(name="Get started", value="\n".join([
-            f"`{prefix}sex join confirm` — confirm you are 18+ and opt in",
-            f"`{prefix}sex buy condoms 5` — buy protection",
-            f"`{prefix}sex` — Alex + motel, 350 LWD$, one condom",
-            f"`{prefix}sex encounter <escort> [venue] [protected]` — choose your evening",
-            f"`{prefix}sex escorts` / `{prefix}sex hookers` — NPCs and venues",
+        embed.add_field(name="Commands", value="\n".join([
+            f"`{prefix}sex` — have sex",
+            f"`{prefix}sex hookers` — browse escorts and venues",
+            f"`{prefix}sex encounter <escort> [venue] [true|false]` — book; condom on/off",
+            f"`{prefix}sex status` — your profile",
         ]), inline=False)
         embed.add_field(name="Supplies and health", value="\n".join([
-            f"`{prefix}sex shop` / `{prefix}sex buy <item> [quantity]`",
-            f"`{prefix}sex use <viagra|lube|energy>`",
-            f"`{prefix}sex status` — your inventory, boosts and diagnosed conditions",
-            f"`{prefix}sex clinic` — test and treatment prices",
-            f"`{prefix}sex clinic test` / `{prefix}sex clinic cure`",
-            f"`{prefix}sex leave` — opt out and retain progress",
+            f"`{prefix}sex shop` — browse supplies",
+            f"`{prefix}sex buy <item> [quantity]` — buy supplies",
+            f"`{prefix}sex use <item>` — use an item",
+            f"`{prefix}sex clinic` — clinic prices",
+            f"`{prefix}sex clinic test` — get tested",
+            f"`{prefix}sex clinic cure` — get treated",
+            f"`{prefix}sex clinic pay` — pay hospital bills",
         ]), inline=False)
-        embed.add_field(name="Game rules", value=(
-            "Each encounter uses 25 stamina with a 5-minute cooldown. Regain 1 stamina every 3 minutes.\n"
-            "Condoms protect against infection, but can break. Boosts do not provide protection.\n"
-            "Conditions become detectable after 10 minutes and lower satisfaction until treated. "
-            "Set protected to `false` to explicitly choose an unprotected encounter."
-        ), inline=False)
         await ctx.send(embed=embed)
-
-    @nightlife_sex.command(name="join")
-    async def nightlife_join(self, ctx: commands.Context, confirmation: str = ""):
-        """Confirm you are 18+ and opt into the fictional game."""
-        if confirmation.lower() != "confirm":
-            if await self._nightlife_allowed(ctx):
-                await ctx.send(f"Use `{ctx.clean_prefix}sex join confirm` to confirm you are 18+ and want to play.")
-            return
-        await self._nightlife_run(ctx, "join")
-
-    @nightlife_sex.command(name="leave")
-    async def nightlife_leave(self, ctx: commands.Context):
-        """Opt out without losing progress or clearing conditions."""
-        # Opt-out remains available even if the game is disabled.
-        async with self._lock:
-            async with self.config.nightlife_players() as players:
-                player = players.get(str(ctx.author.id))
-                if player:
-                    player["opted_in"] = False
-        await ctx.send("You left Nightlife. Progress is saved; spending and conditions are unchanged.")
 
     @nightlife_sex.command(name="escorts", aliases=["hookers", "npcs"])
     async def nightlife_escorts(self, ctx: commands.Context):
-        """List consenting adult NPC escorts and venue fees."""
+        """Browse escorts and venues."""
         if not await self._nightlife_allowed(ctx):
             return
-        lines = ["**Adult NPC escorts** (all encounters happen off-screen)"]
+        lines = ["**Escorts**"]
         for key, escort in nightlife.ESCORTS.items():
-            lines.append(f"`{key}` — {escort['name']}: {escort['price']:,} LWD$, +{escort['charm']} satisfaction")
+            lines.append(f"`{key}` — {escort['name']}: {escort['price']:,} LWD$")
         lines.append("\n**Venues** (added to the escort fee)")
         for key, venue in nightlife.VENUES.items():
-            lines.append(f"`{key}` — {venue['price']:,} LWD$, +{venue['bonus']} satisfaction")
-        lines.append("\nPrice affects satisfaction only. Every NPC has the same in-game infection risk.")
+            lines.append(f"`{key}` — {venue['price']:,} LWD$")
         await ctx.send("\n".join(lines))
 
     @nightlife_sex.command(name="shop")
     async def nightlife_shop(self, ctx: commands.Context):
-        """List condoms and consumable game items."""
+        """Browse supplies."""
         if not await self._nightlife_allowed(ctx):
             return
         lines = ["**Nightlife shop**"]
         for key, item in nightlife.ITEMS.items():
             lines.append(f"`{key}` — {item['price']:,} LWD$: {item['description']}")
-        lines.append(f"Buy with `{ctx.clean_prefix}sex buy <item> [quantity]`. Hold up to 100 of each item.")
+        lines.append(f"`{ctx.clean_prefix}sex buy <item> [quantity]`")
         await ctx.send("\n".join(lines))
 
     @nightlife_sex.command(name="buy")
     async def nightlife_buy(self, ctx: commands.Context, item: str, quantity: int = 1):
         """Buy Nightlife items with LWD$."""
-        item = item.lower()
-        await self._nightlife_run(ctx, "buy", item="condom" if item == "condoms" else item, quantity=quantity)
+        await self._nightlife_run(ctx, "buy", item=item, quantity=quantity)
 
     @nightlife_sex.command(name="use")
     async def nightlife_use(self, ctx: commands.Context, item: str):
-        """Use a boost or restore stamina."""
-        await self._nightlife_run(ctx, "use", item=item.lower())
+        """Use an item."""
+        await self._nightlife_run(ctx, "use", item=item)
 
     @nightlife_sex.command(name="encounter", aliases=["book"])
     async def nightlife_encounter(
         self, ctx: commands.Context, escort: str = "alex", venue: str = "motel", protected: bool = True,
     ):
-        """Book an off-screen encounter; protection defaults to true."""
+        """Book an escort and venue. Set protected to true or false to choose condom use."""
         await self._nightlife_run(ctx, "encounter", escort=escort.lower(), venue=venue.lower(), protected=protected)
 
     @nightlife_sex.command(name="status", aliases=["profile", "inventory", "inv"])
     async def nightlife_status(self, ctx: commands.Context):
-        """Show your own game progress and inventory."""
+        """View your profile and inventory."""
         if not await self._nightlife_allowed(ctx):
             return
         async with self._lock:
@@ -1920,38 +1888,45 @@ class Economy(commands.Cog):
         remaining = max(0, nightlife.ENCOUNTER_COOLDOWN - (int(time.time()) - last)) if last is not None else 0
         lines = [
             f"**Your Nightlife profile — {nightlife.title_for(player['encounters'])}**",
-            f"Participation: {'joined' if player['opted_in'] else 'opted out'}",
             f"Stamina: {player['stamina']}/100 • Encounter cooldown: {remaining}s",
             f"Encounters: {player['encounters']:,} • Total satisfaction: {player['satisfaction']:,}",
             f"Total spent: {player['spent']:,} LWD$",
             "Inventory: " + (", ".join(f"{key} ×{value}" for key, value in player["inventory"].items() if value) or "empty"),
             "Next-encounter boosts: " + (", ".join(player["boosts"]) or "none"),
-            "Diagnosed in-game conditions: " + (", ".join(diagnosed) or "none"),
-            "Only a clinic test reveals detectable conditions.",
+            "Diagnoses: " + (", ".join(diagnosed) or "none"),
+            f"Hospital bills: {player['medical_bill']:,} LWD$ • Hospital visits: {player['hospital_visits']:,}",
         ]
+        if player["recovery_until"]:
+            lines.append(f"{player['recovery_reason']} until <t:{player['recovery_until']}:R>.")
         await ctx.send("\n".join(lines))
 
     @nightlife_sex.group(name="clinic", invoke_without_command=True)
     async def nightlife_clinic(self, ctx: commands.Context):
-        """Show in-game disease testing and treatment fees."""
+        """View clinic prices."""
         if not await self._nightlife_allowed(ctx):
             return
         lines = [f"**Nightlife clinic** — a test costs {nightlife.TEST_PRICE} LWD$."]
         for disease in nightlife.DISEASES.values():
-            lines.append(f"{disease['name']}: {disease['treatment']:,} LWD$ to treat; −{disease['penalty']} satisfaction while active.")
-        lines.append(f"`{ctx.clean_prefix}sex clinic test` detects conditions after 10 minutes. "
-                     f"`{ctx.clean_prefix}sex clinic cure` pays the combined fees to clear all diagnosed conditions.")
+            lines.append(f"{disease['name']}: {disease['treatment']:,} LWD$ to treat")
+        lines.append(f"`{ctx.clean_prefix}sex clinic test` — get tested\n"
+                     f"`{ctx.clean_prefix}sex clinic cure` — get treated\n"
+                     f"`{ctx.clean_prefix}sex clinic pay` — pay hospital bills")
         await ctx.send("\n".join(lines))
 
     @nightlife_clinic.command(name="test")
     async def nightlife_test(self, ctx: commands.Context):
-        """Pay for a test for detectable in-game conditions."""
+        """Get tested."""
         await self._nightlife_run(ctx, "test")
 
     @nightlife_clinic.command(name="cure", aliases=["treat"])
     async def nightlife_cure(self, ctx: commands.Context):
-        """Pay to clear all diagnosed in-game conditions."""
+        """Get treated."""
         await self._nightlife_run(ctx, "cure")
+
+    @nightlife_clinic.command(name="pay")
+    async def nightlife_pay_bill(self, ctx: commands.Context):
+        """Pay hospital bills."""
+        await self._nightlife_run(ctx, "pay")
 
     @economy.group(name="admin", invoke_without_command=True)
     @commands.is_owner()

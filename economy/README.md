@@ -62,37 +62,40 @@ Shortcut commands are also available for common user actions:
 
 ## Nightlife
 
-`[p]sex` starts a non-graphic encounter with a consenting adult NPC. This game is available in server channels (including their threads), requires explicit adult opt-in, and spends the existing global LWD$ balance. NPC fees, venue fees, supplies and clinic bills remove currency; satisfaction and titles never pay currency back. Profiles, cooldowns and supplies are global across servers.
+`[p]sex` starts a non-graphic encounter with a consenting adult NPC. This game is available in server channels (including their threads) and spends the existing global LWD$ balance. NPC fees, venue fees, supplies and clinic bills remove currency; satisfaction and titles never pay currency back. Profiles, cooldowns and supplies are global across servers.
 
 With a `.` prefix, get started using:
 
 ```text
-.sex join confirm
 .sex buy condoms 5
 .sex
 ```
 
-The default encounter books Alex at the motel for 350 LWD$ and consumes one condom. If you have none, the encounter is refused without charging you. Condoms can break; an intact condom prevents infection in this game, while a broken one exposes the player to the same small infection chance as an unprotected encounter. The receipt reports breakage. Infection rolls apply equally to all NPCs and venues.
+The default encounter books Alex at the motel for 350 LWD$ and consumes one condom. If you have none, the encounter is refused without charging you. Condoms can break, exposing the player to infection. The receipt reports breakage.
 
 Commands:
 
 - `[p]sex` - book the default protected encounter.
 - `[p]sex help` - show setup, commands and game rules.
-- `[p]sex join confirm` / `[p]sex leave` - opt in or out; leaving retains conditions, cooldowns, items and progress.
 - `[p]sex escorts` / `[p]sex hookers` - list adult NPCs and venue fees.
 - `[p]sex encounter [escort] [venue] [protected]` - customize an encounter. Example: `[p]sex encounter blair penthouse true`. Use `false` for the final argument to explicitly choose an unprotected encounter.
 - `[p]sex shop` - view consumables.
-- `[p]sex buy <item> [quantity]` - buy condoms, Viagra, lube or energy; hold up to 100 of each item.
-- `[p]sex use <viagra|lube|energy>` - prepare a boost or restore stamina.
+- `[p]sex buy <item> [quantity]` - buy supplies; hold up to 100 of each item.
+- `[p]sex use <item>` - use supplies.
 - `[p]sex status` / `[p]sex inventory` - show your own progress, supplies and diagnosed conditions.
 - `[p]sex clinic` - show test and treatment prices.
 - `[p]sex clinic test` - pay 150 LWD$ to diagnose detectable conditions.
 - `[p]sex clinic cure` - pay the combined treatment fees for all diagnosed conditions.
-- `[p]eco admin sex <true|false>` - bot owner can enable or disable the game in the current server. Enabled by default in server channels; opt-out remains available when disabled.
+- `[p]sex clinic pay` - pay outstanding hospital bills.
+- `[p]eco admin sex <true|false>` - bot owner can enable or disable the game in the current server. Enabled by default in server channels.
 
-Each encounter uses 25 of 100 stamina and starts a persistent five-minute cooldown. Stamina regenerates by one point every three minutes. Energy restores up to 30 stamina; Viagra adds 20 satisfaction to the next encounter and lube adds 10. Each boost can be prepared once, and both are consumed on a successful encounter. More expensive NPCs and venues improve satisfaction, with a maximum of 100 per encounter. Titles unlock at 10, 25 and 100 encounters.
+The shop stocks condoms, Viagra, lube, energy, weed, cocaine, ecstasy, shrooms, poppers, champagne, flowers, perfume, chocolate, coffee and snacks. Use the single-word item names shown in the shop. Aliases include `condoms`, `cannabis`, `marijuana`, `coke`, `mdma`, `mushrooms`, `chocolates` and `snacks`.
 
-The game uses the names chlamydia, gonorrhea and syphilis with invented progression, odds, testing, treatment and item effects. Conditions become detectable after ten minutes in the game and reduce satisfaction until treated. Treatment costs are 600, 1,500 and 3,000 LWD$ respectively. Tests can miss conditions still incubating, and treatment clears only diagnosed conditions. Nothing is billed automatically, and failed actions do not spend currency or consume supplies. Nightlife spending is recorded in the capped ledger without posting to economy log channels; profiles and receipts are visible in the channel where requested.
+Diseases include chlamydia, gonorrhea, syphilis, genital herpes, HPV, trichomoniasis, pubic lice and scabies. Clinic prices are listed by `[p]sex clinic`. Disease progression, treatment and drug effects are fictional game rules. Energy, coffee and snacks restore stamina; other usable supplies prepare an encounter bonus. Prepared items are consumed only on a successful encounter, and repeated use of the same prepared item is refused. Failed actions do not spend currency or consume supplies. Nightlife spending is recorded in the capped ledger without posting to economy log channels; profiles and receipts are visible in the channel where requested.
+
+Drug items and champagne now report their aftermath in the encounter receipt and require recovery before another encounter or item use. Bad reactions cause hospitalization, empty stamina, award no satisfaction and create a hospital bill. Mixing substances increases the chance of a hospital event. The poppers/Viagra combination triggers a hospital event with a 5,000 LWD$ bill and two-hour recovery. The combination's blood-pressure hazard is described in [FDA prescribing information](https://www.accessdata.fda.gov/drugsatfda_docs/label/2015/020895s045lbl.pdf); event odds, timers and fees here are game settings.
+
+Recovery deadlines and unpaid bills persist across reloads and servers. `[p]sex status` shows recovery, hospital visits and outstanding bills. Hospital bills do not automatically debit the wallet or make it negative: pay them with `[p]sex clinic pay`. Unpaid bills block further encounters even after recovery ends. Payment does not end recovery early, and stamina items cannot bypass it. Buying supplies, earning LWD$, testing and treatment remain available during recovery.
 
 ## LWDMillions
 
