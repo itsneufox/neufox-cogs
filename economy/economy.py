@@ -1890,12 +1890,14 @@ class Economy(commands.Cog):
 
     @commands.group(name="sex", invoke_without_command=True, ignore_extra=False)
     @commands.guild_only()
-    async def nightlife_sex(self, ctx: commands.Context, member: discord.Member | None = None):
-        """Have sex. Use sex help for commands."""
+    async def nightlife_sex(
+        self, ctx: commands.Context, member: discord.Member | None = None, protected: bool = True,
+    ):
+        """Have sex. Add false for no condom."""
         if member is not None:
-            await self._invite_nightlife_partner(ctx, member)
+            await self._invite_nightlife_partner(ctx, member, protected=protected)
         else:
-            await self._nightlife_run(ctx, "encounter")
+            await self._nightlife_run(ctx, "encounter", protected=protected)
 
     @nightlife_sex.command(name="help")
     async def nightlife_help(self, ctx: commands.Context):
@@ -1909,7 +1911,7 @@ class Economy(commands.Cog):
         )
         embed.add_field(name="Commands", value="\n".join([
             f"`{prefix}sex` — have sex",
-            f"`{prefix}sex @member` — invite a player",
+            f"`{prefix}sex @member [true|false]` — invite; condom on/off",
             f"`{prefix}sex hookers` — browse escorts and venues",
             f"`{prefix}sex encounter <escort|@member> [venue] [true|false]` — book; condom on/off",
             f"`{prefix}sex status` — your profile",

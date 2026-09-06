@@ -76,7 +76,7 @@ The default encounter books Alex at the motel for 350 LWD$ and consumes one cond
 Commands:
 
 - `[p]sex` - book the default protected encounter.
-- `[p]sex @member` - invite a player to the motel with a condom.
+- `[p]sex @member [true|false]` - invite a player to the motel. Defaults to using a condom; `[p]sex @member false` uses none.
 - `[p]sex help` - show setup, commands and game rules.
 - `[p]sex escorts` / `[p]sex hookers` - list adult NPCs and venue fees.
 - `[p]sex encounter [escort|@member] [venue] [protected]` - customize an NPC or player encounter. Examples: `[p]sex encounter blair penthouse true`, `[p]sex encounter @member hotel false`.
