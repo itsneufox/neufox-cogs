@@ -37,6 +37,7 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco casino selfexclude <duration|permanent> confirm` - block your own chance-game access.
 - `[p]eco casino exclusion [member]` - show active exclusions.
 - `[p]eco casino unexclude <member>` - admins can remove administrator and self-exclusions.
+- `[p]sex help` - adult NPC encounters, protection, boosts, and clinic services.
 
 Shortcut commands are also available for common user actions:
 
@@ -58,6 +59,40 @@ Shortcut commands are also available for common user actions:
 - `[p]casino slots <bet>`
 - `[p]casino mines <bet> [mines]`
 - `[p]casino blackjack <bet>` / `[p]casino bj <bet>`
+
+## Nightlife
+
+`[p]sex` starts a non-graphic encounter with a consenting adult NPC. This game is available in age-restricted server channels (including their threads), requires explicit adult opt-in, and spends the existing global LWD$ balance. NPC fees, venue fees, supplies and clinic bills remove currency; satisfaction and titles never pay currency back. Profiles, cooldowns and supplies are global across servers.
+
+With a `.` prefix, get started using:
+
+```text
+.sex join confirm
+.sex buy condoms 5
+.sex
+```
+
+The default encounter books Alex at the motel for 350 LWD$ and consumes one condom. If you have none, the encounter is refused without charging you. Condoms can break; an intact condom prevents infection in this game, while a broken one exposes the player to the same small infection chance as an unprotected encounter. The receipt reports breakage. Infection rolls apply equally to all NPCs and venues.
+
+Commands:
+
+- `[p]sex` - book the default protected encounter.
+- `[p]sex help` - show setup, commands and game rules.
+- `[p]sex join confirm` / `[p]sex leave` - opt in or out; leaving retains conditions, cooldowns, items and progress.
+- `[p]sex escorts` / `[p]sex hookers` - list adult NPCs and venue fees.
+- `[p]sex encounter [escort] [venue] [protected]` - customize an encounter. Example: `[p]sex encounter blair penthouse true`. Use `false` for the final argument to explicitly choose an unprotected encounter.
+- `[p]sex shop` - view consumables.
+- `[p]sex buy <item> [quantity]` - buy condoms, Viagra, lube or energy; hold up to 100 of each item.
+- `[p]sex use <viagra|lube|energy>` - prepare a boost or restore stamina.
+- `[p]sex status` / `[p]sex inventory` - show your own progress, supplies and diagnosed conditions.
+- `[p]sex clinic` - show test and treatment prices.
+- `[p]sex clinic test` - pay 150 LWD$ to diagnose detectable conditions.
+- `[p]sex clinic cure` - pay the combined treatment fees for all diagnosed conditions.
+- `[p]eco admin sex <true|false>` - bot owner can enable or disable the game in the current server. Enabled by default in age-restricted channels; opt-out remains available when disabled.
+
+Each encounter uses 25 of 100 stamina and starts a persistent five-minute cooldown. Stamina regenerates by one point every three minutes. Energy restores up to 30 stamina; Viagra adds 20 satisfaction to the next encounter and lube adds 10. Each boost can be prepared once, and both are consumed on a successful encounter. More expensive NPCs and venues improve satisfaction, with a maximum of 100 per encounter. Titles unlock at 10, 25 and 100 encounters.
+
+The game uses the names chlamydia, gonorrhea and syphilis with invented progression, odds, testing, treatment and item effects. Conditions become detectable after ten minutes in the game and reduce satisfaction until treated. Treatment costs are 600, 1,500 and 3,000 LWD$ respectively. Tests can miss conditions still incubating, and treatment clears only diagnosed conditions. Nothing is billed automatically, and failed actions do not spend currency or consume supplies. Nightlife spending is recorded in the capped ledger without posting to economy log channels; profiles and receipts are visible in the channel where requested.
 
 ## LWDMillions
 
