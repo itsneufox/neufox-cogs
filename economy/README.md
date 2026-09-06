@@ -73,6 +73,8 @@ With a `.` prefix, get started using:
 
 The default encounter books Alex at the motel for 350 LWD$ and consumes one condom. If you have none, the encounter is refused without charging you. Condoms can break, exposing the player to infection. The receipt reports breakage.
 
+The regular encounter cooldown is 30 seconds for NPC and player encounters.
+
 Commands:
 
 - `[p]sex` - book the default protected encounter.

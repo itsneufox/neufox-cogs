@@ -94,8 +94,8 @@ class NightlifeTests(unittest.TestCase):
     def test_cooldown_persists_and_expires_at_boundary(self):
         player, _, _, _ = self.act("encounter", rolls=(0, 99))
         with self.assertRaisesRegex(ValueError, "Rest for 1 more"):
-            self.act("encounter", player=player, now=self.now + 299)
-        result, _, _, _ = self.act("encounter", player=player, now=self.now + 300, rolls=(0, 99))
+            self.act("encounter", player=player, now=self.now + 29)
+        result, _, _, _ = self.act("encounter", player=player, now=self.now + 30, rolls=(0, 99))
         self.assertEqual(result["encounters"], 2)
 
     def test_stamina_regeneration_preserves_partial_intervals(self):
