@@ -300,7 +300,7 @@ class Economy(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Nightlife (18+ channels)",
+            name="Nightlife",
             value=f"`{prefix}sex help` - NPC encounters, condoms, boosts, and a fictional clinic",
             inline=False,
         )
@@ -1763,11 +1763,8 @@ class Economy(commands.Cog):
                 self._blackjack_views.pop(ctx.author.id, None)
 
     async def _nightlife_allowed(self, ctx: commands.Context) -> bool:
-        channel = ctx.channel
-        if isinstance(channel, discord.Thread):
-            channel = channel.parent
-        if ctx.guild is None or not getattr(channel, "is_nsfw", lambda: False)():
-            await ctx.send("Nightlife is only available in age-restricted server channels.")
+        if ctx.guild is None:
+            await ctx.send("Nightlife is only available in server channels.")
             return False
         if ctx.guild.id in await self.config.nightlife_disabled_guilds():
             await ctx.send("Nightlife is disabled in this server.")
@@ -1859,7 +1856,7 @@ class Economy(commands.Cog):
     @nightlife_sex.command(name="leave")
     async def nightlife_leave(self, ctx: commands.Context):
         """Opt out without losing progress or clearing conditions."""
-        # Opt-out remains available even if the game is disabled or outside an NSFW channel.
+        # Opt-out remains available even if the game is disabled.
         async with self._lock:
             async with self.config.nightlife_players() as players:
                 player = players.get(str(ctx.author.id))
@@ -1973,7 +1970,7 @@ class Economy(commands.Cog):
                     disabled.remove(ctx.guild.id)
                 elif not enabled and ctx.guild.id not in disabled:
                     disabled.append(ctx.guild.id)
-        await ctx.send(f"Nightlife is {'enabled in age-restricted channels' if enabled else 'disabled'} in this server.")
+        await ctx.send(f"Nightlife is {'enabled' if enabled else 'disabled'} in this server.")
 
     @economy_admin.command(name="help", aliases=["commands"])
     @commands.is_owner()

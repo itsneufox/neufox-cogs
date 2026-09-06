@@ -62,7 +62,7 @@ Shortcut commands are also available for common user actions:
 
 ## Nightlife
 
-`[p]sex` starts a non-graphic encounter with a consenting adult NPC. This game is available in age-restricted server channels (including their threads), requires explicit adult opt-in, and spends the existing global LWD$ balance. NPC fees, venue fees, supplies and clinic bills remove currency; satisfaction and titles never pay currency back. Profiles, cooldowns and supplies are global across servers.
+`[p]sex` starts a non-graphic encounter with a consenting adult NPC. This game is available in server channels (including their threads), requires explicit adult opt-in, and spends the existing global LWD$ balance. NPC fees, venue fees, supplies and clinic bills remove currency; satisfaction and titles never pay currency back. Profiles, cooldowns and supplies are global across servers.
 
 With a `.` prefix, get started using:
 
@@ -88,7 +88,7 @@ Commands:
 - `[p]sex clinic` - show test and treatment prices.
 - `[p]sex clinic test` - pay 150 LWD$ to diagnose detectable conditions.
 - `[p]sex clinic cure` - pay the combined treatment fees for all diagnosed conditions.
-- `[p]eco admin sex <true|false>` - bot owner can enable or disable the game in the current server. Enabled by default in age-restricted channels; opt-out remains available when disabled.
+- `[p]eco admin sex <true|false>` - bot owner can enable or disable the game in the current server. Enabled by default in server channels; opt-out remains available when disabled.
 
 Each encounter uses 25 of 100 stamina and starts a persistent five-minute cooldown. Stamina regenerates by one point every three minutes. Energy restores up to 30 stamina; Viagra adds 20 satisfaction to the next encounter and lube adds 10. Each boost can be prepared once, and both are consumed on a successful encounter. More expensive NPCs and venues improve satisfaction, with a maximum of 100 per encounter. Titles unlock at 10, 25 and 100 encounters.
 
