@@ -1,0 +1,11 @@
+{
+    "name": "Converter",
+    "short": "Convert fuel economy and everyday measurements.",
+    "description": "Convert fuel economy, distance, speed, weight, volume, temperature, area, and time with common unit aliases.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.0",
+    "install_msg": "Use `[p]convert 15 km/L to mpg` or `[p]convert units` to get started. MPG defaults to US; use mpg-UK for imperial MPG.",
+    "requirements": [],
+    "tags": ["converter", "units", "utility", "fuel economy"],
+    "end_user_data_statement": "This cog does not store end user data or send conversion requests to external services."
+}
