@@ -17,6 +17,9 @@ from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 from . import nightlife
 from .blackjack import BlackjackCard, BlackjackHand, BlackjackView, render_blackjack_table
+from .holdem_table import HoldemTable
+from .holdem_escrow import account_from_mapping as holdem_account_from_mapping
+from .holdem_escrow import recover_escrows, reserve_buyin, resolve_escrow
 from .casino_games import (
     MINES_MAX_COUNT,
     MINES_MAX_PAYOUT_MULTIPLIER,
@@ -92,13 +95,13 @@ DEFAULT_WORK_MIN = 25
 DEFAULT_WORK_MAX = 100
 DEFAULT_WORK_COOLDOWN = 3600
 DEFAULT_CASINO_MIN_BET = 10
-DEFAULT_CASINO_MAX_BET = 10000
+DEFAULT_CASINO_MAX_BET = 50000
 CASINO_COINFLIP_PAYOUT_PERCENT = 195
 CASINO_DICE_PAYOUT_PERCENT = 570
 DEFAULT_LWDMILLIONS_TICKET_PRICE = 100
 DEFAULT_LWDMILLIONS_SEED_JACKPOT = 1_000_000
 DEFAULT_LWDMILLIONS_JACKPOT_CONTRIBUTION_PERCENT = 50
-MAX_LWDMILLIONS_LINES_PER_PLAYER = 20
+MAX_LWDMILLIONS_LINES_PER_PLAYER = 50
 MAX_LWDMILLIONS_TOTAL_TICKETS = 10_000
 LWDMILLIONS_HISTORY_LIMIT = 10
 LWDMILLIONS_HISTORY_WINNER_LIMIT = 100
@@ -205,6 +208,8 @@ class Economy(commands.Cog):
             casino_enabled=True,
             casino_min_bet=DEFAULT_CASINO_MIN_BET,
             casino_max_bet=DEFAULT_CASINO_MAX_BET,
+            casino_50k_limit_applied=False,
+            holdem_settlements={},
             casino_exclusions={},
             nightlife_players={},
             nightlife_disabled_guilds=[],
@@ -238,6 +243,8 @@ class Economy(commands.Cog):
         self._site: web.TCPSite | None = None
         self._blackjack_players: set[int] = set()
         self._blackjack_views: dict[int, BlackjackView] = {}
+        self._holdem_tables: dict[int, HoldemTable] = {}
+        self._holdem_lock = asyncio.Lock()
         self._mines_players: set[int] = set()
         self._mines_views: dict[int, MinesView] = {}
         self._nightlife_invites: dict[int, NightlifeInviteView] = {}
@@ -247,6 +254,8 @@ class Economy(commands.Cog):
         self._lwdmillions_draw_lock = asyncio.Lock()
         self._lwdmillions_notification_tasks: set[asyncio.Task] = set()
         self._startup_task = self.bot.loop.create_task(self._start_api_if_enabled())
+        self._casino_limit_upgrade_task = self.bot.loop.create_task(self._upgrade_casino_limit())
+        self._holdem_recovery_task = self.bot.loop.create_task(self._recover_holdem_escrows())
         self._lwdmillions_task = self.bot.loop.create_task(self._lwdmillions_draw_loop())
 
     def cog_unload(self):
@@ -254,6 +263,8 @@ class Economy(commands.Cog):
             view.close()
             self.bot.loop.create_task(view.edit_message("Invitation cancelled because Economy was unloaded."))
         self._startup_task.cancel()
+        self._casino_limit_upgrade_task.cancel()
+        self._holdem_recovery_task.cancel()
         self._lwdmillions_task.cancel()
         for task in list(self._lwdmillions_notification_tasks):
             task.cancel()
@@ -261,6 +272,8 @@ class Economy(commands.Cog):
             self.bot.loop.create_task(view.cancel_and_refund())
         for view in list(self._mines_views.values()):
             self.bot.loop.create_task(view.cancel_and_refund())
+        for table in list(self._holdem_tables.values()):
+            self.bot.loop.create_task(table.cancel(0, force=True))
         self.bot.loop.create_task(self._stop_api())
 
     @commands.group(name="eco", aliases=["economy"], invoke_without_command=True)
@@ -328,7 +341,7 @@ class Economy(commands.Cog):
         )
         await ctx.send(embed=embed)
 
-    @commands.command(name="balance", aliases=["bal"])
+    @commands.hybrid_command(name="balance", aliases=["bal"])
     async def economy_balance_short(self, ctx: commands.Context, member: discord.Member | None = None):
         """Shortcut for eco balance."""
         await ctx.invoke(self.economy_balance, member=member)
@@ -399,7 +412,7 @@ class Economy(commands.Cog):
         """Shortcut for eco inventory."""
         await ctx.invoke(self.economy_inventory, member=member)
 
-    @commands.command(name="ecotop", aliases=["richtop"])
+    @commands.hybrid_command(name="topbalance", aliases=["ecotop", "richtop"])
     async def economy_top_short(self, ctx: commands.Context):
         """Shortcut for eco top."""
         await ctx.invoke(self.economy_top)
@@ -457,10 +470,15 @@ class Economy(commands.Cog):
         """Shortcut for eco lwdmillions verify."""
         await ctx.invoke(self.economy_lwdmillions_verify, draw_number=draw_number)
 
-    @commands.group(name="casino", aliases=["gamble"], invoke_without_command=True)
+    @commands.hybrid_group(name="casino", aliases=["gamble"], fallback="games")
     async def economy_casino_short(self, ctx: commands.Context):
         """Shortcut for eco casino."""
         await ctx.invoke(self.economy_casino)
+
+    @staticmethod
+    async def _defer_casino_slash(ctx: commands.Context):
+        if ctx.interaction is not None and not ctx.interaction.response.is_done():
+            await ctx.defer()
 
     @economy_casino_short.command(name="coinflip", aliases=["coin", "flip"])
     @commands.cooldown(1, 3, commands.BucketType.user)
@@ -471,18 +489,21 @@ class Economy(commands.Cog):
         side: str = "heads",
     ):
         """Shortcut for eco casino coinflip."""
+        await self._defer_casino_slash(ctx)
         await ctx.invoke(self.economy_casino_coinflip, wager=wager, side=side)
 
     @economy_casino_short.command(name="dice", aliases=["die"])
     @commands.cooldown(1, 3, commands.BucketType.user)
     async def economy_casino_dice_short(self, ctx: commands.Context, wager: int, guess: int):
         """Shortcut for eco casino dice."""
+        await self._defer_casino_slash(ctx)
         await ctx.invoke(self.economy_casino_dice, wager=wager, guess=guess)
 
     @economy_casino_short.command(name="highcard", aliases=["war"])
     @commands.cooldown(1, 3, commands.BucketType.user)
     async def economy_casino_highcard_short(self, ctx: commands.Context, wager: int):
         """Shortcut for eco casino highcard."""
+        await self._defer_casino_slash(ctx)
         await ctx.invoke(self.economy_casino_highcard, wager=wager)
 
     @economy_casino_short.command(name="roulette", aliases=["wheel"])
@@ -494,12 +515,14 @@ class Economy(commands.Cog):
         choice: str,
     ):
         """Shortcut for eco casino roulette."""
+        await self._defer_casino_slash(ctx)
         await ctx.invoke(self.economy_casino_roulette, wager=wager, choice=choice)
 
     @economy_casino_short.command(name="slots", aliases=["slot"])
     @commands.cooldown(1, 3, commands.BucketType.user)
     async def economy_casino_slots_short(self, ctx: commands.Context, wager: int):
         """Shortcut for eco casino slots."""
+        await self._defer_casino_slash(ctx)
         await ctx.invoke(self.economy_casino_slots, wager=wager)
 
     @economy_casino_short.command(name="mines", aliases=["mine"])
@@ -511,6 +534,7 @@ class Economy(commands.Cog):
         mine_count: int = DEFAULT_MINES,
     ):
         """Shortcut for eco casino mines."""
+        await self._defer_casino_slash(ctx)
         await ctx.invoke(
             self.economy_casino_mines,
             wager=wager,
@@ -521,7 +545,42 @@ class Economy(commands.Cog):
     @commands.max_concurrency(1, per=commands.BucketType.user, wait=False)
     async def economy_casino_blackjack_short(self, ctx: commands.Context, wager: int):
         """Shortcut for eco casino blackjack."""
+        await self._defer_casino_slash(ctx)
         await ctx.invoke(self.economy_casino_blackjack, wager=wager)
+
+    @economy_casino_short.group(name="holdem", aliases=["poker"], fallback="open")
+    async def economy_casino_holdem_short(self, ctx: commands.Context, buyin: int | None = None):
+        """Shortcut for eco casino holdem."""
+        await self._defer_casino_slash(ctx)
+        await ctx.invoke(self.economy_casino_holdem, buyin=buyin)
+
+    @economy_casino_holdem_short.command(name="join")
+    async def economy_casino_holdem_join_short(self, ctx: commands.Context):
+        await ctx.invoke(self.economy_casino_holdem_join)
+
+    @economy_casino_holdem_short.command(name="start")
+    async def economy_casino_holdem_start_short(self, ctx: commands.Context):
+        await ctx.invoke(self.economy_casino_holdem_start)
+
+    @economy_casino_holdem_short.command(name="cancel")
+    async def economy_casino_holdem_cancel_short(self, ctx: commands.Context):
+        await ctx.invoke(self.economy_casino_holdem_cancel)
+
+    @economy_casino_holdem_short.command(name="fold")
+    async def economy_casino_holdem_fold_short(self, ctx: commands.Context):
+        await ctx.invoke(self.economy_casino_holdem_fold)
+
+    @economy_casino_holdem_short.command(name="check")
+    async def economy_casino_holdem_check_short(self, ctx: commands.Context):
+        await ctx.invoke(self.economy_casino_holdem_check)
+
+    @economy_casino_holdem_short.command(name="call")
+    async def economy_casino_holdem_call_short(self, ctx: commands.Context):
+        await ctx.invoke(self.economy_casino_holdem_call)
+
+    @economy_casino_holdem_short.command(name="raise")
+    async def economy_casino_holdem_raise_short(self, ctx: commands.Context, amount: int):
+        await ctx.invoke(self.economy_casino_holdem_raise, amount=amount)
 
     @economy_casino_short.command(name="selfexclude", aliases=["self-exclude"])
     async def economy_casino_selfexclude_short(
@@ -1223,6 +1282,7 @@ class Economy(commands.Cog):
             title="LWD$ Casino",
             description=(
                 "Play using virtual LWD$ only. Each wager is taken from your global balance.\n"
+                "Slash commands: `/casino games` and `/casino <game>`. Prefix commands also work.\n"
                 f"Status: **{'Open' if enabled else 'Closed'}** | Bets: **{minimum:,}-{maximum:,} {CURRENCY_NAME}**"
             ),
             color=discord.Color.gold(),
@@ -1284,6 +1344,16 @@ class Economy(commands.Cog):
             value=(
                 f"`{prefix}casino blackjack <bet>`\n"
                 "Interactive blackjack with hit, stand, double, split, surrender, and insurance."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Texas Hold'em",
+            value=(
+                "`/casino holdem open <buyin>` opens a six-seat table. "
+                "House players fill open seats when fewer than six humans join. "
+                "Join, start, and play with buttons. One no-limit hand, "
+                "with private hole cards and side pots."
             ),
             inline=False,
         )
@@ -1708,6 +1778,101 @@ class Economy(commands.Cog):
     async def economy_casino_blackjack(self, ctx: commands.Context, wager: int):
         """Play an interactive hand of blackjack."""
         await self._run_blackjack_round(ctx, wager)
+
+    @economy_casino.group(name="holdem", aliases=["poker"], invoke_without_command=True)
+    async def economy_casino_holdem(self, ctx: commands.Context, buyin: int | None = None):
+        """Open a one-hand Texas Hold'em table with a fixed buy-in."""
+        if ctx.guild is None:
+            await ctx.send("Hold'em tables are only available in server channels.")
+            return
+        if buyin is None:
+            await ctx.send(f"Use `{ctx.clean_prefix}casino holdem <buy-in>` to open a table here.")
+            return
+        try:
+            async with self._holdem_lock:
+                if ctx.channel.id in self._holdem_tables:
+                    raise EconomyError("This channel already has a Hold'em table.")
+                if any(any(p.user_id == ctx.author.id for p in table.players) for table in self._holdem_tables.values()):
+                    raise EconomyError("Finish your current Hold'em table first.")
+                await self._validate_casino_wager(buyin, ctx.author.id)
+                table = HoldemTable(self, ctx, buyin)
+                self._holdem_tables[ctx.channel.id] = table
+                try:
+                    await table.join(ctx.author)
+                except Exception:
+                    self._holdem_tables.pop(ctx.channel.id, None)
+                    raise
+                table._schedule(180)
+        except (EconomyError, ValueError) as error:
+            await ctx.send(str(error))
+
+    def _get_holdem_table(self, ctx: commands.Context) -> HoldemTable:
+        table = self._holdem_tables.get(ctx.channel.id)
+        if table is None or table.closed:
+            raise EconomyError("There is no active Hold'em table in this channel.")
+        return table
+
+    @economy_casino_holdem.command(name="join")
+    async def economy_casino_holdem_join(self, ctx: commands.Context):
+        """Join the Hold'em table in this channel."""
+        try:
+            async with self._holdem_lock:
+                table = self._get_holdem_table(ctx)
+                if any(any(p.user_id == ctx.author.id for p in other.players) for other in self._holdem_tables.values()):
+                    raise EconomyError("Finish your current Hold'em table first.")
+                await table.join(ctx.author)
+        except (EconomyError, ValueError) as error:
+            await ctx.send(str(error))
+
+    @economy_casino_holdem.command(name="start")
+    async def economy_casino_holdem_start(self, ctx: commands.Context):
+        """Start the host's Hold'em table."""
+        try:
+            await self._get_holdem_table(ctx).start(ctx.author.id)
+        except (EconomyError, ValueError) as error:
+            await ctx.send(str(error))
+
+    @economy_casino_holdem.command(name="cancel")
+    async def economy_casino_holdem_cancel(self, ctx: commands.Context):
+        """Cancel a waiting table and refund every buy-in."""
+        try:
+            await self._get_holdem_table(ctx).cancel(ctx.author.id)
+        except (EconomyError, ValueError) as error:
+            await ctx.send(str(error))
+
+    async def _holdem_action(self, ctx: commands.Context, action: str, amount: int = 0):
+        try:
+            table = self._get_holdem_table(ctx)
+            if await self._active_casino_exclusions(ctx.author.id):
+                raise EconomyError("You cannot act in casino games while excluded.")
+            await table.act(ctx.author.id, action, amount)
+        except (EconomyError, ValueError) as error:
+            await ctx.send(str(error))
+
+    async def _upgrade_casino_limit(self):
+        """Raise the old default once while preserving deliberately higher limits."""
+        if await self.config.casino_50k_limit_applied():
+            return
+        if int(await self.config.casino_max_bet()) == 10_000:
+            await self.config.casino_max_bet.set(DEFAULT_CASINO_MAX_BET)
+        await self.config.casino_50k_limit_applied.set(True)
+
+    @economy_casino_holdem.command(name="fold")
+    async def economy_casino_holdem_fold(self, ctx: commands.Context):
+        await self._holdem_action(ctx, "fold")
+
+    @economy_casino_holdem.command(name="check")
+    async def economy_casino_holdem_check(self, ctx: commands.Context):
+        await self._holdem_action(ctx, "check")
+
+    @economy_casino_holdem.command(name="call")
+    async def economy_casino_holdem_call(self, ctx: commands.Context):
+        await self._holdem_action(ctx, "call")
+
+    @economy_casino_holdem.command(name="raise")
+    async def economy_casino_holdem_raise(self, ctx: commands.Context, amount: int):
+        """Raise to a total street bet, or your all-in amount."""
+        await self._holdem_action(ctx, "raise", amount)
 
     async def _run_blackjack_round(self, ctx: commands.Context, wager: int) -> bool:
         """Run one blackjack round for a command or Play Again interaction."""
@@ -4081,6 +4246,9 @@ class Economy(commands.Cog):
         view = self._mines_views.get(user_id)
         if view is not None and view.phase != "ended":
             await view.cancel_for_exclusion()
+        for table in list(self._holdem_tables.values()):
+            if any(player.user_id == user_id for player in table.players):
+                await table.cancel(user_id, force=True)
 
     async def _validate_casino_wager(self, wager: int, user_id: int | None = None):
         if not await self.config.casino_enabled():
@@ -4348,6 +4516,63 @@ class Economy(commands.Cog):
             )
         return account
 
+    async def _reserve_holdem_buyin(self, user_id: int, buyin: int, guild_id: int, table_id: str):
+        buyin = self._require_amount(buyin, allow_zero=False)
+        await self._holdem_recovery_task
+        async with self._lock:
+            async with self.config.balances() as balances:
+                try:
+                    reserve_buyin(balances, user_id, table_id, buyin)
+                except ValueError as error:
+                    raise EconomyError(str(error)) from error
+            await self._append_ledger(
+                "holdem_buyin", from_user_id=user_id, to_user_id=None,
+                amount=buyin, actor_id=user_id, guild_id=guild_id,
+                reason="Texas Hold'em table buy-in",
+            )
+
+    async def _refund_holdem_buyin(self, user_id: int, table_id: str, guild_id: int, reason: str):
+        async with self._lock:
+            async with self.config.balances() as balances:
+                escrow = balances.get(str(user_id), {}).get("holdem_escrow", {})
+                amount = int(escrow.get("buyin", 0)) if escrow.get("table_id") == table_id else 0
+                changed = amount > 0 and resolve_escrow(balances, user_id, table_id, amount)
+            if changed:
+                await self._append_ledger(
+                    "holdem_refund", from_user_id=None, to_user_id=user_id,
+                    amount=amount, actor_id=user_id, guild_id=guild_id, reason=reason,
+                )
+
+    async def _settle_holdem_table(self, table_id: str, payouts: dict[int, int], guild_id: int):
+        """Save the complete result before crediting anyone, then credit each once."""
+        async with self._lock:
+            async with self.config.holdem_settlements() as plans:
+                plans[table_id] = {str(user_id): int(amount) for user_id, amount in payouts.items()}
+            credited = []
+            async with self.config.balances() as balances:
+                for user_id, amount in payouts.items():
+                    if resolve_escrow(balances, user_id, table_id, amount):
+                        credited.append((user_id, amount))
+            async with self.config.holdem_settlements() as plans:
+                plans.pop(table_id, None)
+            for user_id, amount in credited:
+                if amount:
+                    await self._append_ledger(
+                        "holdem_payout", from_user_id=None, to_user_id=user_id,
+                        amount=amount, actor_id=user_id, guild_id=guild_id,
+                        reason="Hold'em hand settlement",
+                    )
+
+    async def _recover_holdem_escrows(self):
+        """Refund interrupted hands, or finish a saved showdown exactly once."""
+        async with self._lock:
+            plans = await self.config.holdem_settlements()
+            async with self.config.balances() as balances:
+                resolved = recover_escrows(balances, plans)
+            await self.config.holdem_settlements.set({})
+        if resolved:
+            log.warning("Recovered %s interrupted Hold'em escrow(s)", len(resolved))
+
     async def _reserve_blackjack_wager(
         self,
         user_id: int,
@@ -4459,7 +4684,7 @@ class Economy(commands.Cog):
     async def get_balance(self, user_id: int) -> dict[str, int]:
         """Public cog API: return a user's balances."""
         balances = await self.config.balances()
-        return self._account_from_mapping(balances, user_id)
+        return {CASH: self._account_from_mapping(balances, user_id)[CASH]}
 
     async def add_balance(
         self,
@@ -5429,11 +5654,8 @@ class Economy(commands.Cog):
         return str(name or "").strip().lower()
 
     @staticmethod
-    def _account_from_mapping(balances: dict[str, Any], user_id: int) -> dict[str, int]:
-        account = balances.get(str(user_id), {})
-        return {
-            CASH: int(account.get(CASH, 0)),
-        }
+    def _account_from_mapping(balances: dict[str, Any], user_id: int) -> dict[str, Any]:
+        return holdem_account_from_mapping(balances, user_id)
 
     async def _display_user(self, guild: discord.Guild | None, user_id: int) -> str:
         if guild is not None:

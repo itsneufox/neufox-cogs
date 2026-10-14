@@ -5,6 +5,8 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 ## User commands
 
 - `[p]eco balance [member]` - show a user's LWD$ balance.
+- `/balance [member]` - slash shortcut for a user's balance.
+- `/topbalance` - slash LWD$ leaderboard.
 - `[p]eco help` - show user economy commands.
 - `[p]eco pay <member> <amount>` - transfer LWD$ to another member.
 - `[p]eco daily` - claim daily LWD$ once per UTC calendar day.
@@ -34,6 +36,7 @@ Global LWD$ economy cog with API access for other bots or future SA-MP integrati
 - `[p]eco casino slots <bet>` - spin the slot machine.
 - `[p]eco casino mines <bet> [mines]` - reveal safe tiles and cash out before hitting a mine.
 - `[p]eco casino blackjack <bet>` - play interactive blackjack.
+- `[p]eco casino holdem <buy-in>` - open a multiplayer Texas Hold'em table.
 - `[p]eco casino selfexclude <duration|permanent> confirm` - block your own chance-game access.
 - `[p]eco casino exclusion [member]` - show active exclusions.
 - `[p]eco casino unexclude <member>` - admins can remove administrator and self-exclusions.
@@ -59,6 +62,12 @@ Shortcut commands are also available for common user actions:
 - `[p]casino slots <bet>`
 - `[p]casino mines <bet> [mines]`
 - `[p]casino blackjack <bet>` / `[p]casino bj <bet>`
+- `[p]casino holdem <buy-in>` / `[p]casino poker <buy-in>`
+- `[p]casino holdem join|start|cancel|fold|check|call|raise <total>`
+
+The casino shortcuts are also slash commands. Use `/casino games` for the menu, `/casino coinflip`, `/casino dice`, `/casino highcard`, `/casino roulette`, `/casino slots`, `/casino mines`, `/casino blackjack`, and `/casino holdem open <buyin>`. Hold'em also has `/casino holdem join|start|cancel|fold|check|call|raise`. Prefix commands continue to work.
+
+On Red installations where third-party slash commands are disabled, the bot owner must run `[p]slash enablecog Economy` and `[p]slash sync` after loading the cog.
 
 ## Nightlife
 
@@ -106,7 +115,7 @@ Recovery deadlines and unpaid bills persist across reloads and servers. `[p]sex 
 
 ## LWDMillions
 
-LWDMillions is a global, scheduled lottery using virtual LWD$. Each line contains five distinct main numbers from 1-50 and two distinct Lucky Stars from 1-12. Draws close automatically every Tuesday and Friday at 20:00 UTC. A player may hold up to 20 lines in one draw; a draw accepts up to 10,000 total lines.
+LWDMillions is a global, scheduled lottery using virtual LWD$. Each line contains five distinct main numbers from 1-50 and two distinct Lucky Stars from 1-12. Draws close automatically every Tuesday and Friday at 20:00 UTC. A player may hold up to 50 lines in one draw; a draw accepts up to 10,000 total lines.
 
 The default line price is 100 LWD$. Half of every ticket is added to a rolling 1,000,000 LWD$ jackpot. Lines matching all five main numbers and both Lucky Stars split that jackpot; without a jackpot winner, it rolls over. The other 12 match tiers pay fixed multiples of the price recorded when each line was bought. This means changing the price does not change payouts on existing tickets.
 
@@ -122,7 +131,7 @@ Every ticket period publishes a SHA-256 commitment that binds a private secret, 
 
 When upgrading while tickets are already sold, nobody must rebuy and no selection, ticket price, or jackpot contribution changes. The in-progress draw keeps its exact original v1 commitment as the secret anchor, deterministically locks the first Quicknet round after its original draw time, and mixes that beacon into the result. Verification checks both the old commitment and the public beacon. Following draws use native v2 commitments. Ticket purchases are blocked for users with an active casino self-exclusion or administrator exclusion.
 
-Casino games use the same global LWD$ balance as the rest of the economy. They use secure random draws, settle each wager atomically, and record the net result in the transaction ledger. The defaults allow bets from 10 to 10,000 LWD$, with a short per-game anti-spam cooldown.
+Casino games use the same global LWD$ balance as the rest of the economy. They use secure random draws, settle each wager atomically, and record the net result in the transaction ledger. The defaults allow bets from 10 to 50,000 LWD$, with a short per-game anti-spam cooldown. Existing 10,000 LWD$ default maxima upgrade to 50,000 once; other custom maxima remain in effect until changed with `[p]eco admin casino limits`.
 
 Players cannot shorten or remove their own self-exclusion. A server administrator can lift either a self-exclusion or an administrator-imposed exclusion with `[p]casino unexclude <member>`.
 
@@ -133,6 +142,8 @@ European Roulette uses a single-zero wheel. Straight-up numbers from 0 to 36 ret
 Mines uses a 20-tile button board with 1-10 mines (3 by default). Safe reveals build a probability-based cash-out value; hitting a mine loses the reserved wager. Cash-out values target 97% RTP before integer rounding and are capped at 100x. Reaching the cap or clearing every safe tile settles automatically. An unanswered board refunds before the first pick or automatically cashes out its current value after at least one safe pick. Completed games reveal the board and provide player-only replay and setup controls.
 
 Blackjack supports hit, stand, double down, up to four split hands, late surrender, and insurance. Its live message includes a chronological round log covering player actions, dealer draws, timeouts, and settlement. Completed rounds have player-only Same Bet, Half, Double, and Change Bet replay controls; all replay wagers still respect the casino limits and available balance. The dealer stands on soft 17 and a player natural blackjack pays 3:2. As a house fairness rule, a dealer natural is a redraw: the main wager is returned instead of losing. Insurance still pays 2:1. Wagers and any extra double, split, or insurance stakes are reserved immediately, so funds cannot be moved away while a hand is active. An unanswered hand times out and forfeits after 90 seconds.
+
+Texas Hold'em opens one table per server channel. The host pays a fixed buy-in when opening it; up to five others join with the same buy-in, then the host starts one no-limit hand. House players fill empty seats up to six total; a full six-human table has no house player. The table uses small and big blinds of about 5% and 10% of the buy-in. The live table renders card artwork, the community cards, and each player's avatar beside their seat. Hole cards stay face down in the public image until showdown, and a fold winner's cards remain hidden. Players see their own cards privately as an image with **Show my cards**. Join, start, fold, check, call, and raise are all available as table buttons. The Raise button asks for the new total bet for the current betting round. The table handles all-ins, side pots, shared pots, and standard five-card hand rankings. A turn times out after 90 seconds and folds; an unstarted lobby expires after three minutes. The host may cancel an unstarted lobby, refunding all buy-ins. On completion, remaining chips and winnings return to the global LWD$ balances. Interrupted hands refund reserved buy-ins on restart; a saved completed result finishes paying out once.
 
 Blackjack card/table artwork and slot-machine artwork are used under the bundled Casino Bot MIT notice in `CASINO_BOT_LICENSE.md`.
 
