@@ -25,6 +25,8 @@ ASSETS_PATH = Path(__file__).parent / "assets"
 CARD_ASSETS_PATH = ASSETS_PATH / "cards"
 RANKS = ("2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K", "A")
 SUITS = ("C", "D", "H", "S")
+BLACKJACK_SHOE_DECKS = 6
+BLACKJACK_SHOE_PENETRATION = 0.75
 
 
 @dataclass
@@ -59,6 +61,50 @@ class BlackjackHand:
     @property
     def finished(self) -> bool:
         return self.stood or self.surrendered or self.forfeited
+
+
+class BlackjackShoe:
+    """A multi-deck shoe that persists between rounds so cards can be counted."""
+
+    def __init__(
+        self,
+        decks: int = BLACKJACK_SHOE_DECKS,
+        penetration: float = BLACKJACK_SHOE_PENETRATION,
+    ):
+        self.decks = decks
+        self.size = decks * len(RANKS) * len(SUITS)
+        self.cut_card = self.size - int(self.size * penetration)
+        self.cards: list[BlackjackCard] = []
+        self.shuffle()
+
+    def shuffle(self):
+        self.cards = [
+            BlackjackCard(rank, suit)
+            for _ in range(self.decks)
+            for rank in RANKS
+            for suit in SUITS
+        ]
+        secrets.SystemRandom().shuffle(self.cards)
+
+    @property
+    def remaining(self) -> int:
+        return len(self.cards)
+
+    @property
+    def needs_shuffle(self) -> bool:
+        return len(self.cards) <= self.cut_card
+
+    def shuffle_if_needed(self) -> bool:
+        """Reshuffle between rounds once the cut card has come out."""
+        if self.needs_shuffle:
+            self.shuffle()
+            return True
+        return False
+
+    def draw(self) -> BlackjackCard:
+        if not self.cards:
+            self.shuffle()
+        return self.cards.pop()
 
 
 def hand_value(cards: list[BlackjackCard], *, reveal_hidden: bool = False) -> tuple[int, bool]:
@@ -337,6 +383,7 @@ class BlackjackView(discord.ui.View):
         wager: int,
         *,
         currency_name: str,
+        shoe: BlackjackShoe | None = None,
         timeout: float = 90,
     ):
         super().__init__(timeout=timeout)
@@ -359,12 +406,13 @@ class BlackjackView(discord.ui.View):
         self._action_lock = asyncio.Lock()
         self._action_version = 0
 
-        self.deck = [BlackjackCard(rank, suit) for rank in RANKS for suit in SUITS]
-        secrets.SystemRandom().shuffle(self.deck)
-        self.hands = [BlackjackHand([self.deck.pop()], wager)]
-        self.dealer_cards = [self.deck.pop()]
-        self.hands[0].cards.append(self.deck.pop())
-        hidden = self.deck.pop()
+        self.shoe = shoe or BlackjackShoe()
+        if self.shoe.shuffle_if_needed():
+            self._record_action("Cut card reached; the shoe was reshuffled.")
+        self.hands = [BlackjackHand([self.shoe.draw()], wager)]
+        self.dealer_cards = [self.shoe.draw()]
+        self.hands[0].cards.append(self.shoe.draw())
+        hidden = self.shoe.draw()
         hidden.down = True
         self.dealer_cards.append(hidden)
         self._record_action(
@@ -403,10 +451,16 @@ class BlackjackView(discord.ui.View):
             if self.phase == "insurance":
                 self._record_action("Player insurance offer timed out; declined.")
                 await self._after_insurance_choice()
-                if self.phase == "ended":
-                    self._sync_buttons()
-                    await self._edit_message()
-                    return
+                if self.phase != "ended":
+                    for hand in self.hands:
+                        hand.stood = True
+                    self._record_action(
+                        "Player did not act after the insurance offer; hand stood automatically."
+                    )
+                    await self._finish_round(timed_out=True)
+                self._sync_buttons()
+                await self._edit_message()
+                return
             for hand in self.hands:
                 if not hand.finished:
                     hand.forfeited = True
@@ -415,16 +469,19 @@ class BlackjackView(discord.ui.View):
             self._sync_buttons()
             await self._edit_message()
 
-    async def cancel_and_refund(self):
-        """Safely close an active round when the cog is unloaded."""
+    async def cancel_and_refund(
+        self,
+        reason: str = "The economy cog was reloaded",
+    ):
+        """Safely close an active round and return every committed stake."""
         async with self._action_lock:
             if self.phase == "ended":
                 return
-            self._record_action("Cog reloaded; committed stakes refunded.")
+            self._record_action(f"{reason}; committed stakes refunded.")
             await self._end_round(
                 "Blackjack Canceled",
                 self.total_wager,
-                ["The economy cog was reloaded; all committed stakes were returned."],
+                [f"{reason}; all committed stakes were returned."],
                 allow_replay=False,
             )
             self._action_version += 1
@@ -433,19 +490,7 @@ class BlackjackView(discord.ui.View):
 
     async def cancel_for_exclusion(self):
         """Close and refund a round when its player becomes casino-excluded."""
-        async with self._action_lock:
-            if self.phase == "ended":
-                return
-            self._record_action("Casino exclusion activated; committed stakes refunded.")
-            await self._end_round(
-                "Blackjack Canceled",
-                self.total_wager,
-                ["Casino exclusion activated; all committed stakes were returned."],
-                allow_replay=False,
-            )
-            self._action_version += 1
-            self._sync_buttons()
-            await self._edit_message()
+        await self.cancel_and_refund("Casino exclusion activated")
 
     @discord.ui.button(label="Hit", emoji="🃏", style=discord.ButtonStyle.primary, row=0)
     async def hit_button(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -460,7 +505,7 @@ class BlackjackView(discord.ui.View):
             hand_number = self.active_hand_index + 1
             hand.has_acted = True
             _, was_soft = hand_value(hand.cards)
-            card = self.deck.pop()
+            card = self.shoe.draw()
             hand.cards.append(card)
             total, soft = hand_value(hand.cards)
             self._record_action(
@@ -519,7 +564,7 @@ class BlackjackView(discord.ui.View):
             hand.has_acted = True
             hand_number = self.active_hand_index + 1
             _, was_soft = hand_value(hand.cards)
-            card = self.deck.pop()
+            card = self.shoe.draw()
             hand.cards.append(card)
             total, soft = hand_value(hand.cards)
             hand.stood = True
@@ -559,8 +604,8 @@ class BlackjackView(discord.ui.View):
             moved_card = hand.cards.pop()
             new_hand = BlackjackHand([moved_card], hand.bet)
             split_aces = hand.cards[0].rank == "A" and moved_card.rank == "A"
-            hand.cards.append(self.deck.pop())
-            new_hand.cards.append(self.deck.pop())
+            hand.cards.append(self.shoe.draw())
+            new_hand.cards.append(self.shoe.draw())
             if split_aces:
                 hand.split_aces = True
                 new_hand.split_aces = True
@@ -717,7 +762,7 @@ class BlackjackView(discord.ui.View):
             or (self.DEALER_HITS_SOFT_17 and dealer_total == 17 and dealer_soft)
         ):
             was_soft = dealer_soft
-            card = self.deck.pop()
+            card = self.shoe.draw()
             self.dealer_cards.append(card)
             dealer_total, dealer_soft = hand_value(self.dealer_cards, reveal_hidden=True)
             self._record_action(
@@ -742,7 +787,7 @@ class BlackjackView(discord.ui.View):
                 returned = 0
                 outcome = "forfeit (timeout)"
             elif hand.surrendered:
-                returned = hand.bet // 2
+                returned = (hand.bet + 1) // 2
                 outcome = "surrender"
             elif total > 21:
                 returned = 0
@@ -889,7 +934,8 @@ class BlackjackView(discord.ui.View):
         embed.set_footer(
             text=(
                 f"Committed: {self.total_wager:,} {self.currency_name} | "
-                f"Balance: {balance:,} {self.currency_name}"
+                f"Balance: {balance:,} {self.currency_name} | "
+                f"Shoe: {self.shoe.remaining}/{self.shoe.size} cards ({self.shoe.decks} decks)"
             )
         )
         embed.add_field(

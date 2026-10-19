@@ -16,7 +16,13 @@ from redbot.core import Config, commands
 from redbot.core.utils.menus import DEFAULT_CONTROLS, menu
 
 from . import nightlife
-from .blackjack import BlackjackCard, BlackjackHand, BlackjackView, render_blackjack_table
+from .blackjack import (
+    BlackjackCard,
+    BlackjackHand,
+    BlackjackShoe,
+    BlackjackView,
+    render_blackjack_table,
+)
 from .holdem_table import HoldemTable
 from .holdem_escrow import account_from_mapping as holdem_account_from_mapping
 from .holdem_escrow import recover_escrows, reserve_buyin, resolve_escrow
@@ -243,6 +249,7 @@ class Economy(commands.Cog):
         self._site: web.TCPSite | None = None
         self._blackjack_players: set[int] = set()
         self._blackjack_views: dict[int, BlackjackView] = {}
+        self._blackjack_shoes: dict[int, BlackjackShoe] = {}
         self._holdem_tables: dict[int, HoldemTable] = {}
         self._holdem_lock = asyncio.Lock()
         self._mines_players: set[int] = set()
@@ -1343,7 +1350,8 @@ class Economy(commands.Cog):
             name="Blackjack",
             value=(
                 f"`{prefix}casino blackjack <bet>`\n"
-                "Interactive blackjack with hit, stand, double, split, surrender, and insurance."
+                "Interactive blackjack with hit, stand, double, split, surrender, and insurance.\n"
+                "Every player has their own 6-deck shoe, reshuffled at the cut card, so cards can be counted."
             ),
             inline=False,
         )
@@ -1899,7 +1907,14 @@ class Economy(commands.Cog):
                 return False
 
             try:
-                view = BlackjackView(self, ctx, wager, currency_name=CURRENCY_NAME)
+                shoe = self._blackjack_shoes.setdefault(ctx.author.id, BlackjackShoe())
+                view = BlackjackView(
+                    self,
+                    ctx,
+                    wager,
+                    currency_name=CURRENCY_NAME,
+                    shoe=shoe,
+                )
                 self._blackjack_views[ctx.author.id] = view
                 view.final_balance = account[CASH]
                 await view.start()
@@ -1921,7 +1936,14 @@ class Economy(commands.Cog):
                             f"Balance: {view.final_balance:,} {CURRENCY_NAME}."
                         )
                 else:
-                    await ctx.send("That blackjack hand hit an unexpected error and will time out safely.")
+                    try:
+                        await view.cancel_and_refund("The hand hit an unexpected error")
+                    except Exception:
+                        log.exception("Could not refund blackjack for user %s", ctx.author.id)
+                        await ctx.send(
+                            "That blackjack hand hit an unexpected error and could not be refunded "
+                            "automatically. Please contact staff."
+                        )
             return True
         finally:
             if view is None:
