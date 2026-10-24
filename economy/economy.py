@@ -1351,7 +1351,8 @@ class Economy(commands.Cog):
             value=(
                 f"`{prefix}casino blackjack <bet>`\n"
                 "Interactive blackjack with hit, stand, double, split, surrender, and insurance.\n"
-                "Every player has their own 6-deck shoe, reshuffled at the cut card, so cards can be counted."
+                "Each player has a separate 6-deck shoe. The hand shows its remaining count and announces "
+                "when the cut card triggers a reshuffle."
             ),
             inline=False,
         )

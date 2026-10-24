@@ -407,7 +407,8 @@ class BlackjackView(discord.ui.View):
         self._action_version = 0
 
         self.shoe = shoe or BlackjackShoe()
-        if self.shoe.shuffle_if_needed():
+        self.shuffle_alert = self.shoe.shuffle_if_needed()
+        if self.shuffle_alert:
             self._record_action("Cut card reached; the shoe was reshuffled.")
         self.hands = [BlackjackHand([self.shoe.draw()], wager)]
         self.dealer_cards = [self.shoe.draw()]
@@ -928,14 +929,29 @@ class BlackjackView(discord.ui.View):
             name=f"Player: {self.player.display_name}",
             icon_url=self.player.display_avatar.url,
         )
+        cut_status = (
+            "Cut card reached · next hand reshuffles"
+            if self.shoe.needs_shuffle
+            else f"Cut card at {self.shoe.cut_card} remaining · {self.shoe.remaining - self.shoe.cut_card} cards to go"
+        )
+        embed.add_field(
+            name="Blackjack Shoe",
+            value=f"**{self.shoe.remaining}/{self.shoe.size} cards remaining** · {self.shoe.decks} decks\n{cut_status}",
+            inline=False,
+        )
+        if self.shuffle_alert:
+            embed.add_field(
+                name="🔄 Shoe reshuffled",
+                value="The cut card was reached. Your shoe was reshuffled before this hand was dealt.",
+                inline=False,
+            )
         balance = self.final_balance
         if balance is None:
             balance = (await self.cog.get_balance(self.player.id))["cash"]
         embed.set_footer(
             text=(
                 f"Committed: {self.total_wager:,} {self.currency_name} | "
-                f"Balance: {balance:,} {self.currency_name} | "
-                f"Shoe: {self.shoe.remaining}/{self.shoe.size} cards ({self.shoe.decks} decks)"
+                f"Balance: {balance:,} {self.currency_name}"
             )
         )
         embed.add_field(
