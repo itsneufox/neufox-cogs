@@ -11,7 +11,7 @@ import discord
 from redbot.core import Config, commands
 from redbot.core.utils.chat_formatting import pagify
 
-from .layouts import NO_PINGS, text_card
+from .layouts import NO_PINGS, channel_allowed, text_card
 
 
 CONFIG_ID = 670670067
@@ -112,6 +112,11 @@ class SixSevenMixin:
             default_language="en",
             channel_languages={},
             category_languages={},
+            chance=100,
+            per_channel_cooldown=False,
+            ignored_channels=[],
+            ignored_roles=[],
+            mention_author=False,
         )
         self._sixseven_last_reply: dict[int, float] = {}
 
@@ -158,6 +163,45 @@ class SixSevenMixin:
                 "unit": "seconds",
                 "help": "Minimum time between replies in this server.",
                 **bind("cooldown"),
+            },
+            {
+                "key": "sixseven_per_channel_cooldown",
+                "label": "Cooldown per channel",
+                "type": "bool",
+                "help": "Count the cooldown separately in each channel instead of server-wide.",
+                **bind("per_channel_cooldown"),
+            },
+            {
+                "key": "sixseven_chance",
+                "label": "Reply chance",
+                "type": "int",
+                "min": 1,
+                "max": 100,
+                "unit": "%",
+                "help": "Chance of replying to a matching message once the cooldown allows it.",
+                **bind("chance"),
+            },
+            {
+                "key": "sixseven_mention_author",
+                "label": "Ping the author",
+                "type": "bool",
+                "help": "Mention the author in the reply.",
+                **bind("mention_author"),
+            },
+            {
+                "key": "sixseven_ignored_channels",
+                "label": "Ignored channels",
+                "type": "channels",
+                "channel_types": ["text", "news", "voice", "forum", "stage", "category"],
+                "help": "Never reply in these channels or categories.",
+                **bind("ignored_channels"),
+            },
+            {
+                "key": "sixseven_ignored_roles",
+                "label": "Ignored roles",
+                "type": "roles",
+                "help": "Never reply to members with any of these roles.",
+                **bind("ignored_roles"),
             },
             {
                 "key": "sixseven_response",
@@ -229,9 +273,18 @@ class SixSevenMixin:
         data = await self.sixseven_config.guild(message.guild).all()
         if not data["enabled"]:
             return
+        if data.get("ignored_channels") and channel_allowed(message.channel, data["ignored_channels"]):
+            return
+        ignored_roles = {int(role) for role in data.get("ignored_roles") or []}
+        if ignored_roles and any(role.id in ignored_roles for role in getattr(message.author, "roles", [])):
+            return
+        bucket = message.channel.id if data.get("per_channel_cooldown") else message.guild.id
         now = time.monotonic()
-        last_reply = self._sixseven_last_reply.get(message.guild.id, 0)
+        last_reply = self._sixseven_last_reply.get(bucket, 0)
         if data["cooldown"] and now - last_reply < data["cooldown"]:
+            return
+        chance = int(data.get("chance", 100))
+        if chance < 100 and random.randint(1, 100) > chance:
             return
 
         response = data["response"]
@@ -239,7 +292,9 @@ class SixSevenMixin:
             language = resolve_language(message.channel, data)
             response = random.choice(RESPONSES_BY_LANGUAGE[language]).format(term=" ".join(match.group(0).split()))
         try:
-            await message.reply(response, mention_author=False, allowed_mentions=NO_PINGS)
+            mention = bool(data.get("mention_author"))
+            mentions = discord.AllowedMentions(everyone=False, users=False, roles=False, replied_user=mention)
+            await message.reply(response, mention_author=mention, allowed_mentions=mentions)
         except discord.HTTPException:
             return
-        self._sixseven_last_reply[message.guild.id] = now
+        self._sixseven_last_reply[bucket] = now

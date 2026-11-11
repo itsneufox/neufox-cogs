@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import sqlite3
 from pathlib import Path
@@ -14,6 +15,8 @@ from redbot.core import Config, commands
 DEFAULT_COLOR = discord.Color.blue()
 MAX_LAYOUT_TEXT = 3800
 NO_PINGS = discord.AllowedMentions.none()
+RETENTION_SWEEP_SECONDS = 60 * 60
+log = logging.getLogger("red.neufox.messagearchive")
 
 
 def _layout(*blocks: str, accent: discord.Color = DEFAULT_COLOR) -> discord.ui.LayoutView:
@@ -39,12 +42,96 @@ class MessageArchive(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.config = Config.get_conf(self, identifier=999000101)
-        self.config.register_guild(message_archive_enabled=True)
+        self.config.register_guild(
+            message_archive_enabled=True,
+            ignored_channel_ids=[],
+            ignored_role_ids=[],
+            archive_bots=True,
+            archive_webhooks=True,
+            archive_edits=False,
+            retention_days=0,
+        )
 
         self._archive_dir = Path(__file__).with_name("data")
         self._archive_dir.mkdir(parents=True, exist_ok=True)
         self._initialized_db: set[int] = set()
         self._locks: dict[int, asyncio.Lock] = {}
+        self._retention_task: asyncio.Task | None = None
+
+    async def cog_load(self):
+        self._retention_task = asyncio.create_task(self._retention_loop())
+
+    def cog_unload(self):
+        if self._retention_task is not None:
+            self._retention_task.cancel()
+
+    async def _retention_loop(self):
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                await self.apply_retention()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Message archive retention sweep failed.")
+            await asyncio.sleep(RETENTION_SWEEP_SECONDS)
+
+    async def apply_retention(self) -> int:
+        """Delete archived messages older than each guild's retention window."""
+        removed = 0
+        for guild_id, data in (await self.config.all_guilds()).items():
+            days = int(data.get("retention_days") or 0)
+            path = self._guild_db(int(guild_id))
+            if days <= 0 or not path.exists():
+                continue
+            cutoff = int(time.time()) - days * 86400
+            async with self._guild_lock(int(guild_id)):
+                removed += await asyncio.to_thread(self._delete_older_than, path, cutoff)
+        return removed
+
+    @staticmethod
+    def _delete_older_than(path: Path, cutoff: int) -> int:
+        with sqlite3.connect(path) as connection:
+            cursor = connection.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
+            connection.commit()
+            return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def _update_message(path: Path, message_id: int, content: str, clean_content: str, attachments: str) -> None:
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "UPDATE messages SET content = ?, clean_content = ?, attachments = ? WHERE message_id = ?",
+                (content, clean_content, attachments, message_id),
+            )
+            connection.commit()
+
+    @staticmethod
+    def _is_ignored_channel(channel: Any, ignored: set[int]) -> bool:
+        if not ignored:
+            return False
+        ids = {getattr(channel, "id", None), getattr(channel, "parent_id", None), getattr(channel, "category_id", None)}
+        parent = getattr(channel, "parent", None)
+        if parent is not None:
+            ids.add(getattr(parent, "category_id", None))
+        return bool(ids & ignored)
+
+    def _should_archive(self, message: discord.Message, settings: dict[str, Any]) -> bool:
+        """Whether a live message is saved: archiving is on and the filters allow it."""
+        return bool(settings.get("message_archive_enabled", True)) and self._passes_filters(message, settings)
+
+    def _passes_filters(self, message: discord.Message, settings: dict[str, Any], *, check_channel: bool = True) -> bool:
+        """Apply the guild's bot, webhook, channel and role filters to one message."""
+        if message.webhook_id is not None:
+            if not settings.get("archive_webhooks", True):
+                return False
+        elif message.author.bot and not settings.get("archive_bots", True):
+            return False
+        if check_channel and self._is_ignored_channel(message.channel, {int(i) for i in settings.get("ignored_channel_ids") or []}):
+            return False
+        ignored_roles = {int(i) for i in settings.get("ignored_role_ids") or []}
+        if ignored_roles and any(role.id in ignored_roles for role in getattr(message.author, "roles", ())):
+            return False
+        return True
 
     def _guild_lock(self, guild_id: int) -> asyncio.Lock:
         if guild_id not in self._locks:
@@ -234,7 +321,8 @@ class MessageArchive(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.guild is None:
             return
-        if not await self.config.guild(message.guild).message_archive_enabled():
+        settings = await self.config.guild(message.guild).all()
+        if not self._should_archive(message, settings):
             return
 
         data = self._serialize_message(message)
@@ -243,6 +331,23 @@ class MessageArchive(commands.Cog):
         lock = self._guild_lock(message.guild.id)
         async with lock:
             await asyncio.to_thread(self._insert_message, path, data)
+
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        message = getattr(payload, "message", None)
+        if message is None or message.guild is None:
+            return
+        settings = await self.config.guild(message.guild).all()
+        if not settings.get("archive_edits") or not self._should_archive(message, settings):
+            return
+        path = self._guild_db(message.guild.id)
+        if not path.exists():
+            return
+        data = self._serialize_message(message)
+        async with self._guild_lock(message.guild.id):
+            await asyncio.to_thread(
+                self._update_message, path, message.id, data["content"], data["clean_content"], data["attachments"]
+            )
 
     def control_panel_schema(self) -> dict:
         return {
@@ -253,7 +358,54 @@ class MessageArchive(commands.Cog):
                     "key": "message_archive_enabled",
                     "label": "Archive messages",
                     "type": "bool",
+                    "section": "Archiving",
                     "help": "Save new messages to this server's archive file.",
+                },
+                {
+                    "key": "archive_bots",
+                    "label": "Archive bot messages",
+                    "type": "bool",
+                    "section": "Archiving",
+                    "help": "Also save messages sent by bot accounts.",
+                },
+                {
+                    "key": "archive_webhooks",
+                    "label": "Archive webhook messages",
+                    "type": "bool",
+                    "section": "Archiving",
+                    "help": "Also save messages sent through webhooks.",
+                },
+                {
+                    "key": "archive_edits",
+                    "label": "Keep edits up to date",
+                    "type": "bool",
+                    "section": "Archiving",
+                    "help": "Replace an archived message's text when its author edits it.",
+                },
+                {
+                    "key": "retention_days",
+                    "label": "Keep messages for",
+                    "type": "int",
+                    "section": "Archiving",
+                    "min": 0,
+                    "max": 3650,
+                    "unit": "days",
+                    "help": "Archived messages older than this are deleted hourly. 0 keeps them forever.",
+                },
+                {
+                    "key": "ignored_channel_ids",
+                    "label": "Ignored channels",
+                    "type": "channels",
+                    "section": "Filters",
+                    "channel_types": ["text", "news", "forum", "voice", "stage", "category"],
+                    "help": "Never archive these channels, their threads, or channels in these categories.",
+                },
+                {
+                    "key": "ignored_role_ids",
+                    "label": "Ignored roles",
+                    "type": "roles",
+                    "section": "Filters",
+                    "help": "Never archive messages from members with any of these roles.",
                 },
             ],
         }
@@ -292,6 +444,10 @@ class MessageArchive(commands.Cog):
         """Backfill existing messages into the archive (0 = all history)."""
         await ctx.defer()
         channels = [channel] if channel is not None else list(ctx.guild.text_channels) + list(ctx.guild.threads)
+        settings = await self.config.guild(ctx.guild).all()
+        ignored = {int(i) for i in settings.get("ignored_channel_ids") or []}
+        if channel is None:
+            channels = [target for target in channels if not self._is_ignored_channel(target, ignored)]
         if not channels:
             await ctx.send("No text channels found in this server.")
             return
@@ -318,6 +474,8 @@ class MessageArchive(commands.Cog):
             buffer: list[dict[str, Any]] = []
             try:
                 async for message in target.history(limit=scan_limit, oldest_first=True):
+                    if not self._passes_filters(message, settings, check_channel=channel is None):
+                        continue
                     data = self._serialize_message(message)
                     total_scanned += 1
                     buffer.append(data)

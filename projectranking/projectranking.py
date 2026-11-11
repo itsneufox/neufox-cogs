@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 from redbot.core import Config, commands
@@ -15,6 +15,9 @@ SCHEDULER_INTERVAL = 15 * 60
 DEFAULT_COLOR = discord.Color.blurple()
 MAX_LAYOUT_TEXT = 3800
 NO_PINGS = discord.AllowedMentions.none()
+DEFAULT_TAG_NAME = "Community Favorite"
+DEFAULT_RANKING_SIZE = 10
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
 def _layout(*blocks: str, accent: discord.Color = DEFAULT_COLOR) -> discord.ui.LayoutView:
@@ -40,9 +43,16 @@ class FavoriteTagMissing(Exception):
     """Raised when the configured forum tag no longer exists."""
 
 
-def _week_key(value: datetime | None = None) -> str:
+def _week_offset(data: dict | None) -> int:
+    """Hours after Monday 00:00 UTC at which this guild's voting week starts."""
+    data = data or {}
+    return int(data.get("week_start_day") or 0) * 24 + int(data.get("week_start_hour") or 0)
+
+
+def _week_key(value: datetime | None = None, offset_hours: int = 0) -> str:
     value = value or datetime.now(timezone.utc)
-    iso = value.astimezone(timezone.utc).isocalendar()
+    shifted = value.astimezone(timezone.utc) - timedelta(hours=offset_hours)
+    iso = shifted.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
 
 
@@ -51,10 +61,13 @@ def _week_order(value: str) -> tuple[int, int]:
     return int(year), int(week)
 
 
-def _week_range(value: str) -> str:
+def _week_range(value: str, offset_hours: int = 0) -> str:
     year, week = _week_order(value)
-    monday = datetime.fromisocalendar(year, week, 1).date()
-    sunday = datetime.fromisocalendar(year, week, 7).date()
+    start = datetime.fromisocalendar(year, week, 1) + timedelta(hours=offset_hours)
+    end = start + timedelta(days=7) - timedelta(minutes=1)
+    if offset_hours % 24:
+        return f"{start:%d %b %H:%M}–{end:%d %b %H:%M %Y}"
+    monday, sunday = start.date(), end.date()
     if monday.month == sunday.month:
         return f"{monday.day}–{sunday.day} {sunday:%b %Y}"
     return f"{monday.day} {monday:%b}–{sunday.day} {sunday:%b %Y}"
@@ -76,6 +89,15 @@ class ProjectRanking(commands.Cog):
             favorite_tag_id=None,
             eligible_from_week=None,
             paused=False,
+            apply_favorite_tag=True,
+            winners_per_week=1,
+            min_upvotes=1,
+            week_start_day=0,
+            week_start_hour=0,
+            announcement_title=DEFAULT_TAG_NAME,
+            announcement_role_id=None,
+            remove_other_reactions=True,
+            ranking_size=DEFAULT_RANKING_SIZE,
             posts={},
             weekly_results={},
         )
@@ -100,19 +122,169 @@ class ProjectRanking(commands.Cog):
                     "key": "paused",
                     "label": "Promotions paused",
                     "type": "bool",
+                    "section": "Channels",
                     "help": "Voting continues. Weeks that end while paused are skipped.",
                     "set": self._set_paused,
+                },
+                {
+                    "key": "forum_channel_id",
+                    "label": "Project forum",
+                    "type": "channel",
+                    "section": "Channels",
+                    "channel_types": ["forum"],
+                    "clearable": False,
+                    "help": "Forum whose posts are voted on. Changing it starts eligibility from this week.",
+                    "set": self._set_forum,
                 },
                 {
                     "key": "best_creations_channel_id",
                     "label": "Best Creations channel",
                     "type": "channel",
+                    "section": "Channels",
                     "channel_types": ["text"],
                     "clearable": False,
-                    "help": "Where winners are posted. Use the setup command to change the forum.",
+                    "help": "Where winners are posted.",
+                },
+                {
+                    "key": "favorite_tag_id",
+                    "label": "Favorite tag",
+                    "type": "text",
+                    "section": "Channels",
+                    "min": 1,
+                    "max": 100,
+                    "help": "Name or ID of the forum tag given to winners.",
+                    "get": self._get_tag_name,
+                    "set": self._set_tag,
+                    "validate": self._validate_tag,
+                },
+                {
+                    "key": "apply_favorite_tag",
+                    "label": "Tag winning posts",
+                    "type": "bool",
+                    "section": "Channels",
+                    "help": "Add the favorite tag to each weekly winner's forum post.",
+                },
+                {
+                    "key": "week_start_day",
+                    "label": "Voting week starts on",
+                    "type": "choice",
+                    "section": "Voting",
+                    "choices": [{"value": index, "label": day} for index, day in enumerate(WEEKDAYS)],
+                    "help": "Day a new voting week begins. The previous week closes then. Applies to new posts.",
+                },
+                {
+                    "key": "week_start_hour",
+                    "label": "Voting week starts at",
+                    "type": "int",
+                    "section": "Voting",
+                    "min": 0,
+                    "max": 23,
+                    "unit": "h UTC",
+                    "help": "Hour (UTC) on the start day when the voting week rolls over.",
+                },
+                {
+                    "key": "winners_per_week",
+                    "label": "Winners per week",
+                    "type": "int",
+                    "section": "Voting",
+                    "min": 1,
+                    "max": 10,
+                    "help": "How many top projects are promoted each week.",
+                },
+                {
+                    "key": "min_upvotes",
+                    "label": "Minimum upvotes to win",
+                    "type": "int",
+                    "section": "Voting",
+                    "min": 1,
+                    "max": 1000,
+                    "unit": "votes",
+                    "help": "A project needs at least this many counted 👍 to be promoted.",
+                },
+                {
+                    "key": "remove_other_reactions",
+                    "label": "Remove other reactions",
+                    "type": "bool",
+                    "section": "Voting",
+                    "help": "Remove reactions other than 👍 and 👎 from project posts.",
+                },
+                {
+                    "key": "ranking_size",
+                    "label": "Ranking length",
+                    "type": "int",
+                    "section": "Voting",
+                    "min": 1,
+                    "max": 25,
+                    "unit": "projects",
+                    "help": "How many projects the ranking command lists.",
+                },
+                {
+                    "key": "announcement_title",
+                    "label": "Announcement title",
+                    "type": "text",
+                    "section": "Announcement",
+                    "min": 1,
+                    "max": 100,
+                    "help": "Heading of the winner post in the Best Creations channel.",
+                },
+                {
+                    "key": "announcement_role_id",
+                    "label": "Ping role",
+                    "type": "role",
+                    "section": "Announcement",
+                    "empty": "No ping",
+                    "help": "Role mentioned when a weekly winner is announced.",
                 },
             ],
         }
+
+    async def _set_forum(self, guild: discord.Guild, forum_id: int) -> None:
+        async with self._lock_for(guild.id):
+            guild_config = self.config.guild(guild)
+            data = await guild_config.all()
+            if data["forum_channel_id"] == forum_id and data["eligible_from_week"]:
+                return
+            await guild_config.forum_channel_id.set(forum_id)
+            await guild_config.eligible_from_week.set(_week_key(offset_hours=_week_offset(data)))
+            forum = guild.get_channel(forum_id)
+            tags = getattr(forum, "available_tags", None) or []
+            if all(tag.id != data["favorite_tag_id"] for tag in tags):
+                default = next((tag for tag in tags if tag.name.casefold() == DEFAULT_TAG_NAME.casefold()), None)
+                await guild_config.favorite_tag_id.set(default.id if default else None)
+
+    def _find_tag(self, guild: discord.Guild, forum_id: int | None, value: str):
+        forum = guild.get_channel(forum_id) if forum_id else None
+        if not isinstance(forum, discord.ForumChannel):
+            return None, "Set the project forum first."
+        value = str(value).strip()
+        for tag in forum.available_tags:
+            if (value.isdecimal() and tag.id == int(value)) or tag.name.casefold() == value.casefold():
+                return tag, None
+        available = ", ".join(tag.name for tag in forum.available_tags) or "none"
+        return None, f"No tag named {value!r} in that forum. Available: {available}"[:300]
+
+    async def _validate_tag(self, guild: discord.Guild, value) -> str | None:
+        if value is None:
+            return None
+        forum_id = await self.config.guild(guild).forum_channel_id()
+        return self._find_tag(guild, forum_id, value)[1]
+
+    async def _get_tag_name(self, guild: discord.Guild) -> str | None:
+        data = await self.config.guild(guild).all()
+        if not data["favorite_tag_id"]:
+            return None
+        forum = guild.get_channel(data["forum_channel_id"]) if data["forum_channel_id"] else None
+        tag = next((t for t in getattr(forum, "available_tags", []) if t.id == data["favorite_tag_id"]), None)
+        return tag.name if tag else f"Missing tag ({data['favorite_tag_id']})"
+
+    async def _set_tag(self, guild: discord.Guild, value) -> None:
+        if value is None:
+            await self.config.guild(guild).favorite_tag_id.set(None)
+            return
+        forum_id = await self.config.guild(guild).forum_channel_id()
+        tag, _error = self._find_tag(guild, forum_id, value)
+        if tag is not None:
+            await self.config.guild(guild).favorite_tag_id.set(tag.id)
 
     async def _set_paused(self, guild: discord.Guild, paused: bool) -> bool:
         """Pause or resume promotions. Returns False if resuming when already active."""
@@ -172,7 +344,7 @@ class ProjectRanking(commands.Cog):
         await guild_config.best_creations_channel_id.set(best_creations.id)
         await guild_config.favorite_tag_id.set(tag.id)
         if not same_forum or not data["eligible_from_week"]:
-            await guild_config.eligible_from_week.set(_week_key())
+            await guild_config.eligible_from_week.set(_week_key(offset_hours=_week_offset(data)))
 
         scanned, reacted, failed = await self._sync_current_week(ctx.guild, forum)
         missing = self._missing_permissions(ctx.guild, forum, best_creations)
@@ -181,7 +353,8 @@ class ProjectRanking(commands.Cog):
             f"Project voting is set up for {forum.mention}. Weekly winners will be posted in "
             f"{best_creations.mention} and receive `{tag.name}`. I checked {scanned} current-week "
             f"posts and added or confirmed the voting reactions on {reacted}; {failed} could not be updated."
-            f"\nWeeks run Monday to Sunday in UTC. The winner is the post with the most counted 👍 votes."
+            f"\nWeeks start {WEEKDAYS[int(data.get('week_start_day') or 0)]} at "
+            f"{int(data.get('week_start_hour') or 0):02d}:00 UTC. The winner is the post with the most counted 👍 votes."
             f"{note}"
         )
 
@@ -250,7 +423,10 @@ class ProjectRanking(commands.Cog):
                 f"**Weekly promotions:** {'paused' if data['paused'] else 'active'}",
             ]
         )
-        week = f"**Current week ({_week_key()}):** {len(posts)} tracked project(s)\n**Leader:** {leader_text}"
+        week = (
+            f"**Current week ({_week_key(offset_hours=_week_offset(data))}):** {len(posts)} tracked project(s)\n"
+            f"**Leader:** {leader_text}"
+        )
         await ctx.send(view=_layout("## Project Ranking", setup, week), allowed_mentions=NO_PINGS)
 
     @projectrank.command(name="ranking", aliases=["rank", "top"])
@@ -258,7 +434,8 @@ class ProjectRanking(commands.Cog):
     async def projectrank_ranking(self, ctx: commands.Context):
         """Show this week's projects ranked by counted upvotes."""
         data = await self.config.guild(ctx.guild).all()
-        posts = self._sort_posts(self._current_week_posts(data))[:10]
+        size = int(data.get("ranking_size") or DEFAULT_RANKING_SIZE)
+        posts = self._sort_posts(self._current_week_posts(data))[:size]
         if not posts:
             await ctx.send("There are no tracked projects for this week yet.")
             return
@@ -272,7 +449,7 @@ class ProjectRanking(commands.Cog):
             )
         await ctx.send(
             view=_layout(
-                f"## Project ranking · {_week_range(_week_key())}",
+                f"## Project ranking · {_week_range(_week_key(offset_hours=_week_offset(data)), _week_offset(data))}",
                 "\n".join(lines),
                 "-# Project authors and bot accounts do not count as voters. Only 👍 decides the weekly winner.",
             ),
@@ -310,7 +487,8 @@ class ProjectRanking(commands.Cog):
             return
 
         if emoji not in VOTE_EMOJIS:
-            await self._remove_unapproved_reaction(payload, guild, thread)
+            if data.get("remove_other_reactions", True):
+                await self._remove_unapproved_reaction(payload, guild, thread)
             return
 
         lock = self._lock_for(guild.id)
@@ -320,7 +498,7 @@ class ProjectRanking(commands.Cog):
                 post = current["posts"].get(str(thread.id))
                 if post is None:
                     post = await self._register_and_react(thread, current, lock_already_held=True)
-                if post is None or not post["eligible"] or post["week"] != _week_key():
+                if post is None or not post["eligible"] or post["week"] != _week_key(offset_hours=_week_offset(current)):
                     return
                 message = await thread.fetch_message(thread.id)
                 counts = await self._count_votes(message, post["author_id"])
@@ -353,7 +531,7 @@ class ProjectRanking(commands.Cog):
             try:
                 current = await guild_config.all()
                 post = current["posts"].get(str(thread.id))
-                if post is None or not post["eligible"] or post["week"] != _week_key():
+                if post is None or not post["eligible"] or post["week"] != _week_key(offset_hours=_week_offset(current)):
                     return
                 message = await thread.fetch_message(thread.id)
                 counts = await self._count_votes(message, post["author_id"])
@@ -393,7 +571,7 @@ class ProjectRanking(commands.Cog):
             data = await guild_config.all()
             if not data["forum_channel_id"]:
                 return
-            current_week = _week_key()
+            current_week = _week_key(offset_hours=_week_offset(data))
             closed_weeks = sorted(
                 {
                     post["week"]
@@ -463,7 +641,10 @@ class ProjectRanking(commands.Cog):
                 int(item[0]),
             )
         )
-        winner = candidates[0] if candidates and candidates[0][1]["upvotes"] > 0 else None
+        min_upvotes = max(1, int(data.get("min_upvotes") or 1))
+        winner_count = max(1, int(data.get("winners_per_week") or 1))
+        winners = [item for item in candidates[:winner_count] if item[1]["upvotes"] >= min_upvotes]
+        winner = winners[0] if winners else None
         result = {
             "winner_post_id": winner[0] if winner else None,
             "upvotes": winner[1]["upvotes"] if winner else 0,
@@ -471,23 +652,27 @@ class ProjectRanking(commands.Cog):
             "status": "promoted" if winner else "no_votes",
             "finalized_at": datetime.now(timezone.utc).isoformat(),
         }
+        if winner_count > 1:
+            result["winner_post_ids"] = [post_id for post_id, _post in winners]
 
-        if winner:
-            post_id, post = winner
+        for place, (post_id, post) in enumerate(winners, start=1):
             thread = await self._get_thread(guild, int(post_id))
             if thread is None:
                 raise RuntimeError("Project thread disappeared during promotion")
-            await self._add_favorite_tag(thread, forum, data["favorite_tag_id"])
+            if data.get("apply_favorite_tag", True):
+                await self._add_favorite_tag(thread, forum, data["favorite_tag_id"])
             destination = guild.get_channel(data["best_creations_channel_id"])
             if not isinstance(destination, discord.TextChannel):
                 raise RuntimeError("Best Creations channel is unavailable")
             starter_message = await thread.fetch_message(int(post_id))
             promo_message = await self._publish_winner(
-                destination, forum, thread, starter_message, post, week
+                destination, forum, thread, starter_message, post, week,
+                data=data, place=place if winner_count > 1 else None,
             )
             post["promotion_message_id"] = promo_message.id
             post["featured_at"] = result["finalized_at"]
-            result["promotion_message_id"] = promo_message.id
+            if place == 1:
+                result["promotion_message_id"] = promo_message.id
             await guild_config.posts.set(posts)
 
         weekly_results = data["weekly_results"]
@@ -502,11 +687,17 @@ class ProjectRanking(commands.Cog):
         starter_message: discord.Message,
         post: dict,
         week: str,
+        *,
+        data: dict | None = None,
+        place: int | None = None,
     ) -> discord.Message:
+        data = data or {}
         safe_title = discord.utils.escape_markdown(post["title"])
+        heading = discord.utils.escape_markdown(data.get("announcement_title") or DEFAULT_TAG_NAME)
+        label = f"Winner #{place}" if place else "Winner"
         description = (
-            f"🏆 **Community Favorite · {_week_range(week)} (UTC)**\n"
-            f"{forum.mention} · **Winner:** [{safe_title}]({self._thread_jump_url(thread)})"
+            f"🏆 **{heading} · {_week_range(week, _week_offset(data))} (UTC)**\n"
+            f"{forum.mention} · **{label}:** [{safe_title}]({self._thread_jump_url(thread)})"
         )
         if starter_message.content:
             available = max(0, 4096 - len(description) - 2)
@@ -558,6 +749,13 @@ class ProjectRanking(commands.Cog):
                 return message
             except discord.NotFound:
                 pass
+        role_id = data.get("announcement_role_id")
+        if role_id and (place or 1) == 1:
+            return await destination.send(
+                content=f"<@&{role_id}>",
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=[discord.Object(id=int(role_id))]),
+            )
         return await destination.send(embed=embed, allowed_mentions=allowed_mentions)
 
     async def _add_favorite_tag(
@@ -575,7 +773,8 @@ class ProjectRanking(commands.Cog):
 
     async def _sync_current_week(self, guild: discord.Guild, forum: discord.ForumChannel) -> tuple[int, int, int]:
         scanned = reacted = failed = 0
-        current_week = _week_key()
+        offset = _week_offset(await self.config.guild(guild).all())
+        current_week = _week_key(offset_hours=offset)
         threads_by_id = {thread.id: thread for thread in forum.threads}
         try:
             async for thread in forum.archived_threads(limit=100):
@@ -584,7 +783,7 @@ class ProjectRanking(commands.Cog):
             log.exception("Unable to enumerate archived project threads in forum %s", forum.id)
 
         for thread in threads_by_id.values():
-            if _week_key(thread.created_at) != current_week:
+            if _week_key(thread.created_at, offset) != current_week:
                 continue
             scanned += 1
             try:
@@ -626,11 +825,11 @@ class ProjectRanking(commands.Cog):
         if message is None:
             return None
 
-        await self._ensure_vote_reactions(message)
+        await self._ensure_vote_reactions(message, remove_others=data.get("remove_other_reactions", True))
         post_id = str(thread.id)
         posts = data["posts"]
         post = posts.get(post_id)
-        week = _week_key(thread.created_at)
+        week = _week_key(thread.created_at, _week_offset(data))
         if post is None:
             post = {
                 "forum_id": thread.parent_id,
@@ -656,11 +855,13 @@ class ProjectRanking(commands.Cog):
         await guild_config.posts.set(posts)
         return post
 
-    async def _ensure_vote_reactions(self, message: discord.Message):
+    async def _ensure_vote_reactions(self, message: discord.Message, *, remove_others: bool = True):
         existing = {_clean_emoji(str(reaction.emoji)) for reaction in message.reactions}
         for emoji in (UPVOTE, DOWNVOTE):
             if emoji not in existing:
                 await message.add_reaction(emoji)
+        if not remove_others:
+            return
 
         # Remove legacy or user-added reactions so each submission only offers
         # the two reactions used by this cog.
@@ -721,7 +922,7 @@ class ProjectRanking(commands.Cog):
             for post in data["posts"].values()
             if post.get("eligible")
             and post.get("forum_id") == data["forum_channel_id"]
-            and post.get("week") == _week_key()
+            and post.get("week") == _week_key(offset_hours=_week_offset(data))
             and not post.get("deleted")
         ]
 
@@ -734,7 +935,7 @@ class ProjectRanking(commands.Cog):
 
     async def _mark_closed_weeks_skipped(self, guild: discord.Guild, data: dict, weeks: list[str] | None = None):
         if weeks is None:
-            current_week = _week_key()
+            current_week = _week_key(offset_hours=_week_offset(data))
             weeks = sorted(
                 {
                     post["week"]

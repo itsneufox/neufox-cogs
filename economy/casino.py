@@ -11,8 +11,7 @@ from redbot.core import app_commands, commands
 
 from .constants import (
     CASH,
-    CASINO_COINFLIP_PAYOUT_PERCENT,
-    CASINO_DICE_PAYOUT_PERCENT,
+    CASINO_GAMES,
     CURRENCY_NAME,
     DEFAULT_CASINO_MAX_BET,
     GOLD,
@@ -59,8 +58,19 @@ log = logging.getLogger("red.neufox.economy")
 class CasinoMixin:
     """Casino games, Hold'em tables and player protection."""
 
-    async def _casino_menu_embed(self, user_id: int) -> discord.Embed:
+    async def _casino_games_off(self, guild_id: int | None = None) -> set[str]:
+        """Games switched off by the bot owner, or by this server's admins."""
+        off = {game for game in CASINO_GAMES if not await getattr(self.config, f"casino_{game}_enabled")()}
+        if guild_id is not None:
+            guild_config = self.config.guild_from_id(guild_id)
+            off |= {game for game in CASINO_GAMES if not await getattr(guild_config, f"casino_{game}_allowed")()}
+        return off
+
+    async def _casino_menu_embed(self, user_id: int, guild: discord.Guild | None = None) -> discord.Embed:
         enabled = bool(await self.config.casino_enabled())
+        coinflip = int(await self.config.casino_coinflip_payout_percent()) / 100
+        dice = int(await self.config.casino_dice_payout_percent()) / 100
+        games_off = await self._casino_games_off(guild.id if guild else None)
         minimum = int(await self.config.casino_min_bet())
         maximum = int(await self.config.casino_max_bet())
         rake = float(await self.config.casino_rake_percent())
@@ -76,8 +86,8 @@ class CasinoMixin:
             color=GOLD,
         )
         games = [
-            ("Coin Flip", "`/casino coinflip <bet> [heads|tails]` — a correct call returns 1.95x."),
-            ("Dice", "`/casino dice <bet> <1-6>` — a correct guess returns 5.7x."),
+            ("Coin Flip", f"`/casino coinflip <bet> [heads|tails]` — a correct call returns {coinflip:g}x."),
+            ("Dice", f"`/casino dice <bet> <1-6>` — a correct guess returns {dice:g}x."),
             ("High Card", "`/casino highcard <bet>` — higher rank returns 2x; equal ranks push."),
             (
                 "European Roulette",
@@ -102,7 +112,10 @@ class CasinoMixin:
             ),
             ("LWDMillions", "`/casino lottery` — the twice-weekly lottery. Draws Tuesday and Friday at 20:00 UTC."),
         ]
+        closed_names = {"European Roulette" if game == "roulette" else CASINO_GAMES[game] for game in games_off}
         for name, value in games:
+            if name in closed_names:
+                value = f"*Closed.* {value}"
             embed.add_field(name=name, value=value, inline=False)
         protection_lines = [
             "`/casino selfexclude <duration|permanent> confirm` · `/casino exclusion`",
@@ -124,7 +137,7 @@ class CasinoMixin:
     @commands.hybrid_group(name="casino", aliases=["gamble"], fallback="games")
     async def casino(self, ctx: commands.Context):
         """Casino games and the LWDMillions lottery, played with virtual LWD$."""
-        await send_embed(ctx, await self._casino_menu_embed(ctx.author.id))
+        await send_embed(ctx, await self._casino_menu_embed(ctx.author.id, ctx.guild))
 
     @casino.command(name="coinflip", aliases=["coin", "flip"])
     @app_commands.describe(wager="Your bet in LWD$.", side="heads or tails.")
@@ -150,14 +163,15 @@ class CasinoMixin:
             await ctx.send("Choose `heads` or `tails`.")
             return
         try:
-            await self._validate_casino_wager(wager, ctx.author.id)
+            await self._validate_casino_wager(wager, ctx.author.id, game="coinflip", guild_id=ctx.guild.id if ctx.guild else None)
         except EconomyError as error:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(str(error))
             return
 
         result = "heads" if secrets.randbelow(2) == 0 else "tails"
-        payout = wager * CASINO_COINFLIP_PAYOUT_PERCENT // 100 if selected == result else 0
+        payout_percent = int(await self.config.casino_coinflip_payout_percent())
+        payout = wager * payout_percent // 100 if selected == result else 0
         await self._finish_casino_command(ctx, "coinflip", wager, payout, f"called {selected}; landed {result}")
 
     @casino.command(name="dice", aliases=["die"])
@@ -170,14 +184,15 @@ class CasinoMixin:
             await ctx.send("Your dice guess must be from 1 to 6.")
             return
         try:
-            await self._validate_casino_wager(wager, ctx.author.id)
+            await self._validate_casino_wager(wager, ctx.author.id, game="dice", guild_id=ctx.guild.id if ctx.guild else None)
         except EconomyError as error:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(str(error))
             return
 
         result = secrets.randbelow(6) + 1
-        payout = wager * CASINO_DICE_PAYOUT_PERCENT // 100 if guess == result else 0
+        payout_percent = int(await self.config.casino_dice_payout_percent())
+        payout = wager * payout_percent // 100 if guess == result else 0
         await self._finish_casino_command(ctx, "dice", wager, payout, f"guessed {guess}; rolled {result}")
 
     @casino.command(name="highcard", aliases=["war"])
@@ -186,7 +201,7 @@ class CasinoMixin:
     async def economy_casino_highcard(self, ctx: commands.Context, wager: int):
         """Draw a high card against the dealer."""
         try:
-            await self._validate_casino_wager(wager, ctx.author.id)
+            await self._validate_casino_wager(wager, ctx.author.id, game="highcard", guild_id=ctx.guild.id if ctx.guild else None)
         except EconomyError as error:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(str(error))
@@ -222,7 +237,7 @@ class CasinoMixin:
             )
             return
         try:
-            await self._validate_casino_wager(wager, ctx.author.id)
+            await self._validate_casino_wager(wager, ctx.author.id, game="roulette", guild_id=ctx.guild.id if ctx.guild else None)
         except EconomyError as error:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(str(error))
@@ -258,7 +273,7 @@ class CasinoMixin:
         self._slot_players.add(ctx.author.id)
         try:
             try:
-                await self._validate_casino_wager(wager, ctx.author.id)
+                await self._validate_casino_wager(wager, ctx.author.id, game="slots", guild_id=ctx.guild.id if ctx.guild else None)
             except EconomyError as error:
                 ctx.command.reset_cooldown(ctx)
                 await ctx.send(str(error))
@@ -317,15 +332,17 @@ class CasinoMixin:
                     raise EconomyError("This channel already has a Hold'em table.")
                 if any(any(p.user_id == ctx.author.id for p in table.players) for table in self._holdem_tables.values()):
                     raise EconomyError("Finish your current Hold'em table first.")
-                await self._validate_casino_wager(buyin, ctx.author.id)
+                await self._validate_casino_wager(buyin, ctx.author.id, game="holdem", guild_id=ctx.guild.id)
                 table = HoldemTable(self, ctx, buyin)
+                table.lobby_seconds = int(await self.config.holdem_lobby_seconds())
+                table.turn_seconds = int(await self.config.holdem_turn_seconds())
                 self._holdem_tables[ctx.channel.id] = table
                 try:
                     await table.join(ctx.author)
                 except Exception:
                     self._holdem_tables.pop(ctx.channel.id, None)
                     raise
-                table._schedule(180)
+                table._schedule(table.lobby_seconds)
         except (EconomyError, ValueError) as error:
             await ctx.send(str(error))
 
@@ -558,7 +575,7 @@ class CasinoMixin:
         view: MinesView | None = None
         try:
             try:
-                await self._validate_casino_wager(wager, ctx.author.id)
+                await self._validate_casino_wager(wager, ctx.author.id, game="mines", guild_id=ctx.guild.id if ctx.guild else None)
                 safe_maximum = MAX_AMOUNT // MINES_MAX_PAYOUT_MULTIPLIER
                 if wager > safe_maximum:
                     raise EconomyError(
@@ -654,7 +671,7 @@ class CasinoMixin:
         view: BlackjackView | None = None
         try:
             try:
-                await self._validate_casino_wager(wager, ctx.author.id)
+                await self._validate_casino_wager(wager, ctx.author.id, game="blackjack", guild_id=ctx.guild.id if ctx.guild else None)
                 account = await self._reserve_blackjack_wager(
                     ctx.author.id,
                     wager,
@@ -666,7 +683,10 @@ class CasinoMixin:
                 return False
 
             try:
-                shoe = self._blackjack_shoes.setdefault(ctx.author.id, BlackjackShoe())
+                decks = int(await self.config.blackjack_decks())
+                shoe = self._blackjack_shoes.get(ctx.author.id)
+                if shoe is None or shoe.decks != decks:
+                    shoe = self._blackjack_shoes[ctx.author.id] = BlackjackShoe(decks)
                 view = BlackjackView(
                     self,
                     ctx,
@@ -818,9 +838,13 @@ class CasinoMixin:
             if any(player.user_id == user_id for player in table.players):
                 await table.cancel(user_id, force=True)
 
-    async def _validate_casino_wager(self, wager: int, user_id: int | None = None):
+    async def _validate_casino_wager(
+        self, wager: int, user_id: int | None = None, *, game: str | None = None, guild_id: int | None = None,
+    ):
         if not await self.config.casino_enabled():
             raise EconomyError("The casino is currently closed.")
+        if game is not None and game in await self._casino_games_off(guild_id):
+            raise EconomyError(f"{CASINO_GAMES[game]} is currently closed.")
         if user_id is not None:
             active = await self._active_casino_exclusions(user_id)
             if active:

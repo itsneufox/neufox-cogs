@@ -122,6 +122,13 @@ class RaiseModal(discord.ui.Modal, title="Texas Hold'em · Raise"):
             await interaction.followup.send("That raise failed. Try again or contact an administrator.", ephemeral=True)
 
 
+def _duration(seconds: int) -> str:
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{seconds} seconds"
+
+
 class HoldemTable:
     def __init__(self, cog, ctx, buyin: int):
         self.cog = cog
@@ -130,6 +137,8 @@ class HoldemTable:
         self.guild_id = ctx.guild.id
         self.owner_id = ctx.author.id
         self.buyin = buyin
+        self.lobby_seconds = LOBBY_SECONDS
+        self.turn_seconds = TURN_SECONDS
         self.table_id = secrets.token_hex(16)
         self.players: list[Player] = []
         self.human_ids: set[int] = set()
@@ -183,7 +192,7 @@ class HoldemTable:
                 "Join and start with the buttons below. House players fill any empty seats."
             )
             embed.add_field(name="Players", value="\n".join(p.name for p in self.players), inline=False)
-            embed.set_footer(text="Lobby expires after 3 minutes. Cancel refunds every buy-in.")
+            embed.set_footer(text=f"Lobby expires after {_duration(self.lobby_seconds)}. Cancel refunds every buy-in.")
             return embed
         embed.description = (
             f"**{('Showdown' if hand.showdown else 'Hand over' if hand.finished else ('Preflop', 'Flop', 'Turn', 'River')[hand.street])}**"
@@ -218,7 +227,9 @@ class HoldemTable:
                 ), inline=False,
             )
         embed.add_field(name="Recent actions", value="\n".join(hand.action_log[-5:])[:1024], inline=False)
-        embed.set_footer(text="Use Show my cards for a private view. A turn expires after 90 seconds.")
+        embed.set_footer(
+            text=f"Use Show my cards for a private view. A turn expires after {_duration(self.turn_seconds)}."
+        )
         return embed
 
     async def _refresh(self):
@@ -268,7 +279,7 @@ class HoldemTable:
                 raise ValueError("You are already seated.")
             if len(self.players) >= 6:
                 raise ValueError("This table is full (six human players).")
-            await self.cog._validate_casino_wager(self.buyin, member.id)
+            await self.cog._validate_casino_wager(self.buyin, member.id, game="holdem", guild_id=self.guild_id)
             try:
                 avatar = await asyncio.wait_for(member.display_avatar.with_size(64).read(), timeout=5)
             except Exception:
@@ -343,7 +354,7 @@ class HoldemTable:
             await self._refresh()
             self.view.stop()
         else:
-            self._schedule(TURN_SECONDS)
+            self._schedule(self.turn_seconds)
             await self._refresh()
 
     def _house_move(self) -> tuple[str, int]:

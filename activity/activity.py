@@ -28,10 +28,13 @@ from .common import (
 )
 from .layouts import NO_PINGS, LeaderboardView, card
 from .rewards import RewardsMixin, reward_amounts
-from .stats import StatsMixin
+from .stats import ROLE_SYNC_INTERVAL, StatsMixin
 from .tracking import TrackingMixin
 from .xp import (
     DEFAULT_CURVE,
+    DEFAULT_LEVELUP_MESSAGE,
+    LEVELUP_PLACEHOLDERS,
+    levelup_message_error,
     XPMixin,
     curve_scale,
     level_from_xp,
@@ -71,6 +74,15 @@ class Activity(TrackingMixin, XPMixin, StatsMixin, RewardsMixin, commands.Cog):
             active_voice_sessions={},
             level_cash_interval=10,
             level_cash_per_level=100,
+            levelup_message=DEFAULT_LEVELUP_MESSAGE,
+            levelup_dm=False,
+            levelup_ping=False,
+            level_roles_stack=True,
+            voice_xp_while_muted=False,
+            bonus_xp_channel_ids=[],
+            bonus_channel_multiplier=2.0,
+            bonus_xp_role_ids=[],
+            bonus_role_multiplier=1.5,
         )
         self.stats_config = Config.get_conf(None, force_registration=True, **STATS_CONFIG)
         self.stats_config.register_guild(
@@ -92,6 +104,7 @@ class Activity(TrackingMixin, XPMixin, StatsMixin, RewardsMixin, commands.Cog):
             reward_last_paid={},
             reward_log_channel_id=None,
             activity_migrated=False,
+            top_role_sync_interval=ROLE_SYNC_INTERVAL,
         )
         self._chat_cooldowns: dict[tuple[int, int], float] = {}
         self._locks: dict[int, asyncio.Lock] = {}
@@ -231,9 +244,31 @@ class Activity(TrackingMixin, XPMixin, StatsMixin, RewardsMixin, commands.Cog):
                 {"key": "levelup_channel_id", "label": "Level-up channel", "type": "channel", "section": "XP",
                  "channel_types": ["text"], "empty": "Same channel as the message",
                  "help": "Voice level-ups are only announced when this is set."},
+                {"key": "levelup_dm", "label": "Level-ups by DM", "type": "bool", "section": "XP",
+                 "help": "Send level-up messages to the member's DMs instead of a channel."},
+                {"key": "levelup_ping", "label": "Ping on level-up", "type": "bool", "section": "XP",
+                 "help": "Let the level-up message notify the member it mentions."},
+                {"key": "levelup_message", "label": "Level-up message", "type": "text", "section": "XP",
+                 "min": 1, "max": 1000, "validate": lambda guild, value: levelup_message_error(value),
+                 "help": "Placeholders: " + " ".join(f"{{{key}}}" for key in LEVELUP_PLACEHOLDERS) + "."},
+                {"key": "level_roles_stack", "label": "Keep lower level roles", "type": "bool", "section": "XP",
+                 "help": "On: members keep every level role earned. Off: only the highest one is kept."},
+                {"key": "voice_xp_while_muted", "label": "Voice XP while muted", "type": "bool", "section": "XP",
+                 "help": "Muted members still earn voice XP. Deafened and AFK members never do."},
+                {"key": "bonus_xp_channel_ids", "label": "Bonus XP channels", "type": "channels", "section": "XP",
+                 "channel_types": ["text", "category", "forum", "news", "voice"], "id_format": "str",
+                 "help": "Chat XP earned in these channels or categories is multiplied."},
+                {"key": "bonus_channel_multiplier", "label": "Bonus channel multiplier", "type": "float", "section": "XP",
+                 "min": 0, "max": 10, "unit": "x", "help": "XP multiplier for bonus channels. Below 1 reduces XP."},
+                {"key": "bonus_xp_role_ids", "label": "Bonus XP roles", "type": "roles", "section": "XP",
+                 "id_format": "str", "help": "Members with any of these roles earn multiplied chat and voice XP."},
+                {"key": "bonus_role_multiplier", "label": "Bonus role multiplier", "type": "float", "section": "XP",
+                 "min": 0, "max": 10, "unit": "x", "help": "XP multiplier for bonus roles. Stacks with the channel bonus."},
                 top_role("first"),
                 top_role("second"),
                 top_role("third"),
+                stats_attr("top_role_sync_interval", "Stats", label="Top role refresh", type="int",
+                           min=30, max=86400, unit="seconds", help="How often top-message roles are checked and moved."),
                 {"key": "level_cash_interval", "label": "Level cash every", "type": "int", "section": "Rewards",
                  "min": 0, "max": 1000, "unit": "levels", "help": "0 turns level cash off."},
                 {"key": "level_cash_per_level", "label": "Level cash per level", "type": "int", "section": "Rewards",

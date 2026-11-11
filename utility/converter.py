@@ -8,11 +8,12 @@ from .conversions import UNITS, convert, parse_conversion
 from .layouts import NO_PINGS, text_card
 
 
-def convert_query(query: str) -> str:
+def convert_query(query: str, digits: int = 10) -> str:
     """Return the formatted result. Raises ValueError with a user-facing message."""
     value, source, target = parse_conversion(query)
     result = convert(value, source, target)
-    return f"{value:.10g} {source} ≈ **{result:.10g} {target}**"
+    digits = max(1, min(15, int(digits)))
+    return f"{value:.10g} {source} ≈ **{result:.{digits}g} {target}**"
 
 
 def units_text(example_command: str) -> str:
@@ -35,12 +36,16 @@ class ConverterMixin:
         Leave the query empty (or use `units`) to list every supported unit.
         MPG and gallons default to US; use mpg-UK or gal-UK for imperial.
         """
+        error, settings = await self._feature_gate(ctx, "convert")
+        if error:
+            await ctx.send(error, ephemeral=True, allowed_mentions=NO_PINGS)
+            return
         if not query or query.strip().casefold() == "units":
             example = "/convert" if ctx.interaction else f"{ctx.clean_prefix}convert"
             await ctx.send(view=text_card(units_text(example)), ephemeral=True, allowed_mentions=NO_PINGS)
             return
         try:
-            text = convert_query(query)
+            text = convert_query(query, settings["convert_digits"])
         except ValueError as error:
             await ctx.send(str(error), ephemeral=True)
             return

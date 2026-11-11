@@ -27,7 +27,35 @@ PORTUGUESE_CASE_NAMES = {
     "Honeypot Ban": "Banimento do honeypot",
     "Honeypot Kick": "Expulsão do honeypot",
     "Honeypot Role": "Cargo do honeypot",
+    "Honeypot Timeout": "Silenciamento do honeypot",
 }
+
+# Which per-action DM switch covers each action passed to _maybe_dm. Warning punishments follow the warn switch.
+DM_TOGGLES = {
+    "timeout": "dm_on_timeout",
+    "kick": "dm_on_kick",
+    "ban": "dm_on_ban",
+    "hackban": "dm_on_ban",
+    "softban": "dm_on_softban",
+    "warn": "dm_on_warn",
+    "warning role add": "dm_on_warn",
+    "warning role remove": "dm_on_warn",
+}
+DM_PLACEHOLDERS = ("server", "action", "reason", "duration", "details")
+
+
+def fill_dm_template(template: str, **values: str) -> str | None:
+    """Fill a custom DM template, or return None when it is malformed so the built-in text is used."""
+    try:
+        return template.format_map({key: values.get(key, "") for key in DM_PLACEHOLDERS})
+    except (KeyError, IndexError, ValueError, AttributeError):
+        return None
+
+
+def dm_template_error(template: str) -> str | None:
+    if template and fill_dm_template(template) is None:
+        return "Use only these placeholders: " + ", ".join(f"{{{key}}}" for key in DM_PLACEHOLDERS) + "."
+    return None
 
 
 class CasesMixin:
@@ -291,9 +319,37 @@ class CasesMixin:
         case_id: int | None = None,
         language: str = "en",
     ):
-        if not await self.config.guild(guild).dm_users():
+        settings = await self.config.guild(guild).all()
+        if not settings["dm_users"]:
+            return
+        toggle = DM_TOGGLES.get(action)
+        if toggle and not settings.get(toggle, True):
             return
 
+        custom = None
+        if settings.get("dm_template"):
+            custom = fill_dm_template(
+                settings["dm_template"],
+                server=guild.name,
+                action=action,
+                reason=reason or DEFAULT_REASON,
+                duration=duration or "",
+                details=extra or "",
+            )
+
+        lines = [custom] if custom is not None else self._default_dm_lines(guild, action, reason, duration, extra, language)
+        footer = settings.get("dm_footer") or ""
+        if footer:
+            lines.append(footer)
+
+        try:
+            await member.send("\n".join(lines)[:2000])
+        except (discord.Forbidden, discord.HTTPException):
+            return
+
+    def _default_dm_lines(
+        self, guild: discord.Guild, action: str, reason: str, duration: str | None, extra: str | None, language: str
+    ) -> list[str]:
         if language == "pt":
             action_names = {
                 "timeout": "silenciamento",
@@ -321,11 +377,7 @@ class CasesMixin:
             if language == "pt"
             else f"Reason: {reason or DEFAULT_REASON}"
         )
-
-        try:
-            await member.send("\n".join(lines))
-        except (discord.Forbidden, discord.HTTPException):
-            return
+        return lines
 
     async def _log_action(
         self,

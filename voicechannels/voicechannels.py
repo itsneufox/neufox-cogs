@@ -15,6 +15,7 @@ DEFAULT_COLOR = discord.Color.blurple()
 DASHBOARD_CUSTOM_ID = "voicechannels:create"
 DEFAULT_NAME_TEMPLATE = "{member}'s Channel"
 EMPTY_DELETE_DELAY_SECONDS = 120
+MAX_BITRATE_KBPS = 384
 CHANNEL_HISTORY_LIMIT = 25
 CHANNEL_NAME_MAX_LENGTH = 80
 CHANNEL_NAME_BLOCKED_CHARS = re.compile(r"[@#:`*_~>|\\/<>\[\]{}]+")
@@ -126,6 +127,16 @@ def _layout(*blocks: str, accent: discord.Color = DEFAULT_COLOR) -> discord.ui.L
         items.append(discord.ui.TextDisplay(text))
     view.add_item(discord.ui.Container(*items, accent_color=accent))
     return view
+
+
+def _duration_label(seconds: int) -> str:
+    """Describe a delay in the largest whole unit, e.g. 120 -> "2 minutes"."""
+    seconds = int(seconds)
+    for size, unit in ((3600, "hour"), (60, "minute")):
+        if seconds >= size and seconds % size == 0:
+            count = seconds // size
+            return f"{count} {unit}{'s' if count != 1 else ''}"
+    return f"{seconds} second{'s' if seconds != 1 else ''}"
 
 
 async def _run_dashboard_action(cog: "VoiceChannels", interaction: discord.Interaction, action: str):
@@ -500,6 +511,11 @@ class VoiceChannels(commands.Cog):
             log_channel_id=None,
             channel_name_template=DEFAULT_NAME_TEMPLATE,
             user_limit=0,
+            bitrate_kbps=0,
+            empty_delete_delay=EMPTY_DELETE_DELAY_SECONDS,
+            creator_role_ids=[],
+            invite_dms=True,
+            post_owner_panel=True,
             created_channels={},
         )
         self.bot.add_view(VoiceDashboardView(self))
@@ -513,6 +529,7 @@ class VoiceChannels(commands.Cog):
                     "key": "category_id",
                     "label": "Category",
                     "type": "channel",
+                    "section": "New channels",
                     "channel_types": ["category"],
                     "empty": "Default placement",
                     "help": "Where new voice channels are created.",
@@ -521,6 +538,9 @@ class VoiceChannels(commands.Cog):
                     "key": "channel_name_template",
                     "label": "Channel name",
                     "type": "text",
+                    "section": "New channels",
+                    "min": 1,
+                    "max": 100,
                     "help": "Use {member} for the creator's name.",
                     "validate": lambda guild, value: self._name_template_error(value),
                     "set": self._set_name_template,
@@ -529,14 +549,58 @@ class VoiceChannels(commands.Cog):
                     "key": "user_limit",
                     "label": "User limit",
                     "type": "int",
+                    "section": "New channels",
                     "min": 0,
                     "max": 99,
                     "help": "Maximum members in a new channel. 0 means no limit.",
                 },
                 {
+                    "key": "bitrate_kbps",
+                    "label": "Bitrate",
+                    "type": "int",
+                    "section": "New channels",
+                    "min": 0,
+                    "max": MAX_BITRATE_KBPS,
+                    "unit": "kbps",
+                    "help": "Audio bitrate of new channels, capped by the server boost level. 0 uses Discord's default.",
+                },
+                {
+                    "key": "empty_delete_delay",
+                    "label": "Delete when empty after",
+                    "type": "int",
+                    "section": "New channels",
+                    "min": 10,
+                    "max": 86400,
+                    "unit": "s",
+                    "help": "How long a temporary channel may stay empty before it is deleted.",
+                },
+                {
+                    "key": "creator_role_ids",
+                    "label": "Roles allowed to create",
+                    "type": "roles",
+                    "section": "Members",
+                    "empty": "Everyone",
+                    "help": "Only these roles can create channels from the dashboard. Empty lets everyone.",
+                },
+                {
+                    "key": "post_owner_panel",
+                    "label": "Post owner controls in voice chat",
+                    "type": "bool",
+                    "section": "Members",
+                    "help": "Post the owner's control panel in the new channel's text chat.",
+                },
+                {
+                    "key": "invite_dms",
+                    "label": "DM invited members",
+                    "type": "bool",
+                    "section": "Members",
+                    "help": "Send a direct message to members an owner invites.",
+                },
+                {
                     "key": "log_channel_id",
                     "label": "Log channel",
                     "type": "channel",
+                    "section": "Logging",
                     "channel_types": ["text", "news"],
                     "help": "Where voice channel audit logs are sent.",
                 },
@@ -602,7 +666,7 @@ class VoiceChannels(commands.Cog):
         await self.config.guild(ctx.guild).category_id.set(category.id if category else None)
 
         message = await dashboard_channel.send(
-            view=VoiceDashboardLayout(self, self._dashboard_text()),
+            view=VoiceDashboardLayout(self, self._dashboard_text(await self.config.guild(ctx.guild).empty_delete_delay())),
             allowed_mentions=NO_PINGS,
         )
         await self.config.guild(ctx.guild).dashboard_message_id.set(message.id)
@@ -628,7 +692,7 @@ class VoiceChannels(commands.Cog):
             return
 
         message = await dashboard_channel.send(
-            view=VoiceDashboardLayout(self, self._dashboard_text()),
+            view=VoiceDashboardLayout(self, self._dashboard_text(await self.config.guild(ctx.guild).empty_delete_delay())),
             allowed_mentions=NO_PINGS,
         )
         await self.config.guild(ctx.guild).dashboard_message_id.set(message.id)
@@ -697,6 +761,8 @@ class VoiceChannels(commands.Cog):
                 f"**User limit:** {data['user_limit'] if data['user_limit'] else 'None'}",
                 f"**Log channel:** {log_channel.mention if log_channel else 'Not set'}",
                 f"**Name template:** `{data['channel_name_template']}`",
+                f"**Bitrate:** {str(data['bitrate_kbps']) + ' kbps' if data['bitrate_kbps'] else 'Discord default'}",
+                f"**Empty channels deleted after:** {_duration_label(data['empty_delete_delay'])}",
                 f"**Tracked channels:** {active_count}",
             ]
         )
@@ -778,6 +844,14 @@ class VoiceChannels(commands.Cog):
         await interaction.response.defer(ephemeral=True, thinking=True)
         data = await self.config.guild(guild).all()
 
+        creator_roles = set(data.get("creator_role_ids") or [])
+        if creator_roles and not self._can_admin_manage(member) and not any(role.id in creator_roles for role in member.roles):
+            await interaction.followup.send(
+                "You do not have a role that is allowed to create temporary voice channels.",
+                ephemeral=True,
+            )
+            return
+
         existing = self._existing_owned_channel(guild, data["created_channels"], member.id)
         if existing is not None:
             await interaction.followup.send(
@@ -795,6 +869,10 @@ class VoiceChannels(commands.Cog):
             )
         }
 
+        extra: dict = {}
+        bitrate = self._bitrate_for(guild, data.get("bitrate_kbps", 0))
+        if bitrate:
+            extra["bitrate"] = bitrate
         try:
             channel = await guild.create_voice_channel(
                 name=name,
@@ -802,6 +880,7 @@ class VoiceChannels(commands.Cog):
                 overwrites=overwrites,
                 user_limit=int(data["user_limit"]) or 0,
                 reason=f"VoiceChannels dashboard used by {member} ({member.id})",
+                **extra,
             )
         except discord.Forbidden:
             await interaction.followup.send(
@@ -822,7 +901,9 @@ class VoiceChannels(commands.Cog):
             created_channels[str(channel.id)] = record
         await self._send_audit_log(guild, channel, record, "Created", actor_id=member.id, detail=f"Initial name: {channel.name}")
 
-        panel_posted = await self._send_voice_channel_dashboard_message(channel, member.id)
+        post_panel = data.get("post_owner_panel", True)
+        panel_posted = await self._send_voice_channel_dashboard_message(channel, member.id) if post_panel else False
+        delay = int(data.get("empty_delete_delay", EMPTY_DELETE_DELAY_SECONDS))
 
         moved = False
         if member.voice and member.voice.channel:
@@ -834,15 +915,15 @@ class VoiceChannels(commands.Cog):
 
         if moved:
             await interaction.followup.send(
-                self._creation_notice(channel, moved=True, panel_posted=panel_posted),
+                self._creation_notice(channel, moved=True, panel_posted=panel_posted, panel_enabled=post_panel, delay=delay),
                 ephemeral=True,
             )
         else:
             await interaction.followup.send(
-                self._creation_notice(channel, moved=False, panel_posted=panel_posted),
+                self._creation_notice(channel, moved=False, panel_posted=panel_posted, panel_enabled=post_panel, delay=delay),
                 ephemeral=True,
             )
-            self.bot.loop.create_task(self._delete_if_empty_after(guild.id, channel.id, EMPTY_DELETE_DELAY_SECONDS))
+            self.bot.loop.create_task(self._delete_if_empty_after(guild.id, channel.id, delay))
 
     async def send_owner_dashboard(self, interaction: discord.Interaction):
         channel, record = await self._owned_channel_and_record(interaction.guild, interaction.user.id)
@@ -1140,8 +1221,11 @@ class VoiceChannels(commands.Cog):
             except (discord.Forbidden, discord.HTTPException):
                 pass
         if action == "invite":
-            notified = await self._notify_invited_member(interaction.user, member, channel, record)
-            suffix = " I sent them a DM invite." if notified else " I could not DM them, but they can join now."
+            if await self.config.guild(interaction.guild).invite_dms():
+                notified = await self._notify_invited_member(interaction.user, member, channel, record)
+                suffix = " I sent them a DM invite." if notified else " I could not DM them, but they can join now."
+            else:
+                suffix = " They can join now."
             await interaction.response.send_message(f"Invited {member.mention}.{suffix}", ephemeral=True)
             return
 
@@ -1205,9 +1289,8 @@ class VoiceChannels(commands.Cog):
         if before.channel.members:
             return
 
-        self.bot.loop.create_task(
-            self._delete_if_empty_after(member.guild.id, before.channel.id, EMPTY_DELETE_DELAY_SECONDS)
-        )
+        delay = await self.config.guild(member.guild).empty_delete_delay()
+        self.bot.loop.create_task(self._delete_if_empty_after(member.guild.id, before.channel.id, int(delay)))
 
     @commands.Cog.listener()
     async def on_guild_channel_update(
@@ -1299,7 +1382,7 @@ class VoiceChannels(commands.Cog):
             channel,
             "deleted_empty",
             actor_id=int(record["owner_id"]),
-            detail="Temporary channel stayed empty for 2 minutes.",
+            detail=f"Temporary channel stayed empty for {_duration_label(delay)}.",
             record=record,
         )
         try:
@@ -1491,12 +1574,12 @@ class VoiceChannels(commands.Cog):
         return {action: ACTION_LABELS[action] for action in actions}
 
     @staticmethod
-    def _dashboard_text() -> str:
+    def _dashboard_text(delay_seconds: int = EMPTY_DELETE_DELAY_SECONDS) -> str:
         return (
             "## Temporary Voice Channels\n"
             "Create a temporary voice channel when you need one.\n"
             "Your controls will appear in the text chat attached to the voice channel.\n"
-            "-# Empty temporary channels are deleted after 2 minutes."
+            f"-# Empty temporary channels are deleted after {_duration_label(delay_seconds)}."
         )
 
     def _creation_notice(
@@ -1505,13 +1588,17 @@ class VoiceChannels(commands.Cog):
         *,
         moved: bool,
         panel_posted: bool,
+        panel_enabled: bool = True,
+        delay: int = EMPTY_DELETE_DELAY_SECONDS,
     ) -> str:
         status = f"Created {channel.mention}"
         if moved:
             status += " and moved you in."
         else:
-            status += ". Join it within 2 minutes or it will be deleted."
+            status += f". Join it within {_duration_label(delay)} or it will be deleted."
 
+        if not panel_enabled:
+            return f"{status}\nUse **Manage Channel** on the main dashboard to open your controls."
         if panel_posted:
             return (
                 f"{status}\n"
@@ -1585,6 +1672,17 @@ class VoiceChannels(commands.Cog):
             return True
         except discord.HTTPException:
             return False
+
+    @staticmethod
+    def _bitrate_for(guild: discord.Guild, kbps: int | None) -> int | None:
+        """Convert the configured kbps to bits per second, capped by the guild's boost limit."""
+        if not kbps:
+            return None
+        bitrate = int(kbps) * 1000
+        limit = getattr(guild, "bitrate_limit", None)
+        if isinstance(limit, (int, float)) and limit > 0:
+            bitrate = min(bitrate, int(limit))
+        return max(8000, bitrate)
 
     def _channel_name(self, template: str, member: discord.Member) -> str:
         clean_member_name = self._clean_channel_name(member.display_name, fallback="Member")

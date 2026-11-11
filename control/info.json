@@ -1,12 +1,12 @@
 {
     "name": "Control",
-    "short": "One panel for every cog's settings, plus a slash /help.",
-    "description": "Adds a single /control panel where server admins can view and change the settings of every cog that supports it, and a /help menu that lists every loaded cog's slash commands by category, showing each member only the commands they can use.",
+    "short": "One panel for every cog's settings and commands, owner tools, and a slash /help.",
+    "description": "Adds a single /control panel where server admins can change the settings of every cog that supports it and turn commands on or off per server, plus owner tools (load/unload/reload cogs, force-update a repo, sync slash commands, last error) and a /help menu that lists every loaded cog's slash commands by category.",
     "author": [
         "itsneufox"
     ],
     "min_bot_version": "3.5.24",
-    "install_msg": "Control loaded! Open the panel with `[p]control`, or use `/help` to browse slash commands. For the slash versions, run `[p]slash enablecog control` and then `[p]slash sync`.",
+    "install_msg": "Control loaded! Open the panel with `[p]control`, or use `/help` to browse slash commands. For the slash versions, run `[p]slash enablecog control` and then `[p]slash sync`. The bot owner also gets an Owner tools page in the panel.",
     "requirements": [],
     "tags": [
         "admin",

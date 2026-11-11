@@ -18,7 +18,9 @@ About this cog:
 
 A cog to manage a Tickets system!
 
-The ticket language is managed in the ``/control`` panel from the Control cog. Profiles are still managed with ``[p]settickettool``.
+Settings are managed in the ``/control`` panel from the Control cog. Profiles are created and deleted with ``[p]settickettool profile``; in the panel, set **Profile being edited** (General) to choose which profile the other sections change (defaults to ``main``, else the first profile).
+
+Panel sections: **General** (language, profile, enabled), **Channels** (log channel, forum/thread channel, open and closed categories), **Roles** (admin, support, view-only, ping and ticket owner roles), **Behaviour** (max open tickets per member, owner closing, confirmation, delete on close, close when owner leaves, auto-close after N hours without messages, transcripts on/off, 🎟️ reaction, dropdown renaming, modlog, audit log attribution) and **Appearance** (ticket name format, welcome message, emojis, embed colour and thumbnail, open-ticket message title/text/image, dropdown placeholder).
 
 ---------
 Commands:

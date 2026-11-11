@@ -8,8 +8,10 @@ from typing import Any
 import discord
 from redbot.core import commands
 
+from . import nightlife
 from .constants import (
     CASH,
+    CASINO_GAMES,
     CURRENCY_NAME,
     DEFAULT_API_HOST,
     DEFAULT_API_PORT,
@@ -22,6 +24,8 @@ from .lwdmillions import LWD_MILLIONS_PRIZE_MULTIPLIERS, drand_round_timestamp
 from .slots import SLOT_TRIPLE_MULTIPLIERS
 
 log = logging.getLogger("red.neufox.economy")
+
+NIGHTLIFE_PRICE_LIMIT = 10**12
 
 
 class AdminMixin:
@@ -118,12 +122,54 @@ class AdminMixin:
                               type="float", min=1, max=10, unit="x", help=f"Multiplies {effect}."),
             ]
 
+        def global_game_toggle(game: str, name: str) -> dict[str, Any]:
+            return owner_setting("Casino games", key=f"casino_{game}_enabled", label=name, type="bool",
+                                 help="Applies to every server.")
+
+        def server_game_toggle(game: str, name: str) -> dict[str, Any]:
+            return server_setting("Casino in this server", f"casino_{game}_allowed", name, "bool",
+                                  help="Only this server. The bot owner can also close it everywhere.")
+
+        def nightlife_price_setting(section: str, price_key: str, label: str) -> dict[str, Any]:
+            default = nightlife.DEFAULT_PRICES[price_key]
+
+            async def getter(guild: discord.Guild) -> int:
+                return nightlife.price_of(price_key, await self.config.nightlife_prices())
+
+            async def setter(guild: discord.Guild, value: int):
+                async with self.config.nightlife_prices() as prices:
+                    if int(value) == default:
+                        prices.pop(price_key, None)
+                    else:
+                        prices[price_key] = int(value)
+
+            return owner_setting(section, key=f"nightlife_price.{price_key}", label=label, type="int", min=0,
+                                 max=NIGHTLIFE_PRICE_LIMIT, unit=CURRENCY_NAME, help=f"Default {default:,}.",
+                                 get=getter, set=setter)
+
+        nightlife_shop = [
+            *(nightlife_price_setting("Nightlife prices", f"escort.{key}", f"Escort: {escort['name']}")
+              for key, escort in nightlife.ESCORTS.items()),
+            *(nightlife_price_setting("Nightlife prices", f"venue.{key}", f"Venue: {key.title()}")
+              for key in nightlife.VENUES),
+            *(nightlife_price_setting("Nightlife prices", f"item.{key}", f"Item: {key.title()}")
+              for key in nightlife.ITEMS),
+        ]
+        nightlife_clinic = [
+            nightlife_price_setting("Nightlife clinic", "test", "Clinic test"),
+            *(nightlife_price_setting("Nightlife clinic", f"treatment.{key}", f"Treat {disease['name']}")
+              for key, disease in nightlife.DISEASES.items()),
+        ]
+
         bet_limit = MAX_AMOUNT // max(SLOT_TRIPLE_MULTIPLIERS.values())
         ticket_limit = MAX_AMOUNT // max(LWD_MILLIONS_PRIZE_MULTIPLIERS.values())
         message_channels = ["text", "news"]
         return {
             "title": "Economy",
-            "description": "Claims, casino, lottery, boosters and taxes (bot owner); fees, perks and market (server admins).",
+            "description": (
+                "Claims, casino, lottery, boosters, taxes and Nightlife prices (bot owner); "
+                "fees, perks, market and casino games in this server (server admins)."
+            ),
             "settings": [
                 *claim_settings("daily"),
                 *claim_settings("weekly"),
@@ -203,6 +249,14 @@ class AdminMixin:
                     validate=amount_check("Seed jackpot"),
                 ),
                 owner_setting(
+                    "LWDMillions", key="lwdmillions_max_lines", label="Lines per player", type="int", min=1,
+                    max=100, help="Most lines one player can hold in a single draw.",
+                ),
+                owner_setting(
+                    "LWDMillions", key="lwdmillions_max_tickets", label="Lines per draw", type="int", min=100,
+                    max=50_000, help="Ticket sales for a draw stop at this many lines in total.",
+                ),
+                owner_setting(
                     "This server",
                     key="server.lottery_channel",
                     label="Lottery announcements",
@@ -245,12 +299,37 @@ class AdminMixin:
                     "Casino", key="casino_rake_percent", label="House rake", type="float", min=0, max=20,
                     unit="%", help="Share of each winning casino result's profit that is burned.",
                 ),
+                *(global_game_toggle(game, name) for game, name in CASINO_GAMES.items()),
+                owner_setting(
+                    "Casino tables", key="casino_coinflip_payout_percent", label="Coin flip payout", type="int",
+                    min=100, max=200, unit="%", help="Returned on a correct call, wager included. 200 is fair odds.",
+                ),
+                owner_setting(
+                    "Casino tables", key="casino_dice_payout_percent", label="Dice payout", type="int",
+                    min=100, max=600, unit="%", help="Returned on a correct guess, wager included. 600 is fair odds.",
+                ),
+                owner_setting(
+                    "Casino tables", key="blackjack_decks", label="Blackjack decks", type="int", min=1, max=8,
+                    unit="decks", help="Decks in each player's shoe. A new size applies on the next hand.",
+                ),
+                owner_setting(
+                    "Casino tables", key="holdem_lobby_seconds", label="Hold'em lobby time", type="int", min=30,
+                    max=900, unit="seconds", help="How long a table waits for players before refunding.",
+                ),
+                owner_setting(
+                    "Casino tables", key="holdem_turn_seconds", label="Hold'em turn time", type="int", min=15,
+                    max=600, unit="seconds", help="How long a player has to act before the table times out.",
+                ),
                 *booster_settings("claim", "Claim booster", "/claim payouts"),
                 *booster_settings("xp", "XP booster", "Activity XP"),
                 owner_setting(
                     "Boosters", key="streak_saver_price", label="Streak saver price", type="int", min=0,
                     unit=CURRENCY_NAME, help="Covers one missed daily claim. 0 stops sales.",
                     validate=amount_check("Price"),
+                ),
+                owner_setting(
+                    "Boosters", key="streak_saver_max", label="Streak savers held", type="int", min=1, max=100,
+                    help="Most streak savers one person can hold.",
                 ),
                 owner_setting(
                     "Wealth tax", key="wealth_tax_percent", label="Daily wealth tax", type="float", min=0, max=10,
@@ -280,22 +359,34 @@ class AdminMixin:
                 price_setting("Perks", "custom_role_edit_price", "Personal role change"),
                 server_setting("Perks", "custom_role_anchor", "Place personal roles above", "role",
                                empty="Just under my top role"),
-                price_setting("Market", "rain_min", "Smallest rain"),
-                server_setting("Market", "rain_max_people", "Rain recipients", "int", min=1, max=50),
-                server_setting("Market", "rain_window_minutes", "Rain activity window", "int", min=1, max=1440,
+                server_setting("Perks", "rental_max_days", "Longest role rental", "int", min=1, max=365,
+                               unit="days", help="Most days a member can rent a role for at once."),
+                price_setting("Rain", "rain_min", "Smallest rain"),
+                server_setting("Rain", "rain_max_people", "Rain recipients", "int", min=1, max=50),
+                server_setting("Rain", "rain_window_minutes", "Rain activity window", "int", min=1, max=1440,
                                unit="minutes", help="Who counts as recently active."),
-                server_setting("Market", "shoutout_channel", "Shoutout channel", "channel",
+                server_setting("Shoutouts & pins", "shoutout_channel", "Shoutout channel", "channel",
                                channel_types=message_channels, empty="Off"),
-                price_setting("Market", "shoutout_price", "Shoutout price"),
-                server_setting("Market", "pin_channels", "Paid pin channels", "channels",
+                price_setting("Shoutouts & pins", "shoutout_price", "Shoutout price"),
+                server_setting("Shoutouts & pins", "shoutout_max_length", "Longest shoutout", "int", min=20,
+                               max=2000, unit="characters"),
+                server_setting("Shoutouts & pins", "pin_channels", "Paid pin channels", "channels",
                                channel_types=message_channels, empty="Off"),
-                price_setting("Market", "pin_price", "Pin price"),
-                server_setting("Market", "pin_hours", "Pin duration", "int", min=1, max=720, unit="hours"),
-                server_setting("Market", "auctions_enabled", "Auctions", "bool"),
-                server_setting("Market", "auction_max_hours", "Longest auction", "int", min=1, max=336,
+                price_setting("Shoutouts & pins", "pin_price", "Pin price"),
+                server_setting("Shoutouts & pins", "pin_hours", "Pin duration", "int", min=1, max=720,
                                unit="hours"),
-                server_setting("Market", "bounty_days", "Bounty lifetime", "int", min=1, max=60, unit="days",
-                               help="Unawarded bounties are refunded after this."),
+                server_setting("Auctions & bounties", "auctions_enabled", "Auctions", "bool"),
+                server_setting("Auctions & bounties", "auction_max_hours", "Longest auction", "int", min=1,
+                               max=336, unit="hours"),
+                server_setting("Auctions & bounties", "auction_max_open", "Running auctions limit", "int", min=1,
+                               max=100, help="Most auctions running in this server at once."),
+                server_setting("Auctions & bounties", "bounty_days", "Bounty lifetime", "int", min=1, max=60,
+                               unit="days", help="Unawarded bounties are refunded after this."),
+                server_setting("Auctions & bounties", "bounty_max_open", "Open bounties limit", "int", min=1,
+                               max=100, help="Most bounties open in this server at once."),
+                *(server_game_toggle(game, name) for game, name in CASINO_GAMES.items()),
+                *nightlife_shop,
+                *nightlife_clinic,
             ],
         }
 

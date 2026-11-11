@@ -15,9 +15,6 @@ from .constants import (
     CASH,
     CURRENCY_NAME,
     GOLD,
-    MAX_OPEN_AUCTIONS,
-    MAX_OPEN_BOUNTIES,
-    MAX_SHOUTOUT_LENGTH,
     MAX_TASK_LENGTH,
     SINK_LOOP_SECONDS,
 )
@@ -127,7 +124,7 @@ class SocialMixin:
         try:
             async with self._social_lock:
                 bounties = await self.config.guild(ctx.guild).bounties()
-                if len(bounties) >= MAX_OPEN_BOUNTIES:
+                if len(bounties) >= int(await self.config.guild(ctx.guild).bounty_max_open()):
                     raise EconomyError("This server has too many open bounties.")
                 await self._charge(ctx.author.id, amount, tx_type="bounty_escrow", guild_id=ctx.guild.id,
                                    reason=f"bounty: {task}")
@@ -269,7 +266,7 @@ class SocialMixin:
             if house and not _is_manager(ctx.author):
                 raise EconomyError("Only server managers can run house auctions.")
             async with self._social_lock:
-                if len(await self.config.guild(ctx.guild).auctions()) >= MAX_OPEN_AUCTIONS:
+                if len(await self.config.guild(ctx.guild).auctions()) >= int(settings["auction_max_open"]):
                     raise EconomyError("This server has too many running auctions.")
                 shops = await self.config.shops()
                 key, shop_item = self._find_shop_item(shops.get(str(ctx.guild.id), {}), item)
@@ -397,7 +394,7 @@ class SocialMixin:
         settings = await self.config.guild(ctx.guild).all()
         channel = ctx.guild.get_channel(int(settings["shoutout_channel"] or 0))
         price = int(settings["shoutout_price"])
-        text = sinks.clean_text(message, MAX_SHOUTOUT_LENGTH, single_line=False)
+        text = sinks.clean_text(message, int(settings["shoutout_max_length"]), single_line=False)
         try:
             if not isinstance(channel, (discord.TextChannel, discord.Thread)) or price <= 0:
                 raise EconomyError("Shoutouts are not set up in this server.")

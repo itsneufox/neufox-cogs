@@ -34,6 +34,20 @@ DEFAULT_CASINO_MAX_BET = 50000
 DEFAULT_CASINO_RAKE_PERCENT = 0.0
 CASINO_COINFLIP_PAYOUT_PERCENT = 195
 CASINO_DICE_PAYOUT_PERCENT = 570
+# Games that can be switched off globally (bot owner) or per server (server admins).
+CASINO_GAMES = {
+    "coinflip": "Coin Flip",
+    "dice": "Dice",
+    "highcard": "High Card",
+    "roulette": "Roulette",
+    "slots": "Slots",
+    "mines": "Mines",
+    "blackjack": "Blackjack",
+    "holdem": "Texas Hold'em",
+}
+DEFAULT_BLACKJACK_DECKS = 6
+DEFAULT_HOLDEM_LOBBY_SECONDS = 180
+DEFAULT_HOLDEM_TURN_SECONDS = 90
 
 # Lottery
 DEFAULT_LWDMILLIONS_TICKET_PRICE = 100
@@ -142,6 +156,18 @@ GLOBAL_DEFAULTS = {
     "casino_min_bet": DEFAULT_CASINO_MIN_BET,
     "casino_max_bet": DEFAULT_CASINO_MAX_BET,
     "casino_rake_percent": DEFAULT_CASINO_RAKE_PERCENT,
+    "casino_coinflip_payout_percent": CASINO_COINFLIP_PAYOUT_PERCENT,
+    "casino_dice_payout_percent": CASINO_DICE_PAYOUT_PERCENT,
+    **{f"casino_{game}_enabled": True for game in CASINO_GAMES},
+    "blackjack_decks": DEFAULT_BLACKJACK_DECKS,
+    "holdem_lobby_seconds": DEFAULT_HOLDEM_LOBBY_SECONDS,
+    "holdem_turn_seconds": DEFAULT_HOLDEM_TURN_SECONDS,
+    "lwdmillions_max_lines": MAX_LWDMILLIONS_LINES_PER_PLAYER,
+    "lwdmillions_max_tickets": MAX_LWDMILLIONS_TOTAL_TICKETS,
+    "streak_saver_max": MAX_STREAK_SAVERS,
+    # Overrides for Nightlife prices keyed "escort.alex", "venue.motel", "item.condom",
+    # "treatment.hpv" or "test"; anything missing uses the game's built-in price.
+    "nightlife_prices": {},
     "casino_50k_limit_applied": False,
     "holdem_settlements": {},
     "casino_exclusions": {},
@@ -196,6 +222,11 @@ GUILD_DEFAULTS = {
     "auctions_enabled": True,
     "auction_max_hours": DEFAULT_AUCTION_MAX_HOURS,
     "bounty_days": DEFAULT_BOUNTY_DAYS,
+    "rental_max_days": MAX_RENTAL_DAYS,
+    "shoutout_max_length": MAX_SHOUTOUT_LENGTH,
+    "bounty_max_open": MAX_OPEN_BOUNTIES,
+    "auction_max_open": MAX_OPEN_AUCTIONS,
+    **{f"casino_{game}_allowed": True for game in CASINO_GAMES},
     "bounties": {},
     "next_bounty": 1,
     "auctions": {},

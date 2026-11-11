@@ -50,6 +50,10 @@ LOW_EFFORT_WHY = {
     "idk",
     "nothing",
 }
+DEFAULT_CHALLENGE_PHRASE = "I WILL NOT CHEAT ANYMORE ON LWD"
+DEFAULT_MIN_WHY_WORDS = 8
+DEFAULT_API_TIMEOUT = 8
+API_TOKEN_MASK = "•••••••• (saved)"
 CHEAT_WORDS = ("cheat", "hacking", "hack", "aimbot", "wallhack", "cleo", "s0beit")
 API_FIELD_MAP: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Ban ID", ("ban_id", "id", "banid")),
@@ -116,6 +120,16 @@ class BanAppeals(commands.Cog):
             base_challenge_count=50,
             api_url_template=None,
             api_bearer_token=None,
+            api_timeout_seconds=DEFAULT_API_TIMEOUT,
+            staff_include_moderators=True,
+            auto_close_on_cooldown=True,
+            fake_evidence_multiplier=2,
+            challenge_phrase=DEFAULT_CHALLENGE_PHRASE,
+            min_why_words=DEFAULT_MIN_WHY_WORDS,
+            check_ban_date=True,
+            optional_fields=[],
+            close_thread_on_resolve=True,
+            log_threads=True,
             appeals={},
             denied_users={},
             challenge_counts={},
@@ -131,11 +145,18 @@ class BanAppeals(commands.Cog):
             "title": "Ban Appeals",
             "description": "Moderates ban appeals posted in a forum or text channel.",
             "settings": [
-                {"key": "enabled", "label": "Appeal moderation", "type": "bool", "help": "Check and manage new appeals."},
+                {
+                    "key": "enabled",
+                    "label": "Appeal moderation",
+                    "type": "bool",
+                    "section": "General",
+                    "help": "Check and manage new appeals.",
+                },
                 {
                     "key": "appeal_channel_id",
                     "label": "Appeal channel",
                     "type": "channel",
+                    "section": "General",
                     "channel_types": ["forum", "text"],
                     "help": "Where appeals are posted.",
                 },
@@ -143,32 +164,192 @@ class BanAppeals(commands.Cog):
                     "key": "log_channel_id",
                     "label": "Staff log channel",
                     "type": "channel",
+                    "section": "General",
                     "channel_types": ["text"],
                     "help": "Where staff actions are logged.",
+                },
+                {
+                    "key": "log_threads",
+                    "label": "One log thread per appeal",
+                    "type": "bool",
+                    "section": "General",
+                    "help": "Group each appeal's log entries in its own thread of the log channel.",
                 },
                 {
                     "key": "staff_role_ids",
                     "label": "Staff roles",
                     "type": "roles",
+                    "section": "General",
                     "help": "Roles allowed to use the appeal staff buttons.",
+                },
+                {
+                    "key": "staff_include_moderators",
+                    "label": "Moderators count as staff",
+                    "type": "bool",
+                    "section": "General",
+                    "help": "Members with Manage Messages or Manage Threads can use the staff buttons.",
+                },
+                {
+                    "key": "close_thread_on_resolve",
+                    "label": "Lock thread when denied or closed",
+                    "type": "bool",
+                    "section": "General",
+                    "help": "Lock and archive the appeal thread when staff deny or close it.",
                 },
                 {
                     "key": "cooldown_days",
                     "label": "Denied appeal cooldown",
                     "type": "int",
+                    "section": "Cooldown & final chance",
                     "min": 0,
+                    "max": 3650,
                     "unit": "days",
                     "help": "How long a denied member must wait before appealing again.",
+                },
+                {
+                    "key": "auto_close_on_cooldown",
+                    "label": "Auto-close appeals during cooldown",
+                    "type": "bool",
+                    "section": "Cooldown & final chance",
+                    "help": "Close new appeals from members still on cooldown. Off only warns staff.",
                 },
                 {
                     "key": "base_challenge_count",
                     "label": "Final-chance sentences",
                     "type": "int",
+                    "section": "Cooldown & final chance",
                     "min": 1,
+                    "max": 10000,
                     "unit": "sentences",
                     "help": "Base number of handwritten sentences for a final chance.",
                 },
+                {
+                    "key": "fake_evidence_multiplier",
+                    "label": "Fake evidence multiplier",
+                    "type": "int",
+                    "section": "Cooldown & final chance",
+                    "min": 1,
+                    "max": 10,
+                    "unit": "x",
+                    "help": "The sentence count is multiplied by this when evidence is marked fake.",
+                },
+                {
+                    "key": "challenge_phrase",
+                    "label": "Final-chance sentence",
+                    "type": "text",
+                    "section": "Cooldown & final chance",
+                    "min": 1,
+                    "max": 200,
+                    "help": "The sentence members must handwrite for a final chance.",
+                },
+                {
+                    "key": "min_why_words",
+                    "label": "Minimum explanation words",
+                    "type": "int",
+                    "section": "Checks",
+                    "min": 0,
+                    "max": 200,
+                    "unit": "words",
+                    "help": "Explanations shorter than this are flagged. 0 turns the length check off.",
+                },
+                {
+                    "key": "check_ban_date",
+                    "label": "Check ban date format",
+                    "type": "bool",
+                    "section": "Checks",
+                    "help": "Flag ban dates that are not written as DD/MM/YYYY.",
+                },
+                *[
+                    {
+                        "key": f"required.{key}",
+                        "label": f"Require {FIELD_SHORT_LABELS[key]}",
+                        "type": "bool",
+                        "section": "Checks",
+                        "help": f"Flag appeals missing \"{label}\".",
+                        "get": self._required_getter(key),
+                        "set": self._required_setter(key),
+                    }
+                    for key, label in FIELD_DEFS
+                ],
+                {
+                    "key": "api_url_template",
+                    "label": "Ban lookup URL",
+                    "type": "text",
+                    "section": "Ban API",
+                    "access": "admin",
+                    "clearable": True,
+                    "empty": "Disabled",
+                    "max": 500,
+                    "help": "Read-only API URL containing {ban_id}. Empty turns lookups off.",
+                    "validate": lambda guild, value: self._api_url_error(value),
+                },
+                {
+                    "key": "api_bearer_token",
+                    "label": "Ban lookup token",
+                    "type": "text",
+                    "section": "Ban API",
+                    "access": "admin",
+                    "clearable": True,
+                    "empty": "None",
+                    "max": 1000,
+                    "help": "Optional bearer token sent with lookups. Stored hidden; empty clears it.",
+                    "get": self._get_api_token,
+                    "set": self._set_api_token,
+                },
+                {
+                    "key": "api_timeout_seconds",
+                    "label": "Ban lookup timeout",
+                    "type": "int",
+                    "section": "Ban API",
+                    "min": 2,
+                    "max": 30,
+                    "unit": "s",
+                    "help": "How long to wait for the ban API before giving up.",
+                },
             ],
+        }
+
+    def _required_getter(self, key: str):
+        async def getter(guild: discord.Guild) -> bool:
+            return key not in await self.config.guild(guild).optional_fields()
+
+        return getter
+
+    def _required_setter(self, key: str):
+        async def setter(guild: discord.Guild, required: bool) -> None:
+            async with self.config.guild(guild).optional_fields() as optional:
+                if required and key in optional:
+                    optional.remove(key)
+                elif not required and key not in optional:
+                    optional.append(key)
+
+        return setter
+
+    async def _get_api_token(self, guild: discord.Guild) -> str | None:
+        return API_TOKEN_MASK if await self.config.guild(guild).api_bearer_token() else None
+
+    async def _set_api_token(self, guild: discord.Guild, value: str | None) -> None:
+        if value == API_TOKEN_MASK:
+            return
+        await self.config.guild(guild).api_bearer_token.set((value or "").strip() or None)
+
+    @staticmethod
+    def _api_url_error(url: str | None) -> str | None:
+        if not url:
+            return None
+        if "{ban_id}" not in url:
+            return "The URL must include {ban_id}, for example https://example.com/api/bans/{ban_id}."
+        if not (url.startswith("https://") or url.startswith("http://")):
+            return "The URL must start with https:// or http://."
+        return None
+
+    @staticmethod
+    def _checks(settings: dict[str, typing.Any]) -> dict[str, typing.Any]:
+        """The field checks in force, stored on each record so later redraws agree."""
+        return {
+            "optional": list(settings.get("optional_fields") or []),
+            "min_words": int(settings.get("min_why_words", DEFAULT_MIN_WHY_WORDS)),
+            "check_date": bool(settings.get("check_ban_date", True)),
         }
 
     async def red_delete_data_for_user(self, requester, user_id: int) -> None:
@@ -312,11 +493,9 @@ class BanAppeals(commands.Cog):
             await self.config.guild(ctx.guild).api_url_template.set(None)
             await ctx.send("Ban ID API lookup disabled.")
             return
-        if "{ban_id}" not in url:
-            await ctx.send("API URL must include `{ban_id}`, for example `https://example.com/api/bans/{ban_id}`.")
-            return
-        if not (url.startswith("https://") or url.startswith("http://")):
-            await ctx.send("API URL must start with `https://` or `http://`.")
+        error = self._api_url_error(url)
+        if error:
+            await ctx.send(error)
             return
         await self.config.guild(ctx.guild).api_url_template.set(url)
         await ctx.send("Ban ID API lookup URL updated.")
@@ -416,7 +595,7 @@ class BanAppeals(commands.Cog):
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
-        if status in {"denied", "closed"}:
+        if status in {"denied", "closed"} and settings.get("close_thread_on_resolve", True):
             await self._close_appeal_thread(
                 interaction.channel,
                 reason=f"Ban appeal {VALID_STATUSES.get(status, status).lower()} by {interaction.user}",
@@ -458,13 +637,15 @@ class BanAppeals(commands.Cog):
         elif status == "final_chance":
             count = await self._current_challenge_count(guild, record, settings)
             record["challenge_count"] = count
-            public_message = self._challenge_message(record, count, moderator)
+            public_message = self._challenge_message(record, count, moderator, phrase=settings.get("challenge_phrase"))
         elif status == "fake_evidence":
             count = await self._double_challenge_count(guild, record, settings)
             record["challenge_count"] = count
             public_message = (
                 f"{moderator.mention} marked the submitted evidence as fake or invalid.\n\n"
-                + self._challenge_message(record, count, moderator, include_intro=False)
+                + self._challenge_message(
+                    record, count, moderator, include_intro=False, phrase=settings.get("challenge_phrase")
+                )
             )
         elif status == "closed":
             public_message = f"Appeal closed by {moderator.mention}."
@@ -540,7 +721,8 @@ class BanAppeals(commands.Cog):
             supplemental_fields = self._merge_fields(existing.get("supplemental_fields", {}), parsed_fields)
             fields = self._merge_fields(primary_fields, supplemental_fields)
 
-        warnings = self._validate_fields(fields)
+        checks = self._checks(settings)
+        warnings = self._validate_fields(fields, checks)
         cooldown_until = await self._active_cooldown_until(guild, message.author.id)
         if cooldown_until:
             warnings.append(f"Previous appeal cooldown is active until <t:{cooldown_until}:R>.")
@@ -565,6 +747,7 @@ class BanAppeals(commands.Cog):
                 "supplemental_fields": supplemental_fields,
                 "fields": fields,
                 "warnings": warnings,
+                "checks": checks,
                 "api_result": api_result,
             }
         )
@@ -593,7 +776,7 @@ class BanAppeals(commands.Cog):
             )
 
         if existing is None:
-            if cooldown_until:
+            if cooldown_until and settings.get("auto_close_on_cooldown", True):
                 auto_close_message = (
                     f"Your previous appeal was denied. You may submit another appeal <t:{cooldown_until}:R>. "
                     "This appeal has been closed automatically."
@@ -834,14 +1017,19 @@ class BanAppeals(commands.Cog):
                 merged[key] = value
         return merged
 
-    def _validate_fields(self, fields: dict[str, str]) -> list[str]:
+    def _validate_fields(self, fields: dict[str, str], checks: dict[str, typing.Any] | None = None) -> list[str]:
+        checks = checks or {}
+        optional = set(checks.get("optional") or ())
+        min_words = int(checks.get("min_words", DEFAULT_MIN_WHY_WORDS))
         warnings: list[str] = []
-        missing = [FIELD_SHORT_LABELS[key] for key, _label in FIELD_DEFS if not fields.get(key)]
+        missing = [
+            FIELD_SHORT_LABELS[key] for key, _label in FIELD_DEFS if key not in optional and not fields.get(key)
+        ]
         if missing:
             warnings.append("Missing: " + self._join_human_list(missing) + ".")
 
         ban_date = fields.get("ban_date")
-        if ban_date:
+        if ban_date and checks.get("check_date", True):
             try:
                 datetime.strptime(ban_date.strip(), "%d/%m/%Y")
             except ValueError:
@@ -850,7 +1038,7 @@ class BanAppeals(commands.Cog):
         why = fields.get("why", "").strip()
         normalized_why = re.sub(r"[^a-z0-9' ]", "", why.lower()).strip()
         normalized_why = re.sub(r"\s+", " ", normalized_why)
-        if why and (normalized_why in LOW_EFFORT_WHY or self._meaningful_word_count(why) < 8):
+        if why and (normalized_why in LOW_EFFORT_WHY or self._meaningful_word_count(why) < min_words):
             warnings.append("Explanation needs more detail. Explain what happened and why staff should reconsider.")
 
         return warnings
@@ -902,7 +1090,7 @@ class BanAppeals(commands.Cog):
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        timeout = aiohttp.ClientTimeout(total=8)
+        timeout = aiohttp.ClientTimeout(total=int(settings.get("api_timeout_seconds") or DEFAULT_API_TIMEOUT))
         try:
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
                 async with session.get(url) as response:
@@ -947,7 +1135,9 @@ class BanAppeals(commands.Cog):
         if not isinstance(user, discord.Member):
             return False
         perms = user.guild_permissions
-        if perms.administrator or perms.manage_guild or perms.manage_messages or perms.manage_threads:
+        if perms.administrator or perms.manage_guild:
+            return True
+        if settings.get("staff_include_moderators", True) and (perms.manage_messages or perms.manage_threads):
             return True
         staff_role_ids = set(settings.get("staff_role_ids", []))
         return any(role.id in staff_role_ids for role in user.roles)
@@ -992,9 +1182,10 @@ class BanAppeals(commands.Cog):
     ) -> int:
         key = self._challenge_key(record)
         base = int(settings.get("base_challenge_count") or 50)
+        multiplier = max(1, int(settings.get("fake_evidence_multiplier") or 2))
         async with self.config.guild(guild).challenge_counts() as counts:
             current = int(counts.get(key, record.get("challenge_count") or base))
-            new_count = current * 2
+            new_count = current * multiplier
             counts[key] = new_count
             return new_count
 
@@ -1011,7 +1202,9 @@ class BanAppeals(commands.Cog):
         moderator: discord.abc.User,
         *,
         include_intro: bool = True,
+        phrase: str | None = None,
     ) -> str:
+        phrase = (phrase or DEFAULT_CHALLENGE_PHRASE).replace("`", "'")
         fields = record.get("fields", {})
         name = fields.get("ingame_name") or "your in-game name"
         ban_id = fields.get("ban_id") or "your Ban ID"
@@ -1020,7 +1213,7 @@ class BanAppeals(commands.Cog):
             lines.append(f"{moderator.mention} offered one final chance for this appeal.")
         lines.extend(
             [
-                f'Handwrite `"I WILL NOT CHEAT ANYMORE ON LWD"` **{count} times** on one sheet of paper.',
+                f'Handwrite `"{phrase}"` **{count} times** on one sheet of paper.',
                 f"Include your in-game name, **{name}**, and Ban ID, **{ban_id}**, on the same page.",
                 "Attach one clear photo showing the full readable page.",
                 "Fake, edited, copied, printed, traced, or AI-generated submissions may be denied.",
@@ -1168,7 +1361,7 @@ class BanAppeals(commands.Cog):
 
     def _display_warnings(self, record: dict[str, typing.Any]) -> list[str]:
         fields = record.get("fields") or {}
-        warnings = self._validate_fields(fields)
+        warnings = self._validate_fields(fields, record.get("checks"))
         seen = set(warnings)
 
         for raw_warning in record.get("warnings") or []:
@@ -1291,7 +1484,9 @@ class BanAppeals(commands.Cog):
         channel = guild.get_channel(channel_id)
         if not isinstance(channel, discord.TextChannel):
             return None
-        target = await self._get_or_create_log_thread(guild, channel, record)
+        target = (
+            await self._get_or_create_log_thread(guild, channel, record) if settings.get("log_threads", True) else None
+        )
         if target is None:
             target = channel
         embed = self._appeal_detail_embed(guild, record)

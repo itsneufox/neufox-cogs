@@ -232,7 +232,7 @@ class HubMixin:
         if key == "top":
             return await self._top_embed(guild)
         if key == "casino":
-            return await self._casino_menu_embed(owner.id)
+            return await self._casino_menu_embed(owner.id, guild)
         if key == "lottery":
             return await self._lottery_status_embed()
         if guild is None:

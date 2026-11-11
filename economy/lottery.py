@@ -25,8 +25,6 @@ from .constants import (
     LWDMILLIONS_HISTORY_LIMIT,
     LWDMILLIONS_HISTORY_WINNER_LIMIT,
     MAX_AMOUNT,
-    MAX_LWDMILLIONS_LINES_PER_PLAYER,
-    MAX_LWDMILLIONS_TOTAL_TICKETS,
 )
 from .errors import EconomyError
 from .layouts import send_embed
@@ -192,10 +190,11 @@ class LotteryMixin:
         lines: int = 1,
     ):
         """Buy one or more securely generated Quick Pick lines."""
-        if lines < 1 or lines > MAX_LWDMILLIONS_LINES_PER_PLAYER:
+        max_lines = int(await self.config.lwdmillions_max_lines())
+        if lines < 1 or lines > max_lines:
             ctx.command.reset_cooldown(ctx)
             await ctx.send(
-                f"Choose from 1 to {MAX_LWDMILLIONS_LINES_PER_PLAYER} Quick Pick lines."
+                f"Choose from 1 to {max_lines} Quick Pick lines."
             )
             return
         selections = [random_lwdmillions_ticket() for _ in range(lines)]
@@ -270,7 +269,7 @@ class LotteryMixin:
                     ),
                     inline=False,
                 )
-        embed.set_footer(text=f"{len(tickets):,}/{MAX_LWDMILLIONS_LINES_PER_PLAYER} lines")
+        embed.set_footer(text=f"{len(tickets):,}/{int(await self.config.lwdmillions_max_lines())} lines")
         await send_embed(ctx, embed)
 
     @lottery.command(name="prizes", aliases=["payouts", "rules"])
@@ -642,9 +641,11 @@ class LotteryMixin:
     ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, Any]]:
         if not selections:
             raise EconomyError("Choose at least one LWDMillions line.")
-        if len(selections) > MAX_LWDMILLIONS_LINES_PER_PLAYER:
+        max_lines = int(await self.config.lwdmillions_max_lines())
+        max_tickets = int(await self.config.lwdmillions_max_tickets())
+        if len(selections) > max_lines:
             raise EconomyError(
-                f"You can hold at most {MAX_LWDMILLIONS_LINES_PER_PLAYER} lines per draw."
+                f"You can hold at most {max_lines} lines per draw."
             )
         validated = [validate_lwdmillions_ticket(*selection) for selection in selections]
 
@@ -679,13 +680,13 @@ class LotteryMixin:
                     if isinstance(ticket, dict)
                     and int(ticket.get("user_id", 0)) == ctx.author.id
                 )
-                if existing_count + len(validated) > MAX_LWDMILLIONS_LINES_PER_PLAYER:
-                    remaining = MAX_LWDMILLIONS_LINES_PER_PLAYER - existing_count
+                if existing_count + len(validated) > max_lines:
+                    remaining = max_lines - existing_count
                     raise EconomyError(
-                        f"You can hold at most {MAX_LWDMILLIONS_LINES_PER_PLAYER} lines per draw. "
+                        f"You can hold at most {max_lines} lines per draw. "
                         f"You have room for {max(0, remaining)} more."
                     )
-                if len(state["tickets"]) + len(validated) > MAX_LWDMILLIONS_TOTAL_TICKETS:
+                if len(state["tickets"]) + len(validated) > max_tickets:
                     raise EconomyError("This LWDMillions draw has reached its ticket limit.")
 
                 ticket_price = int(state["ticket_price"])

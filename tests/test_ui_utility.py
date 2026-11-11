@@ -70,9 +70,9 @@ class UtilityTests(unittest.IsolatedAsyncioTestCase):
         from control.schema import parse_schema
 
         cog = self.cog_cls.__new__(self.cog_cls)
-        cog.reminders_config, cog.sixseven_config = MagicMock(), MagicMock()
+        cog.reminders_config, cog.sixseven_config, cog.utility_config = MagicMock(), MagicMock(), MagicMock()
         schema = parse_schema(cog.control_panel_schema())
-        self.assertEqual(schema.sections, ["Reminders", "SixSeven"])
+        self.assertEqual(schema.sections, ["Converter", "Urban Dictionary", "Wiki", "Reminders", "SixSeven"])
         self.assertTrue(all(setting.getter and setting.setter for setting in schema.settings))
 
     async def test_sixseven_language_lists_edit_one_language_only(self):

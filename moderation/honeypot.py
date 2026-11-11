@@ -11,7 +11,26 @@ from redbot.core import commands
 from .views import HONEYPOT_REASON, BanReviewView
 
 
-ACTION_CHOICES = ("ban", "kick", "role")
+ACTION_CHOICES = ("ban", "kick", "timeout", "role")
+DEFAULT_HONEYPOT_DM = "You posted in a trap channel in {server} and were {action}."
+HONEYPOT_DM_VERBS = {"ban": "banned", "kick": "kicked", "timeout": "timed out", "role": "restricted"}
+
+
+def honeypot_dm_text(template: str, server: str, action: str) -> str:
+    """Fill the honeypot DM. A template with broken braces falls back to the default text."""
+    values = {"server": server, "action": HONEYPOT_DM_VERBS.get(action, action)}
+    try:
+        return (template or DEFAULT_HONEYPOT_DM).format_map(values)
+    except (KeyError, IndexError, ValueError):
+        return DEFAULT_HONEYPOT_DM.format_map(values)
+
+
+def honeypot_dm_error(template: str) -> str | None:
+    try:
+        (template or "").format_map({"server": "", "action": ""})
+    except (KeyError, IndexError, ValueError, AttributeError):
+        return "Use only the {server} and {action} placeholders."
+    return None
 
 
 class HoneypotMixin:
@@ -64,6 +83,10 @@ class HoneypotMixin:
         )
 
         punishment_lines = [f"Action: **{action.title()}**"]
+        if action == "timeout":
+            punishment_lines.append(f"Length: {data.get('timeout_minutes', 60)} minute(s)")
+        elif action == "ban":
+            punishment_lines.append(f"Message cleanup: {data.get('ban_delete_message_days', 1)} day(s)")
         if action == "role":
             punishment_lines.append(
                 f"Punish Role: {punish_role.mention if punish_role else '*Not set*'}"
@@ -106,6 +129,8 @@ class HoneypotMixin:
 
         exempt = await self._honeypot_exempt(message)
         if exempt:
+            if not await self.honeypot_config.guild(message.guild).log_exempt():
+                return
             await self._honeypot_log(
                 message.guild,
                 f"{message.author} was exempt from the honeypot in {message.channel.mention}.",
@@ -118,11 +143,23 @@ class HoneypotMixin:
         except discord.HTTPException:
             pass
 
-        deleted_count = await self._purge_recent_messages_guild(message)
-        cleanup_note = self._build_cleanup_note(deleted_count)
-
         guild_conf = await self.honeypot_config.guild(message.guild).all()
+        cleanup_hours = int(guild_conf.get("cleanup_hours", 1))
+        deleted_count = await self._purge_recent_messages_guild(message, cleanup_hours) if cleanup_hours > 0 else 0
+        cleanup_note = self._build_cleanup_note(deleted_count, cleanup_hours)
+
+        if guild_conf.get("dm_member"):
+            await self._honeypot_dm(message, guild_conf)
         await self._honeypot_punish(message, guild_conf, cleanup_note)
+
+    async def _honeypot_dm(self, message: discord.Message, config: dict):
+        """DM the member before punishing them, while the bot still shares a server with them."""
+        action = (config.get("action") or "ban").lower()
+        text = honeypot_dm_text(config.get("dm_message", ""), message.guild.name, action)
+        try:
+            await message.author.send(text[:2000])
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     async def _honeypot_exempt(self, message: discord.Message) -> bool:
         exempt_role_ids = await self.honeypot_config.guild(message.guild).exempt_roles()
@@ -179,6 +216,10 @@ class HoneypotMixin:
                 )
             return
 
+        if action == "timeout":
+            await self._honeypot_timeout(member, config, channel_mention, deleted_message, cleanup_note)
+            return
+
         if action == "role":
             await self._honeypot_role_punish(
                 member, config, channel_mention, deleted_message, cleanup_note
@@ -190,7 +231,7 @@ class HoneypotMixin:
             await guild.ban(
                 member,
                 reason=HONEYPOT_REASON,
-                delete_message_days=1,
+                delete_message_days=max(0, min(7, int(config.get("ban_delete_message_days", 1)))),
             )
             await self._honeypot_case(guild, member, "Honeypot Ban", channel_mention)
             description = self._append_cleanup_note(
@@ -214,6 +255,38 @@ class HoneypotMixin:
                 target=member,
                 deleted_message=deleted_message,
             )
+
+    async def _honeypot_timeout(
+        self,
+        member: discord.Member,
+        config: dict,
+        channel_mention: str,
+        deleted_message: Optional[str] = None,
+        cleanup_note: Optional[str] = None,
+    ):
+        guild = member.guild
+        minutes = max(1, min(40320, int(config.get("timeout_minutes", 60))))
+        try:
+            await member.edit(communication_disabled_until=discord.utils.utcnow() + timedelta(minutes=minutes), reason=HONEYPOT_REASON)
+        except discord.HTTPException:
+            description = self._append_cleanup_note(
+                f"Failed to timeout {member} after they tripped the honeypot in {channel_mention}. Check permissions and role hierarchy.",
+                cleanup_note,
+            )
+            await self._honeypot_log(guild, description, target=member, deleted_message=deleted_message)
+            return
+        await self._honeypot_case(guild, member, "Honeypot Timeout", channel_mention, extra=f"{minutes} minute(s)")
+        description = self._append_cleanup_note(
+            f"{member} was timed out for {minutes} minute(s) for tripping the honeypot in {channel_mention}. Review and ban if necessary.",
+            cleanup_note,
+        )
+        await self._honeypot_log(
+            guild,
+            description,
+            target=member,
+            view=self._build_ban_review_view(guild, member),
+            deleted_message=deleted_message,
+        )
 
     async def _honeypot_role_punish(
         self,
@@ -318,6 +391,7 @@ class HoneypotMixin:
     async def _purge_recent_messages_guild(
         self,
         trigger_message: discord.Message,
+        hours: int = 1,
     ) -> int:
         guild = trigger_message.guild
         if not guild:
@@ -328,7 +402,7 @@ class HoneypotMixin:
         if not bot_member or not member:
             return 0
 
-        cutoff = discord.utils.utcnow() - timedelta(hours=1)
+        cutoff = discord.utils.utcnow() - timedelta(hours=hours)
         total_deleted = 0
 
         for channel in guild.text_channels:
@@ -386,12 +460,13 @@ class HoneypotMixin:
         details = f"Posted in {channel_mention}" + (f"; {extra}" if extra else "")
         await self._create_case(guild, guild.me, member, action, HONEYPOT_REASON, extra=details)
 
-    def _build_cleanup_note(self, deleted_count: int) -> Optional[str]:
+    def _build_cleanup_note(self, deleted_count: int, hours: int = 1) -> Optional[str]:
         if not deleted_count:
             return None
+        window = "the last hour" if hours == 1 else f"the last {hours} hours"
         if deleted_count == 1:
-            return "Removed 1 other message from the last hour."
-        return f"Removed {deleted_count} other messages from the last hour across accessible channels."
+            return f"Removed 1 other message from {window}."
+        return f"Removed {deleted_count} other messages from {window} across accessible channels."
 
     def _append_cleanup_note(
         self, description: str, cleanup_note: Optional[str]

@@ -93,9 +93,9 @@ def hit_summary(hit: dict) -> str:
     return truncate_text(desc, 120)
 
 
-def results_embed(search_term: str, hits: list[dict]) -> discord.Embed:
+def results_embed(search_term: str, hits: list[dict], shown: int = 5) -> discord.Embed:
     lines = []
-    for index, hit in enumerate(hits[:5], 1):
+    for index, hit in enumerate(hits[: max(1, shown)], 1):
         url = hit["url_without_anchor"]
         parts = url.rstrip("/").split("/")
         kind = next((label for key, label in DOC_TYPES.items() if key in parts), "")
@@ -110,7 +110,7 @@ def results_embed(search_term: str, hits: list[dict]) -> discord.Embed:
     return embed
 
 
-def doc_view(owner_id: int, title: str, url: str, content: str) -> Pager:
+def doc_view(owner_id: int, title: str, url: str, content: str, timeout: float = DOC_VIEW_TIMEOUT) -> Pager:
     chunks = split_chunks(content) or ["No content found."]
     pages = []
     for index, chunk in enumerate(chunks):
@@ -121,15 +121,17 @@ def doc_view(owner_id: int, title: str, url: str, content: str) -> Pager:
         embed.set_footer(text=footer)
         pages.append(embed)
     return Pager(
-        owner_id, pages, link=("View Full Documentation", url), denied=NOT_YOURS, timeout=DOC_VIEW_TIMEOUT
+        owner_id, pages, link=("View Full Documentation", url), denied=NOT_YOURS, timeout=timeout
     )
 
 
 class WikiSearchView(discord.ui.LayoutView):
     """Search results with one numbered button per result."""
 
-    def __init__(self, cog, search_id: str, num_results: int, embed: discord.Embed):
-        super().__init__(timeout=DOC_VIEW_TIMEOUT)
+    def __init__(
+        self, cog, search_id: str, num_results: int, embed: discord.Embed, timeout: float = DOC_VIEW_TIMEOUT
+    ):
+        super().__init__(timeout=timeout)
         self.cog = cog
         self.search_id = search_id
         row = discord.ui.ActionRow()
@@ -159,14 +161,24 @@ class WikiMixin:
 
     def _wiki_prune(self):
         now = time.time()
-        for key in [key for key, value in self._wiki_cache.items() if now - value["timestamp"] > CACHE_SECONDS]:
+        expired = [
+            key
+            for key, value in self._wiki_cache.items()
+            if now - value["timestamp"] > value.get("lifetime", CACHE_SECONDS)
+        ]
+        for key in expired:
             del self._wiki_cache[key]
 
     @commands.hybrid_command(name="wiki")
-    @commands.cooldown(1, 5, commands.BucketType.user)
     @app_commands.describe(search_term="What to search for, like SetPlayerPos. Leave empty for help.")
     async def wiki(self, ctx: commands.Context, *, search_term: str | None = None):
         """Search the open.mp documentation."""
+        error, settings = await self._feature_gate(ctx, "wiki")
+        if error:
+            await ctx.send(error, ephemeral=True, allowed_mentions=NO_PINGS)
+            return
+        lifetime = float(settings["wiki_button_minutes"]) * 60
+        shown = int(settings["wiki_max_results"])
         if not search_term or search_term.casefold() in {"help", "commands"}:
             command = "/wiki" if ctx.interaction else f"{ctx.clean_prefix}wiki"
             embed = discord.Embed(
@@ -196,8 +208,12 @@ class WikiMixin:
 
         self._wiki_prune()
         search_id = str(ctx.message.id if ctx.message else int(time.time()))
-        self._wiki_cache[search_id] = {"hits": hits, "user_id": ctx.author.id, "timestamp": time.time()}
-        view = WikiSearchView(self, search_id, min(len(hits), 5), results_embed(search_term, hits))
+        self._wiki_cache[search_id] = {
+            "hits": hits[:shown], "user_id": ctx.author.id, "timestamp": time.time(), "lifetime": lifetime
+        }
+        view = WikiSearchView(
+            self, search_id, min(len(hits), shown), results_embed(search_term, hits, shown), timeout=lifetime
+        )
         await ctx.send(view=view, allowed_mentions=NO_PINGS)
 
     async def _wiki_open_result(self, interaction: discord.Interaction, search_id: str, index: int):
@@ -216,7 +232,8 @@ class WikiMixin:
 
         url = search["hits"][index]["url_without_anchor"]
         await interaction.response.defer()
-        view = doc_view(interaction.user.id, url.rstrip("/").split("/")[-1], url, await fetch_doc(url))
+        lifetime = search.get("lifetime", DOC_VIEW_TIMEOUT)
+        view = doc_view(interaction.user.id, url.rstrip("/").split("/")[-1], url, await fetch_doc(url), lifetime)
         view.message = await interaction.edit_original_response(view=view, allowed_mentions=NO_PINGS)
 
 

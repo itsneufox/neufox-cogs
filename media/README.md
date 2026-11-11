@@ -37,12 +37,25 @@ The site and service table follows upstream [embed-fixer](https://github.com/ser
 
 ## Settings
 
-All settings are in `/control` under **Media**, in three sections:
+All settings are in `/control` under **Media** (defaults in brackets):
 
 - **Radio**: on/off, stream URL, auto channel, auto play, reconnect, voice channel status, status channel,
-  status API URL.
-- **MusicBoard**: on/off, music channel, reaction timeout.
-- **EmbedFixer**: automatic fixing on/off.
+  status API URL, volume (100%, applied live), leave delay after the channel empties (10 s), reconnect delay
+  (5 s), show schedule (on; off uses the station name, `LongWayFM`), status message title, voice status
+  formats for playing (`{show}: {title}`) and offline (`{show}: offline`), and, for bot owners only, the
+  status refresh interval for every server (30 s).
+- **MusicBoard**: on/off, music channel, reaction timeout, watched channels (all), votes needed (1), block
+  reaction on/off, the nominate/block/posted/blocked emojis, how long the blocked mark stays (60 s) and the
+  nomination message (`{user}`, `{jump}`, `{url}`).
+- **MusicBoard links**: one switch per accepted link type (YouTube, YouTube Music, Spotify, SoundCloud, Apple
+  Music, Tidal, Deezer, Bandcamp, Amazon Music).
+- **EmbedFixer**: automatic fixing, YouTube links, Twitter/X translation, ignored channels and roles, repost as
+  the author through a webhook or as the bot (a reply), what happens to the original (hide its embeds, delete
+  it, or leave it; deleting reposts the whole message and falls back to hiding embeds when it has files),
+  the **Try other** button on/off and its lifetime (24 h).
+- **EmbedFixer sites**: one switch per supported site.
+- **EmbedFixer services**: the service tried first for each site with more than one; **Try other** moves on
+  from it.
 
 Turning a feature off stops its listener in that server. Disabling the whole cog with Red's
 `[p]command disablecog Media` also stops all three.

@@ -20,6 +20,7 @@ from .ticket import Ticket
 from .utils import CustomModalConverter
 
 log = logging.getLogger("red.neufox.tickettool")
+AUTO_CLOSE_CHECK_SECONDS = 10 * 60
 
 
 async def _confirm(
@@ -60,6 +61,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
     def __init__(self, bot: Red) -> None:
         self.bot = bot
         self.views: typing.Dict = {}
+        self._auto_close_task: typing.Optional[asyncio.Task] = None
 
         self.config: Config = Config.get_conf(
             self,
@@ -70,6 +72,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         self.config.register_global(CONFIG_SCHEMA=None)
         self.config.register_guild(
             language="en",
+            panel_profile=None,
             profiles={},
             default_profile_settings={
                 "enable": False,
@@ -109,6 +112,8 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
                     "rename_channel_dropdown": False,
                 },
                 "custom_modal": None,
+                "transcript": True,
+                "auto_close_hours": 0,
             },
             tickets={},
             buttons={},
@@ -124,6 +129,52 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         except RuntimeError:
             pass
         asyncio.create_task(self.load_buttons())
+        self._auto_close_task = asyncio.create_task(self._auto_close_loop())
+
+    def cog_unload(self) -> None:
+        if self._auto_close_task is not None:
+            self._auto_close_task.cancel()
+
+    async def _auto_close_loop(self) -> None:
+        await self.bot.wait_until_red_ready()
+        while True:
+            try:
+                await self.auto_close_inactive()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Automatic ticket closing failed.")
+            await asyncio.sleep(AUTO_CLOSE_CHECK_SECONDS)
+
+    async def auto_close_inactive(self) -> int:
+        """Close open tickets whose profile has auto-close on and whose channel went quiet."""
+        closed = 0
+        now = datetime.datetime.now(tz=datetime.timezone.utc)
+        for guild_id, data in (await self.config.all_guilds()).items():
+            guild = self.bot.get_guild(int(guild_id))
+            profiles = data.get("profiles") or {}
+            if guild is None or not any((p or {}).get("auto_close_hours") for p in profiles.values()):
+                continue
+            for channel_id, raw in list((data.get("tickets") or {}).items()):
+                profile = raw.get("profile", "main")
+                hours = int((profiles.get(profile) or {}).get("auto_close_hours") or 0)
+                if raw.get("status") != "open" or hours <= 0:
+                    continue
+                channel = guild.get_channel_or_thread(int(channel_id))
+                if channel is None:
+                    continue
+                last_id = getattr(channel, "last_message_id", None) or channel.id
+                if now - discord.utils.snowflake_time(last_id) < datetime.timedelta(hours=hours):
+                    continue
+                ticket = await self.get_ticket(channel)
+                if ticket is None or ticket.status != "open":
+                    continue
+                try:
+                    await ticket.close(guild.me, reason=f"No activity for {hours} hour(s).")
+                    closed += 1
+                except discord.HTTPException:
+                    log.exception("Could not auto-close ticket channel %s in guild %s.", channel_id, guild_id)
+        return closed
 
     async def red_delete_data_for_user(self, *args, **kwargs) -> None:
         return

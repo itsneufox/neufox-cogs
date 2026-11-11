@@ -43,7 +43,9 @@ class TrackingMixin:
         """Earns voice XP: tracked, not muted or deafened, and not in the AFK channel."""
         if not await self._voice_tracked(member, state):
             return False
-        if state.self_deaf or state.deaf or state.self_mute or state.mute or getattr(state, "afk", False):
+        if state.self_deaf or state.deaf or getattr(state, "afk", False):
+            return False
+        if (state.self_mute or state.mute) and not await self.config.guild(member.guild).voice_xp_while_muted():
             return False
         afk = member.guild.afk_channel
         return not (afk and state.channel.id == afk.id)

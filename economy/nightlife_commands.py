@@ -45,12 +45,13 @@ class NightlifeMixin:
             async with self._lock:
                 if action in ("encounter", "use") and ctx.author.id in self._nightlife_invites:
                     raise ValueError("Finish or cancel your pending invitation first.")
+                prices = await self.config.nightlife_prices()
                 async with self.config.nightlife_players() as players:
                     async with self.config.balances() as balances:
                         account = self._account_from_mapping(balances, ctx.author.id)
                         player, remaining, message, cost = nightlife.apply_action(
                             players.get(str(ctx.author.id)), account[CASH], action,
-                            now=int(time.time()), **kwargs,
+                            now=int(time.time()), prices=prices, **kwargs,
                         )
                         players[str(ctx.author.id)] = player
                         if cost:
@@ -95,6 +96,7 @@ class NightlifeMixin:
                     players.get(str(ctx.author.id)), players.get(str(partner.id)),
                     self._account_from_mapping(balances, ctx.author.id)[CASH],
                     now=int(time.time()), venue=venue, protected=protected,
+                    prices=await self.config.nightlife_prices(),
                 )
                 view = NightlifeInviteView(self, ctx, partner, venue, protected)
                 for user_id in view.participant_ids:
@@ -128,12 +130,13 @@ class NightlifeMixin:
                 member = ctx.guild.get_member(user_id)
                 if member is None or member.bot or not ctx.channel.permissions_for(member).view_channel:
                     raise ValueError("Both players must still be in this server and able to see this channel.")
+            prices = await self.config.nightlife_prices()
             async with self.config.nightlife_players() as players:
                 async with self.config.balances() as balances:
                     account = self._account_from_mapping(balances, first_id)
                     first, second, remaining, cost, protection, first_after, second_after = nightlife.apply_player_encounter(
                         players.get(str(first_id)), players.get(str(second_id)), account[CASH],
-                        now=int(time.time()), venue=view.venue, protected=view.protected,
+                        now=int(time.time()), venue=view.venue, protected=view.protected, prices=prices,
                     )
                     players[str(first_id)] = first
                     players[str(second_id)] = second
@@ -199,12 +202,13 @@ class NightlifeMixin:
         """Browse escorts and venues."""
         if not await self._nightlife_allowed(ctx):
             return
+        prices = await self.config.nightlife_prices()
         lines = ["**Escorts**"]
         for key, escort in nightlife.ESCORTS.items():
-            lines.append(f"`{key}` — {escort['name']}: {escort['price']:,} LWD$")
+            lines.append(f"`{key}` — {escort['name']}: {nightlife.price_of(f'escort.{key}', prices):,} LWD$")
         lines.append("\n**Venues** (added to the escort fee)")
-        for key, venue in nightlife.VENUES.items():
-            lines.append(f"`{key}` — {venue['price']:,} LWD$")
+        for key in nightlife.VENUES:
+            lines.append(f"`{key}` — {nightlife.price_of(f'venue.{key}', prices):,} LWD$")
         await send_text(ctx, "\n".join(lines), color=NIGHTLIFE_COLOR)
 
     @nightlife.command(name="shop")
@@ -212,9 +216,10 @@ class NightlifeMixin:
         """Browse supplies."""
         if not await self._nightlife_allowed(ctx):
             return
+        prices = await self.config.nightlife_prices()
         lines = ["**Nightlife shop**"]
         for key, item in nightlife.ITEMS.items():
-            lines.append(f"`{key}` — {item['price']:,} LWD$: {item['description']}")
+            lines.append(f"`{key}` — {nightlife.price_of(f'item.{key}', prices):,} LWD$: {item['description']}")
         lines.append(f"`{ctx.clean_prefix}sex buy <item> [quantity]`")
         await send_text(ctx, "\n".join(lines), color=NIGHTLIFE_COLOR)
 
@@ -275,9 +280,10 @@ class NightlifeMixin:
         """View clinic prices."""
         if not await self._nightlife_allowed(ctx):
             return
-        lines = [f"**Nightlife clinic** — a test costs {nightlife.TEST_PRICE} LWD$."]
-        for disease in nightlife.DISEASES.values():
-            lines.append(f"{disease['name']}: {disease['treatment']:,} LWD$ to treat")
+        prices = await self.config.nightlife_prices()
+        lines = [f"**Nightlife clinic** — a test costs {nightlife.price_of('test', prices):,} LWD$."]
+        for key, disease in nightlife.DISEASES.items():
+            lines.append(f"{disease['name']}: {nightlife.price_of(f'treatment.{key}', prices):,} LWD$ to treat")
         lines.append(f"`{ctx.clean_prefix}sex clinic test` — get tested\n"
                      f"`{ctx.clean_prefix}sex clinic cure` — get treated\n"
                      f"`{ctx.clean_prefix}sex clinic pay` — pay hospital bills")

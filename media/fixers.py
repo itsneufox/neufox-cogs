@@ -649,15 +649,23 @@ def available_methods(match: MatchedURL) -> list[FixMethod]:
     return [method for method in match.domain.fix_methods if method.id not in skip]
 
 
-def _method_for_index(match: MatchedURL, index: int) -> FixMethod | None:
+def _method_for_index(match: MatchedURL, index: int, preferred_id: int | None = None) -> FixMethod | None:
+    """The method ``index`` steps after the starting one: the preferred method, else the domain default."""
     methods = available_methods(match)
     if not methods:
         return None
-    default = match.domain.default_fix_method
-    if default is not None and default in methods:
-        start = methods.index(default)
+    start_method = match.domain.get_fix_method(preferred_id) if preferred_id is not None else None
+    if start_method is None or start_method not in methods:
+        start_method = match.domain.default_fix_method
+    if start_method is not None and start_method in methods:
+        start = methods.index(start_method)
         methods = methods[start:] + methods[:start]
     return methods[index % len(methods)]
+
+
+def fixable_domains() -> list[Domain]:
+    """Domains that have at least one fix method, in table order."""
+    return [domain for domain in DOMAINS if domain.fix_methods]
 
 
 def has_alternatives(matches: list[MatchedURL]) -> bool:
@@ -680,24 +688,70 @@ def _translate(url: str, language: str) -> str:
     return urlunparse(parsed._replace(path=parsed.path.rstrip("/") + "/" + language))
 
 
-def rewrite(matches: list[MatchedURL], rotations: dict[int, int], translate_to: str | None = None) -> str:
-    """Return the fixed links, one per line, using each domain's rotation index.
+def fixed_links(
+    matches: list[MatchedURL],
+    rotations: dict[int, int],
+    translate_to: str | None = None,
+    preferred: dict[int, int] | None = None,
+) -> list[str]:
+    """Each match's fixed URL, or the original when no method applies.
 
-    With ``translate_to``, Twitter/X links fixed through FxEmbed are translated to that language.
+    ``preferred`` maps a domain id to the fix method id its rotation starts from.
     """
+    preferred = preferred or {}
     fixed_urls: list[str] = []
     for match in matches:
-        method = _method_for_index(match, rotations.get(int(match.domain.id), 0))
+        domain_id = int(match.domain.id)
+        method = _method_for_index(match, rotations.get(domain_id, 0), _int_or_none(preferred.get(domain_id)))
         fixed = _apply_fix(match.clean, match.domain, method) if method is not None else None
         if fixed and translate_to and method.id == FXEMBED_TWITTER_ID and match.domain.id == DomainId.TWITTER:
             fixed = _translate(fixed, translate_to)
         fixed_urls.append(fixed or match.original)
-    return "\n".join(fixed_urls)[:MAX_CONTENT]
+    return fixed_urls
 
 
-def _matching_domain(url: str, opted_in: frozenset[DomainId]) -> tuple[Domain | None, Website | None]:
+def _int_or_none(value) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def rewrite(
+    matches: list[MatchedURL],
+    rotations: dict[int, int],
+    translate_to: str | None = None,
+    preferred: dict[int, int] | None = None,
+) -> str:
+    """Return the fixed links, one per line, using each domain's rotation index.
+
+    With ``translate_to``, Twitter/X links fixed through FxEmbed are translated to that language.
+    """
+    return "\n".join(fixed_links(matches, rotations, translate_to, preferred))[:MAX_CONTENT]
+
+
+def rewrite_inline(
+    content: str,
+    matches: list[MatchedURL],
+    rotations: dict[int, int],
+    translate_to: str | None = None,
+    preferred: dict[int, int] | None = None,
+) -> str:
+    """Return the whole message with each matched link replaced by its fixed URL."""
+    result = content
+    pairs = zip(matches, fixed_links(matches, rotations, translate_to, preferred))
+    for match, fixed in sorted(pairs, key=lambda pair: pair[0].start, reverse=True):
+        result = result[: match.start] + fixed + result[match.end :]
+    return result[:MAX_CONTENT]
+
+
+def _matching_domain(
+    url: str, opted_in: frozenset[DomainId], disabled: frozenset[int] = frozenset()
+) -> tuple[Domain | None, Website | None]:
     for domain in DOMAINS:
         if not domain.enabled_by_default and domain.id not in opted_in:
+            continue
+        if int(domain.id) in disabled:
             continue
         for website in domain.websites:
             if website.match(url):
@@ -705,10 +759,13 @@ def _matching_domain(url: str, opted_in: frozenset[DomainId]) -> tuple[Domain | 
     return None, None
 
 
-def find_matches(content: str, opted_in: frozenset[DomainId] = frozenset()) -> list[MatchedURL]:
+def find_matches(
+    content: str, opted_in: frozenset[DomainId] = frozenset(), disabled: frozenset[int] = frozenset()
+) -> list[MatchedURL]:
     """Find fixable links. ``$link`` and ``<link>`` are left alone.
 
     Domains that are off by default (YouTube) only match when listed in ``opted_in``.
+    Domain ids in ``disabled`` never match.
     """
     matches: list[MatchedURL] = []
     for found in URL_RE.finditer(content):
@@ -720,7 +777,7 @@ def find_matches(content: str, opted_in: frozenset[DomainId] = frozenset()) -> l
         if start > 0 and content[start - 1] == "<" and end < len(content) and content[end] == ">":
             continue
         clean = _clean_url(raw_url)
-        domain, website = _matching_domain(clean, opted_in)
+        domain, website = _matching_domain(clean, opted_in, disabled)
         if domain is None or website is None or not domain.fix_methods:
             continue
         matches.append(MatchedURL(start, end, raw_url, clean, domain, website))

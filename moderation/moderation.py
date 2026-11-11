@@ -11,8 +11,8 @@ import discord
 from redbot.core import Config, app_commands, commands
 
 from .actions import ActionsMixin
-from .automod import AutoModMixin
-from .cases import CasesMixin
+from .automod import FILTER_NAMES, AutoModMixin
+from .cases import CasesMixin, dm_template_error
 from .common import (
     ADMINHELPER_STORAGE,
     AUTOMOD_STORAGE,
@@ -20,9 +20,13 @@ from .common import (
     DEFAULT_REASON,
     HONEYPOT_STORAGE,
 )
-from .honeypot import ACTION_CHOICES, HoneypotMixin
+from .honeypot import ACTION_CHOICES, DEFAULT_HONEYPOT_DM, HoneypotMixin, honeypot_dm_error
 from .layouts import run_slash, send_embed, send_text
 from .natural import NATURAL_COMMAND_METHODS, NaturalLanguageMixin
+
+
+# Channels where members can post messages, for the per-filter exemption lists.
+MESSAGE_CHANNELS = ["text", "news", "voice", "forum", "category"]
 
 
 def _open_config(storage: tuple[str, int]) -> Config:
@@ -52,6 +56,18 @@ class Moderation(
             natural_language_enabled=True,
             softban_delete_message_days=1,
             ban_delete_message_days=0,
+            require_reason=False,
+            confirm_actions=True,
+            confirm_timeout_seconds=30,
+            purge_max=200,
+            default_timeout_minutes=10,
+            dm_on_warn=True,
+            dm_on_timeout=True,
+            dm_on_kick=True,
+            dm_on_ban=True,
+            dm_on_softban=True,
+            dm_template="",
+            dm_footer="",
             next_case_id=1,
             cases=[],
             next_warning_punishment_id=1,
@@ -95,6 +111,15 @@ class Moderation(
             lockdown_until=0,
             lockdown_overrides={},
             role_punishment_profiles={},
+            delete_violations=False,
+            notify_in_channel=True,
+            notify_delete_after=0,
+            rate_enabled=True,
+            mention_enabled=True,
+            caps_enabled=True,
+            link_enabled=True,
+            allowed_link_domains="",
+            **{f"{name}_exempt_{kind}_ids": [] for name in FILTER_NAMES for kind in ("channel", "role")},
         )
         self.automod_config.register_member(warning_count=0, last_violation_at=0, last_action_at=0)
 
@@ -108,6 +133,12 @@ class Moderation(
             punish_role_id=None,
             remove_other_roles=False,
             role_exception_ids=[],
+            ban_delete_message_days=1,
+            timeout_minutes=60,
+            cleanup_hours=1,
+            dm_member=False,
+            dm_message=DEFAULT_HONEYPOT_DM,
+            log_exempt=True,
         )
 
         self._message_buckets: dict[tuple[int, int], deque[float]] = defaultdict(deque)
@@ -142,6 +173,9 @@ class Moderation(
 
             return {"get": get, "set": set_}
 
+        def mod(key: str, label: str, kind: str, section: str = "Moderation", **extra) -> dict[str, Any]:
+            return {"key": key, "label": label, "type": kind, "section": section, **extra}
+
         def automod(key: str, label: str, kind: str, section: str = "AutoMod", **extra) -> dict[str, Any]:
             return {"key": f"automod:{key}", "label": label, "type": kind, "section": section, **bound(self.automod_config, key), **extra}
 
@@ -154,25 +188,63 @@ class Moderation(
                 "access": "admin", **bound(self.honeypot_config, key), **extra,
             }
 
+        def exemptions(name: str, section: str, what: str) -> list[dict[str, Any]]:
+            return [
+                automod(f"{name}_exempt_channel_ids", "Exempt channels", "channels", section, channel_types=MESSAGE_CHANNELS,
+                        help=f"Channels or categories where {what} is not checked."),
+                automod(f"{name}_exempt_role_ids", "Exempt roles", "roles", section,
+                        help=f"Members with these roles skip the {what} check."),
+            ]
+
+        def text_check(error_for):
+            return lambda guild, value: error_for(value)
+
+        def dm_toggle(action: str, label: str) -> dict[str, Any]:
+            return mod(f"dm_on_{action}", f"DM on {label}", "bool", dms, help=f"Send the DM notice for {label}s.")
+
+        dms = "DM notices"
         escalation = "AutoMod escalation"
+        rate, command, mention, caps, links = (
+            "Filter: message rate", "Filter: commands", "Filter: mentions", "Filter: caps", "Filter: links",
+        )
         return {
             "title": "Moderation",
             "description": "Moderation actions and cases, AutoMod spam protection and the honeypot trap.",
             "settings": [
                 # Moderation
-                {"key": "log_channel_id", "label": "Mod-log channel", "type": "channel", "section": "Moderation",
-                 "channel_types": ["text"], "help": "Where manual moderation actions are logged."},
-                {"key": "dm_users", "label": "DM moderated users", "type": "bool", "section": "Moderation",
-                 "help": "Tell members by DM when they are moderated."},
-                {"key": "natural_language_enabled", "label": "Natural-language moderation", "type": "bool",
-                 "section": "Moderation", "help": "Allow moderation by mentioning the bot in plain language."},
-                {"key": "name_tracking_enabled", "label": "Name history tracking", "type": "bool", "section": "Moderation",
-                 "help": "Record username, display name and nickname changes."},
-                {"key": "ban_delete_message_days", "label": "Ban message cleanup", "type": "int", "section": "Moderation",
-                 "min": 0, "max": 7, "unit": "days", "help": "Days of messages deleted by default on a ban."},
-                {"key": "softban_delete_message_days", "label": "Softban message cleanup", "type": "int",
-                 "section": "Moderation", "min": 0, "max": 7, "unit": "days", "help": "Days of messages deleted on a softban."},
-                # AutoMod detection
+                mod("log_channel_id", "Mod-log channel", "channel", channel_types=["text"],
+                    help="Where manual moderation actions are logged."),
+                mod("natural_language_enabled", "Natural-language moderation", "bool",
+                    help="Allow moderation by mentioning the bot in plain language."),
+                mod("name_tracking_enabled", "Name history tracking", "bool",
+                    help="Record username, display name and nickname changes."),
+                mod("require_reason", "Require a reason", "bool",
+                    help="Refuse bans, kicks, timeouts and warnings that have no reason."),
+                mod("confirm_actions", "Confirmation prompts", "bool",
+                    help="Ask the moderator to confirm bans, kicks, purges and similar actions."),
+                mod("confirm_timeout_seconds", "Confirmation time limit", "int", min=5, max=600, unit="seconds",
+                    help="How long a confirmation prompt waits before it expires."),
+                mod("default_timeout_minutes", "Default timeout length", "int", min=1, max=40320, unit="minutes",
+                    help="Used by /mod timeout when no length is given."),
+                mod("purge_max", "Purge limit", "int", min=1, max=1000, unit="messages",
+                    help="Most messages one purge may delete."),
+                mod("ban_delete_message_days", "Ban message cleanup", "int", min=0, max=7, unit="days",
+                    help="Days of messages deleted by default on a ban."),
+                mod("softban_delete_message_days", "Softban message cleanup", "int", min=0, max=7, unit="days",
+                    help="Days of messages deleted on a softban."),
+                # DM notices
+                mod("dm_users", "DM moderated users", "bool", dms, help="Tell members by DM when they are moderated."),
+                dm_toggle("warn", "warning"),
+                dm_toggle("timeout", "timeout"),
+                dm_toggle("kick", "kick"),
+                dm_toggle("ban", "ban"),
+                dm_toggle("softban", "softban"),
+                mod("dm_template", "Custom DM text", "text", dms, max=1500, clearable=True, clear_value="",
+                    empty="Built-in message", validate=text_check(dm_template_error),
+                    help="Placeholders: {server} {action} {reason} {duration} {details}. Clear for the default."),
+                mod("dm_footer", "DM footer", "text", dms, max=500, clearable=True, clear_value="", empty="None",
+                    help="Added to the end of every DM notice, such as an appeal link."),
+                # AutoMod
                 automod("antiabuse_enabled", "AutoMod enforcement", "bool", help="Detect and punish spam in this server."),
                 automod("log_channel_id", "AutoMod log channel", "channel", channel_types=["text"],
                         help="Where AutoMod actions are logged."),
@@ -181,27 +253,45 @@ class Moderation(
                         help="Channels AutoMod does not check."),
                 automod("ignored_category_ids", "Ignored categories", "channels", channel_types=["category"],
                         help="Categories AutoMod does not check."),
-                number("rate_window_seconds", "Message rate window", "AutoMod", 1, "seconds"),
-                number("rate_threshold", "Message rate limit", "AutoMod", 1, "messages", "Most messages allowed per window."),
-                number("command_spam_threshold", "Command spam limit", "AutoMod", 0, "commands",
-                       "Most commands per window. 0 turns this check off.")
+                automod("delete_violations", "Delete offending messages", "bool",
+                        help="Delete a message that breaks a filter, as well as recording the strike."),
+                automod("notify_in_channel", "Public notices", "bool",
+                        help="Post a notice in the channel when AutoMod acts on someone."),
+                number("notify_delete_after", "Delete notices after", "AutoMod", 0, "seconds",
+                       "0 keeps the notice.", max=3600),
+                # Filters
+                automod("rate_enabled", "Message rate filter", "bool", rate, help="Catch members sending messages too fast."),
+                number("rate_window_seconds", "Message rate window", rate, 1, "seconds", max=600),
+                number("rate_threshold", "Message rate limit", rate, 1, "messages", "Most messages allowed per window.", max=100),
+                *exemptions("rate", rate, "message rate"),
+                number("command_spam_threshold", "Command spam limit", command, 0, "commands",
+                       "Most commands per window. 0 turns this check off.", max=100)
                 | {"set": self._set_command_spam_threshold},
-                number("command_spam_window_seconds", "Command spam window", "AutoMod", 1, "seconds"),
-                number("mention_threshold", "Mention limit", "AutoMod", 0, "mentions", "Most mentions allowed per message."),
-                number("link_threshold", "Link limit", "AutoMod", 0, "links", "Most links allowed per message."),
-                automod("caps_ratio", "Caps ratio", "float", min=0, max=100, unit="%",
+                number("command_spam_window_seconds", "Command spam window", command, 1, "seconds", max=600),
+                *exemptions("command", command, "command spam"),
+                automod("mention_enabled", "Mention filter", "bool", mention, help="Catch messages with too many mentions."),
+                number("mention_threshold", "Mention limit", mention, 0, "mentions", "Most mentions allowed per message.", max=100),
+                *exemptions("mention", mention, "mention"),
+                automod("caps_enabled", "Caps filter", "bool", caps, help="Catch messages written mostly in capitals."),
+                automod("caps_ratio", "Caps ratio", "float", caps, min=0, max=100, unit="%",
                         help="Share of uppercase letters that counts as caps spam.",
                         validate=self._validate_caps_percent)
                 | {"get": self._caps_ratio_percent, "set": self._set_caps_ratio_percent},
-                number("caps_min_length", "Caps minimum length", "AutoMod", 0, "letters", "Shorter messages skip the caps check."),
+                number("caps_min_length", "Caps minimum length", caps, 0, "letters", "Shorter messages skip the caps check.", max=2000),
+                *exemptions("caps", caps, "caps"),
+                automod("link_enabled", "Link filter", "bool", links, help="Catch messages with too many links."),
+                number("link_threshold", "Link limit", links, 0, "links", "Most links allowed per message.", max=50),
+                automod("allowed_link_domains", "Allowed domains", "text", links, max=1000, clearable=True, clear_value="",
+                        empty="None", help="Comma-separated domains that never count, such as youtube.com, github.com."),
+                *exemptions("link", links, "link"),
                 # AutoMod escalation and lockdown
                 number("violation_decay_seconds", "Strike reset time", escalation, 0, "seconds", "Idle time before strikes reset."),
                 number("action_cooldown_seconds", "Action cooldown", escalation, 0, "seconds"),
                 number("warn_threshold", "Warn at", escalation, 0, "strikes", "Keep these thresholds increasing so each step can happen."),
                 number("timeout_threshold", "Short timeout at", escalation, 0, "strikes"),
-                number("short_timeout_minutes", "Short timeout length", escalation, 1, "minutes"),
+                number("short_timeout_minutes", "Short timeout length", escalation, 1, "minutes", max=40320),
                 number("long_timeout_threshold", "Long timeout at", escalation, 0, "strikes"),
-                number("long_timeout_minutes", "Long timeout length", escalation, 1, "minutes"),
+                number("long_timeout_minutes", "Long timeout length", escalation, 1, "minutes", max=40320),
                 automod("kick_enabled", "Automatic kicks", "bool", escalation),
                 number("kick_threshold", "Kick at", escalation, 0, "strikes"),
                 automod("ban_enabled", "Automatic bans", "bool", escalation),
@@ -215,15 +305,27 @@ class Moderation(
                          help="Anyone who posts here is punished. Clear it to turn the honeypot off."),
                 honeypot("log_channel_id", "Honeypot log channel", "channel", channel_types=["text"],
                          empty="Logging off", help="Where honeypot events are reported."),
+                honeypot("log_exempt", "Log exempt posts", "bool",
+                         help="Also log posts from exempt members, which are left alone."),
                 honeypot("exempt_roles", "Trap exempt roles", "roles", help="Members with these roles can post in the trap."),
                 honeypot("action", "Trap punishment", "choice",
                          choices=[{"value": choice, "label": choice.title()} for choice in ACTION_CHOICES],
                          help="What happens to someone who posts in the trap."),
+                honeypot("ban_delete_message_days", "Trap ban cleanup", "int", min=0, max=7, unit="days",
+                         help="Days of messages deleted when the punishment is Ban."),
+                honeypot("timeout_minutes", "Trap timeout length", "int", min=1, max=40320, unit="minutes",
+                         help="Used when the punishment is Timeout."),
+                honeypot("cleanup_hours", "Recent message cleanup", "int", min=0, max=336, unit="hours",
+                         help="Delete the member's messages from this far back in every channel. 0 turns it off."),
                 honeypot("punish_role_id", "Punish role", "role", help="Applied when the punishment is Role."),
                 honeypot("remove_other_roles", "Strip existing roles", "bool",
                          help="Remove other roles before applying the punish role."),
                 honeypot("role_exception_ids", "Roles kept when stripping", "roles",
                          help="These roles are not removed when stripping."),
+                honeypot("dm_member", "DM the member", "bool", help="Send a DM before the punishment is applied."),
+                honeypot("dm_message", "Trap DM text", "text", max=1000, clearable=True, clear_value="",
+                         empty="Default text", validate=text_check(honeypot_dm_error),
+                         help="Placeholders: {server} and {action} (banned, kicked, timed out, restricted)."),
             ],
         }
 
@@ -267,11 +369,15 @@ class Moderation(
         await run_slash(self.bot, interaction, self.unban_user, user, reason=reason)
 
     @mod_slash.command(name="timeout", description="Timeout a member for a number of minutes.")
-    @app_commands.describe(member="Member to timeout", minutes="Length in minutes", reason="Reason for the timeout")
+    @app_commands.describe(
+        member="Member to timeout", minutes="Length in minutes; omit for the server default", reason="Reason for the timeout"
+    )
     async def slash_timeout(
-        self, interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = DEFAULT_REASON
+        self, interaction: discord.Interaction, member: discord.Member, minutes: int | None = None, reason: str = DEFAULT_REASON
     ):
-        await run_slash(self.bot, interaction, self.timeout_member, member, minutes, reason=reason)
+        if minutes is None and interaction.guild is not None:
+            minutes = await self.config.guild(interaction.guild).default_timeout_minutes()
+        await run_slash(self.bot, interaction, self.timeout_member, member, minutes or 10, reason=reason)
 
     @mod_slash.command(name="untimeout", description="Remove a member's timeout.")
     @app_commands.describe(member="Member to release", reason="Reason for removing the timeout")
@@ -294,7 +400,7 @@ class Moderation(
         await run_slash(self.bot, interaction, self.clearwarnings_member, member, reason=reason)
 
     @mod_slash.command(name="purge", description="Delete recent messages from this channel.")
-    @app_commands.describe(amount="How many messages, 1-200", member="Only delete this member's messages")
+    @app_commands.describe(amount="How many messages (server limit, 200 by default)", member="Only delete this member's messages")
     async def slash_purge(self, interaction: discord.Interaction, amount: int, member: discord.Member | None = None):
         await run_slash(self.bot, interaction, self.purge_messages, amount, member)
 
@@ -455,7 +561,7 @@ class Moderation(
                 f"`{prefix}softban @user <reason>` - ban/unban to clean recent messages\n"
                 f"`{prefix}hackban <user id> <reason>` - ban someone who is not in the server\n"
                 f"`{prefix}unban <user id> <reason>` - unban a user\n"
-                f"`{prefix}purge <1-200> [@user]` - delete recent messages in this channel"
+                f"`{prefix}purge <amount> [@user]` - delete recent messages in this channel"
             ),
             inline=False,
         )

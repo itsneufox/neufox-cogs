@@ -21,24 +21,38 @@ Every command below works as a slash command and as a prefix command
 | `[p]sixseven [en\|pt]` | Admins: list the built-in six seven replies for a language. |
 
 `when` accepts compact durations like `10m`, `2h30m`, `1d` or `1w2d`, up to 366
-days. Reminders are delivered by DM, falling back to the original channel, and
+days by default. Reminders are delivered by DM, falling back to the original channel, and
 survive restarts.
 
 Converter notes: plain `mpg` and `gal` use US gallons; use `mpg-UK` and
 `gal-UK` for imperial. Unit names are case-insensitive and accept common full
 names, plurals and symbols such as `°C` and `m²`. Results use up to 10
-significant digits.
+significant digits by default.
 
 ## Settings
 
 Server settings live in the `/control` panel (Control cog), under **Utility**:
 
-- **Reminders**: limit per target member (0 = unlimited), the role at or above
-  which members are staff for reminders, and roles protected from reminders by
-  non-staff. Administrators are always staff.
-- **SixSeven**: replies on/off, cooldown, a fixed reply text, the default
-  language, and English/Portuguese channel and category overrides. SixSeven
-  replies to `six seven`, `six-seven`, `6 7`, `67` and similar.
+- **Converter**: on/off, allowed channels or categories, significant digits (10).
+- **Urban Dictionary**: on/off, allowed channels, age-restricted channels only
+  (off), definitions per lookup (10), show examples (on), per-member cooldown (0 s).
+- **Wiki**: on/off, allowed channels, results shown (5), per-member cooldown
+  (5 s), button lifetime (10 min).
+- **Reminders**: on/off (pending reminders still fire), allowed channels,
+  longest reminder (366 days), shortest reminder (none), longest message (1000
+  characters), whether members can remind others (on), limit per creator (0 =
+  unlimited), delivery order (DM first, or original channel first), limit per
+  target member (0 = unlimited), the role at or above which members are staff
+  for reminders, and roles protected from reminders by non-staff.
+  Administrators are always staff and skip the limits.
+- **SixSeven**: replies on/off, cooldown, per-channel cooldown (off), reply
+  chance (100%), ping the author (off), ignored channels and roles, a fixed
+  reply text, the default language, and English/Portuguese channel and
+  category overrides. SixSeven replies to `six seven`, `six-seven`, `6 7`,
+  `67` and similar.
+
+Allowed channel lists also accept categories and cover threads in a listed
+channel. An empty list allows every channel.
 
 ## Data
 

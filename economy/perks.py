@@ -15,9 +15,7 @@ from .constants import (
     GOLD,
     MAX_BADGE_LENGTH,
     MAX_BOOSTER_HOURS,
-    MAX_RENTAL_DAYS,
     MAX_ROLE_NAME_LENGTH,
-    MAX_STREAK_SAVERS,
     MAX_TITLE_LENGTH,
 )
 from .errors import EconomyError
@@ -138,7 +136,7 @@ class PerksMixin:
         price_line(
             "Streak saver",
             await self.config.streak_saver_price(),
-            f" · covers one missed day, hold up to {MAX_STREAK_SAVERS}",
+            f" · covers one missed day, hold up to {int(await self.config.streak_saver_max())}",
         )
         rentals = []
         for role_id, entry in (settings.get("rentable_roles") or {}).items():
@@ -275,8 +273,9 @@ class PerksMixin:
         if price <= 0:
             raise EconomyError("Streak savers are not on sale.")
         held = int(await self.config.user(member).streak_savers())
-        if held >= MAX_STREAK_SAVERS:
-            raise EconomyError(f"You already hold the maximum of {MAX_STREAK_SAVERS} streak savers.")
+        most = int(await self.config.streak_saver_max())
+        if held >= most:
+            raise EconomyError(f"You already hold the maximum of {most} streak savers.")
         guild_id = member.guild.id if isinstance(member, discord.Member) else None
         account = await self._charge(member.id, price, tx_type="streak_saver", guild_id=guild_id, reason="streak saver")
         await self.config.user(member).streak_savers.set(held + 1)
@@ -376,8 +375,9 @@ class PerksMixin:
         entry = rentable.get(str(role.id))
         if not entry:
             raise EconomyError(f"{role.name} is not for rent. See `/shop perks` for rentable roles.")
-        if days < 1 or days > MAX_RENTAL_DAYS:
-            raise EconomyError(f"Rent for 1 to {MAX_RENTAL_DAYS} days.")
+        max_days = int(await self.config.guild(guild).rental_max_days())
+        if days < 1 or days > max_days:
+            raise EconomyError(f"Rent for 1 to {max_days} days.")
         self._role_manageable(guild, role)
         price = int(entry.get("price", 0)) * days
         if price <= 0:

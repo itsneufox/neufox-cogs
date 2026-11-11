@@ -197,6 +197,10 @@ class XPMultiplierTests(unittest.IsolatedAsyncioTestCase):
         conf.chat_cooldown = AsyncMock(return_value=30)
         conf.chat_xp_min = AsyncMock(return_value=15)
         conf.chat_xp_max = AsyncMock(return_value=25)
+        conf.bonus_xp_role_ids = AsyncMock(return_value=[])
+        conf.bonus_xp_channel_ids = AsyncMock(return_value=[])
+        conf.bonus_role_multiplier = AsyncMock(return_value=1.5)
+        conf.bonus_channel_multiplier = AsyncMock(return_value=2.0)
         self.cog._grant_xp = AsyncMock()
         message = MagicMock()
         message.guild.id, message.author.id = 10, 20

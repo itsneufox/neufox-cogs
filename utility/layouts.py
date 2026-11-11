@@ -11,6 +11,18 @@ MAX_CARD_TEXT = 3800
 PAGE_TIMEOUT = 120
 
 
+def channel_allowed(channel, allowed) -> bool:
+    """True when nothing is listed, or the channel, its parent or its category is listed."""
+    if not allowed:
+        return True
+    wanted = {int(item) for item in allowed}
+    ids = {getattr(channel, "id", None), getattr(channel, "parent_id", None), getattr(channel, "category_id", None)}
+    parent = getattr(channel, "parent", None)
+    if parent is not None:
+        ids.add(getattr(parent, "category_id", None))
+    return bool(wanted & {item for item in ids if isinstance(item, int)})
+
+
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
 

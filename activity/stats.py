@@ -291,10 +291,11 @@ class StatsMixin:
     # Top-message roles
 
     async def _maybe_sync_top_roles(self, guild: discord.Guild):
-        if not any((await self.stats_config.guild(guild).top_message_roles()).values()):
+        conf = self.stats_config.guild(guild)
+        if not any((await conf.top_message_roles()).values()):
             return
         now = time.monotonic()
-        if now - self._last_role_sync.get(guild.id, 0) < ROLE_SYNC_INTERVAL:
+        if now - self._last_role_sync.get(guild.id, 0) < int(await conf.top_role_sync_interval()):
             return
         self._last_role_sync[guild.id] = now
         await self._sync_top_roles(guild)

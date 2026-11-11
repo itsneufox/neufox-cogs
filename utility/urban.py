@@ -8,7 +8,7 @@ import aiohttp
 import discord
 from redbot.core import app_commands, commands
 
-from .layouts import send_paged
+from .layouts import NO_PINGS, send_paged
 
 
 API_BASE_URL = "https://api.urbandictionary.com/v0"
@@ -37,7 +37,9 @@ def _count(value) -> str:
         return "0"
 
 
-def definition_embed(entry: dict, *, title_prefix: str | None = None, page: int = 0, total: int = 1) -> discord.Embed:
+def definition_embed(
+    entry: dict, *, title_prefix: str | None = None, page: int = 0, total: int = 1, show_example: bool = True
+) -> discord.Embed:
     word = _clean(entry.get("word", "Unknown"))
     title = f"{word} by {_clean(entry.get('author') or 'Unknown')}"
     if title_prefix:
@@ -45,7 +47,7 @@ def definition_embed(entry: dict, *, title_prefix: str | None = None, page: int 
     permalink = entry.get("permalink") or f"https://www.urbandictionary.com/define.php?term={quote_plus(word)}"
     description = _clean(entry.get("definition", ""))
     example = _clean(entry.get("example", ""))
-    if example:
+    if example and show_example:
         description = f"{description}\n\n**Example:** {example}"
 
     embed = discord.Embed(
@@ -61,7 +63,7 @@ def definition_embed(entry: dict, *, title_prefix: str | None = None, page: int 
     return embed
 
 
-async def fetch_entries(path: str, params: dict[str, str] | None = None) -> list[dict]:
+async def fetch_entries(path: str, params: dict[str, str] | None = None, limit: int = MAX_RESULTS) -> list[dict]:
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -81,7 +83,7 @@ async def fetch_entries(path: str, params: dict[str, str] | None = None) -> list
         entry
         for entry in entries[:MAX_RESULTS]
         if isinstance(entry, dict) and entry.get("word") and entry.get("definition")
-    ]
+    ][: max(1, int(limit))]
 
 
 class UrbanMixin:
@@ -89,12 +91,25 @@ class UrbanMixin:
     @app_commands.describe(term="The word or phrase to look up. Leave empty for a random entry.")
     async def urban(self, ctx: commands.Context, *, term: str | None = None):
         """Look up a term on Urban Dictionary, or get a random entry."""
+        error, settings = await self._feature_gate(ctx, "urban")
+        if error is None and ctx.guild is not None and settings["urban_nsfw_only"]:
+            is_nsfw = getattr(ctx.channel, "is_nsfw", None)
+            if not (callable(is_nsfw) and is_nsfw()):
+                error = "Urban Dictionary only works in age-restricted channels here."
+        if error:
+            await ctx.send(error, ephemeral=True, allowed_mentions=NO_PINGS)
+            return
+        limit, examples = settings["urban_max_results"], settings["urban_examples"]
         term = (term or "").strip()
         if term.casefold() == "random" and ctx.interaction is None:
             term = ""  # keep the old `[p]urban random` behaviour for prefix users
         async with ctx.typing():
             try:
-                entries = await fetch_entries("define", {"term": term}) if term else await fetch_entries("random")
+                entries = (
+                    await fetch_entries("define", {"term": term}, limit)
+                    if term
+                    else await fetch_entries("random", limit=1)
+                )
             except UrbanDictionaryError as error:
                 await ctx.send(str(error), ephemeral=True)
                 return
@@ -104,7 +119,10 @@ class UrbanMixin:
             await ctx.send(message, ephemeral=True)
             return
         if not term:
-            await send_paged(ctx, [definition_embed(entries[0], title_prefix="Random")])
+            await send_paged(ctx, [definition_embed(entries[0], title_prefix="Random", show_example=examples)])
             return
-        pages = [definition_embed(entry, page=index, total=len(entries)) for index, entry in enumerate(entries)]
+        pages = [
+            definition_embed(entry, page=index, total=len(entries), show_example=examples)
+            for index, entry in enumerate(entries)
+        ]
         await send_paged(ctx, pages, denied="This lookup is not yours to control.")

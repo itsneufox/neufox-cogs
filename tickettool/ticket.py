@@ -710,16 +710,18 @@ class Ticket:
                 description=get_text(lang, "ticket_deleted_by", deleted_by=self.deleted_by),
                 reason=reason,
             )
-            try:
-                transcript = await chat_exporter.export(
-                    channel=self.channel,
-                    limit=None,
-                    tz_info="UTC",
-                    guild=self.guild,
-                    bot=self.bot,
-                )
-            except AttributeError:
-                transcript = None
+            transcript = None
+            if config.get("transcript", True):
+                try:
+                    transcript = await chat_exporter.export(
+                        channel=self.channel,
+                        limit=None,
+                        tz_info="UTC",
+                        guild=self.guild,
+                        bot=self.bot,
+                    )
+                except AttributeError:
+                    transcript = None
             if transcript is not None:
                 file = discord.File(
                     io.BytesIO(transcript.encode()),
@@ -732,14 +734,15 @@ class Ticket:
                 embed=embed,
                 file=file,
             )
-            embed = discord.Embed(
-                title=get_text(lang, "modal_transcript"),
-                description=(
-                    f"[{get_text(lang, 'transcript_click')}](https://mahto.id/chat-exporter?url={message.attachments[0].url})"
-                ),
-                color=discord.Color.red(),
-            )
-            await logschannel.send(embed=embed)
+            if message.attachments:
+                embed = discord.Embed(
+                    title=get_text(lang, "modal_transcript"),
+                    description=(
+                        f"[{get_text(lang, 'transcript_click')}](https://mahto.id/chat-exporter?url={message.attachments[0].url})"
+                    ),
+                    color=discord.Color.red(),
+                )
+                await logschannel.send(embed=embed)
         if isinstance(self.channel, discord.TextChannel):
             _reason = await self.cog.get_audit_reason(
                 guild=self.guild,

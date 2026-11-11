@@ -166,7 +166,10 @@ class ModerationTests(unittest.IsolatedAsyncioTestCase):
         cog = self.module.Moderation.__new__(self.module.Moderation)
         cog.config = cog.automod_config = cog.honeypot_config = MagicMock()
         parsed = schema_module.parse_schema(cog.control_panel_schema())
-        self.assertEqual(parsed.sections, ["Moderation", "AutoMod", "AutoMod escalation", "Honeypot"])
+        self.assertEqual(parsed.sections, [
+            "Moderation", "DM notices", "AutoMod", "Filter: message rate", "Filter: commands", "Filter: mentions",
+            "Filter: caps", "Filter: links", "AutoMod escalation", "Honeypot",
+        ])
         for section in parsed.sections:
             self.assertLessEqual(len(parsed.in_section(section)), schema_module.MAX_SECTION_SETTINGS)
         self.assertIsNotNone(parsed.setting("automod:log_channel_id").getter)

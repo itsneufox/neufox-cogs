@@ -11,12 +11,14 @@ from typing import Any, Iterable
 
 import discord
 
-from .common import ACCENT, CURRENCY_NAME, MAX_LEVEL, can_manage_role, progress_bar
+from .common import ACCENT, CURRENCY_NAME, MAX_LEVEL, can_manage_role, channel_ignore_ids, progress_bar
 from .layouts import NO_PINGS
 
 
 DEFAULT_CURVE = 2.0
 MAX_XP_MULTIPLIER = 10.0
+DEFAULT_LEVELUP_MESSAGE = "🎉 {member} reached {kind} level **{level}**{cash}!"
+LEVELUP_PLACEHOLDERS = ("member", "name", "kind", "level", "old_level", "cash", "server")
 
 log = logging.getLogger("red.neufox.activity")
 
@@ -48,6 +50,35 @@ def level_from_xp(xp: int, curve: float = DEFAULT_CURVE) -> int:
         else:
             high = mid
     return low
+
+
+def format_levelup_message(template: str, **values: Any) -> str:
+    """Fill a level-up template. A malformed template falls back to the default text."""
+    filled = {key: values.get(key, "") for key in LEVELUP_PLACEHOLDERS}
+    try:
+        return (template or DEFAULT_LEVELUP_MESSAGE).format_map(filled)
+    except (KeyError, IndexError, ValueError, AttributeError):
+        return DEFAULT_LEVELUP_MESSAGE.format_map(filled)
+
+
+def levelup_message_error(template: str) -> str | None:
+    try:
+        (template or "").format_map({key: "" for key in LEVELUP_PLACEHOLDERS})
+    except (KeyError, IndexError, ValueError, AttributeError):
+        return "Use only these placeholders: " + ", ".join(f"{{{key}}}" for key in LEVELUP_PLACEHOLDERS) + "."
+    return None
+
+
+def bonus_multiplier(member: Any, channel: Any, settings: dict[str, Any]) -> float:
+    """Combined bonus from the server's bonus roles and bonus channels. 1.0 when neither applies."""
+    multiplier = 1.0
+    role_ids = set(map(str, settings.get("bonus_xp_role_ids") or []))
+    if role_ids and any(str(role.id) in role_ids for role in getattr(member, "roles", [])):
+        multiplier *= float(settings.get("bonus_role_multiplier", 1.0))
+    channel_ids = set(map(str, settings.get("bonus_xp_channel_ids") or []))
+    if channel is not None and channel_ids and channel_ignore_ids(channel) & channel_ids:
+        multiplier *= float(settings.get("bonus_channel_multiplier", 1.0))
+    return max(0.0, multiplier)
 
 
 def normalized_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -137,6 +168,20 @@ class XPMixin:
         multiplier = await self._xp_multiplier(user_id)
         return max(1, round(amount * multiplier)) if multiplier != 1.0 else amount
 
+    async def _with_bonus(self, guild: discord.Guild, member: discord.Member, channel, amount: int) -> int:
+        """Apply the server's bonus roles and, for chat, bonus channels."""
+        conf = self.config.guild(guild)
+        settings = {
+            "bonus_xp_role_ids": await conf.bonus_xp_role_ids(),
+            "bonus_role_multiplier": await conf.bonus_role_multiplier(),
+            "bonus_xp_channel_ids": await conf.bonus_xp_channel_ids() if channel is not None else [],
+            "bonus_channel_multiplier": await conf.bonus_channel_multiplier(),
+        }
+        multiplier = bonus_multiplier(member, channel, settings)
+        if multiplier == 1.0 or amount <= 0:
+            return amount
+        return max(0, round(amount * multiplier))
+
     async def _award_chat_xp(self, message: discord.Message):
         guild, member = message.guild, message.author
         conf = self.config.guild(guild)
@@ -149,7 +194,8 @@ class XPMixin:
         if maximum <= 0:
             return
         self._chat_cooldowns[key] = now
-        amount = await self._boosted(member.id, random.randint(minimum, maximum))
+        amount = await self._with_bonus(guild, member, message.channel, random.randint(minimum, maximum))
+        amount = await self._boosted(member.id, amount)
         await self._grant_xp(guild, member, "chat", amount, message.channel)
 
     async def _award_voice_xp(self, guild: discord.Guild, member: discord.Member, minutes: int):
@@ -159,7 +205,8 @@ class XPMixin:
         minimum, maximum = int(await conf.voice_xp_min()), int(await conf.voice_xp_max())
         if maximum <= 0:
             return
-        amount = await self._boosted(member.id, sum(random.randint(minimum, maximum) for _ in range(minutes)))
+        amount = sum(random.randint(minimum, maximum) for _ in range(minutes))
+        amount = await self._boosted(member.id, await self._with_bonus(guild, member, None, amount))
         await self._grant_xp(guild, member, "voice", amount, None)
 
     async def _grant_xp(self, guild, member, kind: str, amount: int, source_channel):
@@ -190,9 +237,12 @@ class XPMixin:
         me = guild.me
         if member.id == guild.owner_id or me is None or not me.guild_permissions.manage_roles or me.top_role <= member.top_role:
             return
-        level_roles = await self.config.guild(guild).level_roles()
+        conf = self.config.guild(guild)
+        level_roles = await conf.level_roles()
+        stack = bool(await conf.level_roles_stack())
         kind_roles = level_roles.get(kind, {})
         changed = False
+        earned: list[tuple[int, discord.Role]] = []
         for level_key, role_id in list(kind_roles.items()):
             try:
                 required, role = int(level_key), guild.get_role(int(role_id))
@@ -202,15 +252,28 @@ class XPMixin:
                 kind_roles.pop(level_key, None)
                 changed = True
                 continue
-            if required > level or role in member.roles or not can_manage_role(guild, role):
+            if required <= level:
+                earned.append((required, role))
+        # Stacking keeps every earned role; otherwise only the highest one is kept.
+        keep = earned if stack else sorted(earned, key=lambda item: item[0])[-1:]
+        keep_roles = {role for _, role in keep}
+        for _, role in keep:
+            if role in member.roles or not can_manage_role(guild, role):
                 continue
             try:
                 await member.add_roles(role, reason=f"Activity {kind} level {level}")
             except discord.HTTPException:
                 continue
+        if not stack and keep_roles:
+            stale = [role for _, role in earned if role not in keep_roles and role in member.roles and can_manage_role(guild, role)]
+            if stale:
+                try:
+                    await member.remove_roles(*stale, reason=f"Activity {kind} level {level}: replaced by a higher level role")
+                except discord.HTTPException:
+                    pass
         if changed:
             level_roles[kind] = kind_roles
-            await self.config.guild(guild).level_roles.set(level_roles)
+            await conf.level_roles.set(level_roles)
 
     async def _announce_level_up(self, guild, member, kind: str, old_level: int, level: int, cash_paid: int, source_channel):
         conf = self.config.guild(guild)
@@ -221,20 +284,29 @@ class XPMixin:
             return
         if not await self._announce_preference(guild, member.id):
             return
-        channel_id = await conf.levelup_channel_id()
-        channel = guild.get_channel(channel_id) if channel_id else (source_channel if kind == "chat" else None)
+        if await conf.levelup_dm():
+            channel = member
+        else:
+            channel_id = await conf.levelup_channel_id()
+            channel = guild.get_channel(channel_id) if channel_id else (source_channel if kind == "chat" else None)
         if channel is None or not hasattr(channel, "send"):
             return
         cash_text = f" and earned **{cash_paid:,}** {CURRENCY_NAME}" if cash_paid else ""
-        view = discord.ui.LayoutView(timeout=None)
-        view.add_item(
-            discord.ui.Container(
-                discord.ui.TextDisplay(f"🎉 {member.mention} reached {kind} level **{level}**{cash_text}!"),
-                accent_color=ACCENT,
-            )
+        text = format_levelup_message(
+            await conf.levelup_message(),
+            member=member.mention,
+            name=member.display_name,
+            kind=kind,
+            level=level,
+            old_level=old_level,
+            cash=cash_text,
+            server=guild.name,
         )
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(discord.ui.Container(discord.ui.TextDisplay(text[:4000]), accent_color=ACCENT))
+        pings = discord.AllowedMentions(users=[member]) if await conf.levelup_ping() else NO_PINGS
         try:
-            await channel.send(view=view, allowed_mentions=NO_PINGS)
+            await channel.send(view=view, allowed_mentions=pings)
         except discord.HTTPException:
             pass
 

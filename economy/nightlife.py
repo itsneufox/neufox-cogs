@@ -79,6 +79,21 @@ SUBSTANCE_CONSEQUENCES = {
 HOSPITAL_RECOVERY = 3600
 MIXED_SUBSTANCE_BILL = 5000
 
+# Built-in prices by override key. The bot owner can override any of them in /control.
+DEFAULT_PRICES = {
+    **{f"escort.{key}": value["price"] for key, value in ESCORTS.items()},
+    **{f"venue.{key}": value["price"] for key, value in VENUES.items()},
+    **{f"item.{key}": value["price"] for key, value in ITEMS.items()},
+    "test": TEST_PRICE,
+    **{f"treatment.{key}": value["treatment"] for key, value in DISEASES.items()},
+}
+
+
+def price_of(key: str, prices: dict | None = None) -> int:
+    """The current price for an override key such as ``item.condom``."""
+    value = (prices or {}).get(key)
+    return int(value) if value is not None else DEFAULT_PRICES[key]
+
 
 def resolve_aftermath(boosts: list[str], draw) -> dict:
     """Return persistent consequences for the substances used in this encounter."""
@@ -198,7 +213,7 @@ def finish_encounter(player: dict, score: int, now: int, draw) -> str:
 
 def prepare_player_encounter(
     initiator: dict | None, partner: dict | None, balance: int, *, now: int,
-    venue: str = "motel", protected: bool = True,
+    venue: str = "motel", protected: bool = True, prices: dict | None = None,
 ) -> tuple[dict, dict, int]:
     """Validate both players without spending anything or drawing an outcome."""
     if venue not in VENUES:
@@ -210,7 +225,7 @@ def prepare_player_encounter(
         validate_encounter(second, now)
     except ValueError:
         raise ValueError("That player needs to rest, recover, or pay their hospital bill first.") from None
-    cost = VENUES[venue]["price"]
+    cost = price_of(f"venue.{venue}", prices)
     if balance < cost:
         raise ValueError(f"Insufficient funds. You need {cost:,} LWD$.")
     return first, second, cost
@@ -218,11 +233,11 @@ def prepare_player_encounter(
 
 def apply_player_encounter(
     initiator: dict | None, partner: dict | None, balance: int, *, now: int,
-    venue: str = "motel", protected: bool = True, randbelow=None,
+    venue: str = "motel", protected: bool = True, randbelow=None, prices: dict | None = None,
 ) -> tuple[dict, dict, int, int, str, str, str]:
     """Resolve an accepted invitation. The inviter pays and supplies one condom."""
     first, second, cost = prepare_player_encounter(
-        initiator, partner, balance, now=now, venue=venue, protected=protected,
+        initiator, partner, balance, now=now, venue=venue, protected=protected, prices=prices,
     )
     draw = randbelow if randbelow is not None else secrets.randbelow
     scores = [encounter_score(player, VENUES[venue]["bonus"], draw) for player in (first, second)]
@@ -256,6 +271,7 @@ def apply_action(
     venue: str = "motel",
     protected: bool = True,
     randbelow=None,
+    prices: dict | None = None,
 ) -> tuple[dict, int, str, int]:
     """Validate and resolve an action without mutating the supplied state."""
     player = refreshed_profile(profile, now)
@@ -274,7 +290,7 @@ def apply_action(
         count = inventory.get(item, 0) + quantity
         if count > MAX_INVENTORY:
             raise ValueError(f"You can hold at most {MAX_INVENTORY} of each item.")
-        cost = ITEMS[item]["price"] * quantity
+        cost = price_of(f"item.{item}", prices) * quantity
         inventory[item] = count
         message = f"Bought {quantity}x {item}."
     elif action == "use":
@@ -302,7 +318,7 @@ def apply_action(
         if escort not in ESCORTS or venue not in VENUES:
             raise ValueError("Choose an escort from `sex escorts` and a venue: motel, hotel, or penthouse.")
         validate_encounter(player, now, needs_condom=protected)
-        cost = ESCORTS[escort]["price"] + VENUES[venue]["price"]
+        cost = price_of(f"escort.{escort}", prices) + price_of(f"venue.{venue}", prices)
         if balance < cost:
             raise ValueError(f"Insufficient funds. You need {cost:,} LWD$.")
         score = encounter_score(player, ESCORTS[escort]["charm"] + VENUES[venue]["bonus"], draw)
@@ -327,7 +343,7 @@ def apply_action(
         player["medical_bill"] = 0
         message = "Hospital bill paid."
     elif action == "test":
-        cost = TEST_PRICE
+        cost = price_of("test", prices)
         found = []
         for key, infection in player["infections"].items():
             if now >= infection["detectable_at"]:
@@ -338,7 +354,7 @@ def apply_action(
         diagnosed = [key for key, infection in player["infections"].items() if infection["diagnosed"]]
         if not diagnosed:
             raise ValueError("No diagnosed conditions to treat. Get a clinic test first.")
-        cost = sum(DISEASES[key]["treatment"] for key in diagnosed)
+        cost = sum(price_of(f"treatment.{key}", prices) for key in diagnosed)
         for key in diagnosed:
             del player["infections"][key]
         message = "Treated: " + ", ".join(DISEASES[key]["name"] for key in diagnosed) + "."

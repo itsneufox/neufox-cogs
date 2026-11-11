@@ -12,7 +12,7 @@ from typing import Any
 import discord
 from redbot.core import Config, app_commands, commands
 
-from .layouts import NO_PINGS, card
+from .layouts import NO_PINGS, card, channel_allowed
 
 
 CONFIG_ID = 591743820
@@ -26,6 +26,19 @@ MENTION_RE = re.compile(r"@(everyone|here)|<@&\d+>")
 TIME_PART_RE = re.compile(r"(\d+)\s*([wdhms])", re.IGNORECASE)
 TIME_UNITS = {"w": 7 * 24 * 60 * 60, "d": 24 * 60 * 60, "h": 60 * 60, "m": 60, "s": 1}
 WHEN_HELP = "When, like 10m, 2h30m, 1d, or 1w2d."
+REMINDER_GUILD_DEFAULTS: dict[str, Any] = {
+    "reminder_limit_per_person": DEFAULT_MAX_REMINDERS_PER_PERSON,
+    "reminder_unlimited_role_id": None,
+    "reminder_protected_role_ids": [],
+    "reminders_enabled": True,
+    "reminder_channels": [],
+    "reminder_max_days": MAX_REMINDER_SECONDS // 86400,
+    "reminder_min_seconds": 0,
+    "reminder_max_length": MAX_MESSAGE_LENGTH,
+    "reminder_allow_others": True,
+    "reminder_creator_limit": 0,
+    "reminder_delivery": "dm",
+}
 log = logging.getLogger("red.neufox.utility.reminders")
 
 
@@ -85,11 +98,7 @@ class RemindersMixin:
             None, identifier=CONFIG_ID, cog_name=CONFIG_NAME, force_registration=True
         )
         self.reminders_config.register_global(reminders={}, next_id=1)
-        self.reminders_config.register_guild(
-            reminder_limit_per_person=DEFAULT_MAX_REMINDERS_PER_PERSON,
-            reminder_unlimited_role_id=None,
-            reminder_protected_role_ids=[],
-        )
+        self.reminders_config.register_guild(**REMINDER_GUILD_DEFAULTS)
         self._reminders_lock = asyncio.Lock()
         self._reminders_task = asyncio.create_task(self._reminder_loop())
 
@@ -104,6 +113,87 @@ class RemindersMixin:
             }
 
         return [
+            {
+                "key": "reminders_enabled",
+                "label": "Enabled",
+                "type": "bool",
+                "section": "Reminders",
+                "help": "Allow new reminders in this server. Pending ones are still delivered.",
+                **bind("reminders_enabled"),
+            },
+            {
+                "key": "reminder_channels",
+                "label": "Allowed channels",
+                "type": "channels",
+                "section": "Reminders",
+                "channel_types": ["text", "news", "voice", "forum", "stage", "category"],
+                "empty": "Every channel",
+                "help": "Only allow new reminders in these channels or categories. Empty allows every channel.",
+                **bind("reminder_channels"),
+            },
+            {
+                "key": "reminder_max_days",
+                "label": "Longest reminder",
+                "type": "int",
+                "min": 1,
+                "max": 366,
+                "unit": "days",
+                "section": "Reminders",
+                "help": "How far ahead a reminder can be set.",
+                **bind("reminder_max_days"),
+            },
+            {
+                "key": "reminder_min_seconds",
+                "label": "Shortest reminder",
+                "type": "int",
+                "min": 0,
+                "max": 86400,
+                "unit": "seconds",
+                "section": "Reminders",
+                "help": "Reminders must be at least this far ahead. 0 means no minimum.",
+                **bind("reminder_min_seconds"),
+            },
+            {
+                "key": "reminder_max_length",
+                "label": "Longest message",
+                "type": "int",
+                "min": 10,
+                "max": MAX_MESSAGE_LENGTH,
+                "unit": "characters",
+                "section": "Reminders",
+                "help": "Maximum length of a reminder's text.",
+                **bind("reminder_max_length"),
+            },
+            {
+                "key": "reminder_allow_others",
+                "label": "Members can remind others",
+                "type": "bool",
+                "section": "Reminders",
+                "help": "Let non-staff use /remind member. Staff always can.",
+                **bind("reminder_allow_others"),
+            },
+            {
+                "key": "reminder_creator_limit",
+                "label": "Limit per creator",
+                "type": "int",
+                "min": 0,
+                "max": 1000,
+                "section": "Reminders",
+                "help": "Active reminders a non-staff member can create. 0 means unlimited.",
+                **bind("reminder_creator_limit"),
+            },
+            {
+                "key": "reminder_delivery",
+                "label": "Delivery",
+                "type": "choice",
+                "choices": [
+                    {"value": "dm", "label": "DM, then the original channel"},
+                    {"value": "channel", "label": "Original channel, then DM"},
+                ],
+                "section": "Reminders",
+                "help": "Where reminders are delivered first.",
+                **bind("reminder_delivery"),
+            },
             {
                 "key": "reminder_limit_per_person",
                 "label": "Limit per person",
@@ -255,23 +345,49 @@ class RemindersMixin:
         if source is not None:
             await self._set_reminder_source_url(reminder_id, source.jump_url)
 
+    async def _reminder_guild_settings(self, guild: discord.Guild | None) -> dict[str, Any]:
+        if guild is None:
+            return dict(REMINDER_GUILD_DEFAULTS)
+        return {**REMINDER_GUILD_DEFAULTS, **await self.reminders_config.guild(guild).all()}
+
     async def _reminder_error(self, ctx: commands.Context, target: discord.abc.User, when: str, message: str) -> str | None:
+        settings = await self._reminder_guild_settings(ctx.guild)
+        if ctx.guild is not None:
+            if not settings["reminders_enabled"]:
+                return "Reminders are turned off in this server."
+            allowed = settings["reminder_channels"]
+            if not channel_allowed(ctx.channel, allowed):
+                return "Reminders can only be set in " + ", ".join(f"<#{int(item)}>" for item in allowed[:10]) + "."
         duration = parse_duration(when)
         if duration is None:
             return "Use a duration like `10m`, `2h30m`, `1d`, or `1w2d`."
-        if duration > MAX_REMINDER_SECONDS:
-            return "Reminder time cannot be more than 366 days."
+        max_days = max(1, min(366, int(settings["reminder_max_days"])))
+        if duration > max_days * 24 * 60 * 60:
+            return f"Reminder time cannot be more than {max_days} day{'s' if max_days != 1 else ''}."
+        min_seconds = int(settings["reminder_min_seconds"])
+        if duration < min_seconds:
+            return f"Reminder time must be at least {format_duration(min_seconds)}."
         message = message.strip()
         if not message:
             return "Reminder message cannot be empty."
-        if len(message) > MAX_MESSAGE_LENGTH:
-            return f"Reminder message cannot be longer than {MAX_MESSAGE_LENGTH} characters."
+        max_length = max(1, min(MAX_MESSAGE_LENGTH, int(settings["reminder_max_length"])))
+        if len(message) > max_length:
+            return f"Reminder message cannot be longer than {max_length} characters."
 
         author = ctx.author
-        if not isinstance(author, discord.Member) or not isinstance(target, discord.Member) or target.id == author.id:
+        if not isinstance(author, discord.Member):
             return None
         if await self._is_reminder_unbounded(author):
             return None
+        creator_limit = int(settings["reminder_creator_limit"])
+        if creator_limit > 0:
+            created = len(await self._get_active_reminders(author.guild.id, creator_id=author.id))
+            if created >= creator_limit:
+                return f"You already have {created} active reminders. Limit is {creator_limit}."
+        if not isinstance(target, discord.Member) or target.id == author.id:
+            return None
+        if not settings["reminder_allow_others"]:
+            return "Only staff can remind other members in this server."
         if target.guild_permissions.administrator:
             return "You cannot create reminders for an administrator."
         protected = set(await self.reminders_config.guild(target.guild).reminder_protected_role_ids())
@@ -371,21 +487,40 @@ class RemindersMixin:
         content = reminder_text(reminder, target)
         allowed_mentions = discord.AllowedMentions(users=True)
 
-        if target is not None:
+        async def via_dm() -> bool:
+            if target is None:
+                return False
             try:
                 await target.send(content, allowed_mentions=allowed_mentions)
-                return
+                return True
             except discord.HTTPException:
-                pass
+                return False
 
-        channel = self.bot.get_channel(int(reminder["channel_id"]))
-        if channel is None:
-            try:
-                channel = await self.bot.fetch_channel(int(reminder["channel_id"]))
-            except discord.HTTPException:
-                channel = None
-        if isinstance(channel, discord.abc.Messageable):
+        async def via_channel() -> bool:
+            channel = self.bot.get_channel(int(reminder["channel_id"]))
+            if channel is None:
+                try:
+                    channel = await self.bot.fetch_channel(int(reminder["channel_id"]))
+                except discord.HTTPException:
+                    channel = None
+            if not isinstance(channel, discord.abc.Messageable):
+                return False
             try:
                 await channel.send(content, allowed_mentions=allowed_mentions)
+                return True
             except discord.HTTPException:
-                pass
+                return False
+
+        order = (via_dm, via_channel)
+        if await self._reminder_delivery_mode(reminder) == "channel":
+            order = (via_channel, via_dm)
+        for attempt in order:
+            if await attempt():
+                return
+
+    async def _reminder_delivery_mode(self, reminder: dict[str, Any]) -> str:
+        guild_id = reminder.get("guild_id")
+        guild = self.bot.get_guild(int(guild_id)) if guild_id else None
+        if guild is None:
+            return "dm"
+        return await self.reminders_config.guild(guild).reminder_delivery()

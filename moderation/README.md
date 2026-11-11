@@ -26,9 +26,9 @@ Every command is available under `/mod` and as a prefix command.
 | Slash | Prefix | What it does |
 | --- | --- | --- |
 | `/mod ban` `kick` `softban` `hackban` `unban` | `[p]ban` `[p]kick` `[p]softban` `[p]hackban` `[p]unban` | Remove members. Destructive actions ask for confirmation. A ban reason can start with 0-7 to delete that many days of messages. |
-| `/mod timeout` `untimeout` | `[p]timeout <member> <minutes>` `[p]untimeout` | Time members out. |
+| `/mod timeout` `untimeout` | `[p]timeout <member> <minutes>` `[p]untimeout` | Time members out. `/mod timeout` uses the server's default length when none is given. |
 | `/mod warn` `warnings` `clearwarnings` | `[p]warn` `[p]warnings` `[p]clearwarnings` | Manual warnings. `warnings` also shows AutoMod strikes; `clearwarnings` clears both. |
-| `/mod purge` | `[p]purge <1-200> [member]` | Delete recent messages. |
+| `/mod purge` | `[p]purge <amount> [member]` | Delete recent messages (200 at most by default). |
 | `/mod userinfo` | `[p]userinfo` | Account, roles, warnings and name history. |
 | `/mod case` `cases` `reason` `modstats` | `[p]mod case` `cases` `reason` `modstats` | The shared case log. |
 | `/mod punish list/add/remove/clear` | `[p]mod punish [add/remove/clear]` | Punishments that run when a member reaches a warning count. |
@@ -44,10 +44,12 @@ You can also mention the bot: `@Bot ban @user spamming`, `@Bot timeout @user 10 
 
 All settings are in the `/control` panel (Control cog), under **Moderation**:
 
-- **Moderation**: mod-log channel, DM notices, natural-language moderation, name tracking, ban and softban message cleanup.
-- **AutoMod**: enforcement on/off, log channel, exempt roles, ignored channels and categories, and detection limits (message rate, command spam, mentions, links, caps).
+- **Moderation**: mod-log channel, natural-language moderation, name tracking, require a reason, confirmation prompts and their time limit, default `/mod timeout` length, purge limit (200 by default), ban and softban message cleanup.
+- **DM notices**: DM on/off, per-action switches (warn, timeout, kick, ban, softban), a custom DM text with `{server}` `{action}` `{reason}` `{duration}` `{details}` placeholders, and a footer such as an appeal link.
+- **AutoMod**: enforcement on/off, log channel, exempt roles, ignored channels and categories, deleting offending messages, public notices and how long they stay.
+- **Filter: message rate / commands / mentions / caps / links**: each filter's on switch and limits, plus its own exempt channels and roles. The link filter also takes a list of allowed domains.
 - **AutoMod escalation**: strike decay, cooldown, warn/timeout/kick/ban thresholds, and automatic lockdown.
-- **Honeypot** (administrators): trap channel, log channel, exempt roles, punishment (ban, kick or role), punish role, role stripping and kept roles.
+- **Honeypot** (administrators): trap channel, log channel, logging of exempt posts, exempt roles, punishment (ban, kick, timeout or role), ban cleanup days, timeout length, how far back to clean the member's messages, punish role, role stripping, kept roles, and an optional DM before the punishment.
 
 ## Case log
 

@@ -14,6 +14,8 @@ from .common import DEFAULT_COLOR
 
 
 URL_RE = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
+# Each filter has its own on switch (command spam uses its threshold) and its own exempt channels and roles.
+FILTER_NAMES = ("rate", "command", "mention", "caps", "link")
 PROFILE_KEYS = (
     "warn_threshold",
     "timeout_threshold",
@@ -26,6 +28,23 @@ PROFILE_KEYS = (
     "ban_enabled",
     "ban_delete_message_days",
 )
+
+
+def parse_domains(text: str) -> tuple[str, ...]:
+    """Turn "example.com, youtu.be" into lowercase domains, ignoring any scheme or leading dot."""
+    domains = []
+    for part in re.split(r"[\s,]+", text or ""):
+        part = part.strip().lower()
+        part = re.sub(r"^(https?://)?(www\.)?", "", part).strip("./")
+        if part:
+            domains.append(part.split("/")[0])
+    return tuple(domains)
+
+
+def link_domain(url: str) -> str:
+    host = re.sub(r"^(https?://)?", "", url.lower()).split("/")[0].split("?")[0].split("#")[0]
+    host = host.rsplit("@", 1)[-1].split(":")[0]
+    return host[4:] if host.startswith("www.") else host
 
 
 class AutoModMixin:
@@ -75,6 +94,11 @@ class AutoModMixin:
         if not violations:
             return
 
+        if settings.get("delete_violations"):
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                pass
         await self._apply_penalty(message, violations)
 
     async def _automod_status_embed(self, guild: discord.Guild) -> discord.Embed:
@@ -165,24 +189,46 @@ class AutoModMixin:
     async def _collect_violations(self, message: discord.Message, settings: dict[str, Any]) -> list[str]:
         violations: list[str] = []
 
-        if self._is_rate_violation(message, settings["rate_window_seconds"], settings["rate_threshold"]):
-            violations.append("message rate")
+        if settings.get("rate_enabled", True) and not self._filter_exempt(message, settings, "rate"):
+            if self._is_rate_violation(message, settings["rate_window_seconds"], settings["rate_threshold"]):
+                violations.append("message rate")
 
-        if await self._is_command_spam_violation(message, settings):
+        if not self._filter_exempt(message, settings, "command") and await self._is_command_spam_violation(message, settings):
             violations.append("command spam")
 
-        mentions = self._count_mentions(message)
-        if mentions > settings["mention_threshold"]:
-            violations.append(f"mentions ({mentions})")
+        if settings.get("mention_enabled", True) and not self._filter_exempt(message, settings, "mention"):
+            mentions = self._count_mentions(message)
+            if mentions > settings["mention_threshold"]:
+                violations.append(f"mentions ({mentions})")
 
-        if self._is_caps_spam(message.content, settings["caps_ratio"], settings["caps_min_length"]):
-            violations.append("caps spam")
+        if settings.get("caps_enabled", True) and not self._filter_exempt(message, settings, "caps"):
+            if self._is_caps_spam(message.content, settings["caps_ratio"], settings["caps_min_length"]):
+                violations.append("caps spam")
 
-        links = self._count_links(message.content)
-        if links > settings["link_threshold"]:
-            violations.append(f"links ({links})")
+        if settings.get("link_enabled", True) and not self._filter_exempt(message, settings, "link"):
+            links = self._count_links(message.content, parse_domains(settings.get("allowed_link_domains", "")))
+            if links > settings["link_threshold"]:
+                violations.append(f"links ({links})")
 
         return violations
+
+    @staticmethod
+    def _filter_exempt(message: discord.Message, settings: dict[str, Any], name: str) -> bool:
+        """Whether this filter skips the message because of its channel, category or the author's roles."""
+        channel_ids = set(settings.get(f"{name}_exempt_channel_ids") or [])
+        if channel_ids:
+            channel = message.channel
+            parent = getattr(channel, "parent", None)
+            candidates = {
+                getattr(channel, "id", None),
+                getattr(channel, "parent_id", None),
+                getattr(getattr(channel, "category", None), "id", None),
+                getattr(getattr(parent, "category", None), "id", None),
+            }
+            if candidates & channel_ids:
+                return True
+        role_ids = set(settings.get(f"{name}_exempt_role_ids") or [])
+        return bool(role_ids) and any(role.id in role_ids for role in getattr(message.author, "roles", []))
 
     def _is_ignored_location(self, message: discord.Message, settings: dict[str, Any]) -> bool:
         channel_id = getattr(message.channel, "id", None)
@@ -279,8 +325,14 @@ class AutoModMixin:
         return count
 
     @staticmethod
-    def _count_links(content: str) -> int:
-        return len(URL_RE.findall(content or ""))
+    def _count_links(content: str, allowed_domains: tuple[str, ...] = ()) -> int:
+        count = 0
+        for match in URL_RE.finditer(content or ""):
+            host = link_domain(match.group(0))
+            if any(host == domain or host.endswith("." + domain) for domain in allowed_domains):
+                continue
+            count += 1
+        return count
 
     @staticmethod
     def _is_caps_spam(content: str, ratio: float, min_length: int) -> bool:
@@ -411,6 +463,10 @@ class AutoModMixin:
         channel = message.channel
         if channel is None:
             return
+        guild_cfg = self.automod_config.guild(member.guild)
+        if not await guild_cfg.notify_in_channel():
+            return
+        delete_after = await guild_cfg.notify_delete_after()
 
         reasons = ", ".join(violations)
         lines = [
@@ -423,6 +479,7 @@ class AutoModMixin:
         await channel.send(
             "\n".join(lines),
             allowed_mentions=discord.AllowedMentions(users=True),
+            delete_after=delete_after or None,
         )
 
     @staticmethod

@@ -77,9 +77,11 @@ Deadlines for personal roles, rentals, auctions, bounties and pins are stored in
 
 ## Settings (`/control` → Economy)
 
-Bot owner (global): claim amounts and cooldowns, work range, streak bonus and cap, casino on/off, bet limits and rake, LWDMillions sales, ticket price, jackpot contribution and seed, booster prices/lengths/multipliers, streak saver price, wealth tax rate/threshold/cap, and per-server lottery channel, log channel and Nightlife switch.
+Bot owner (global): claim amounts and cooldowns, work range, streak bonus and cap, casino on/off, bet limits and rake, each casino game on/off everywhere (Casino games), coin flip and dice payouts, blackjack shoe size and Hold'em lobby/turn timers (Casino tables), LWDMillions sales, ticket price, jackpot contribution and seed, lines per player and per draw, booster prices/lengths/multipliers, streak saver price and how many one person can hold, wealth tax rate/threshold/cap, every Nightlife escort, venue, item, test and treatment price (Nightlife prices / Nightlife clinic; setting a price back to its default drops the override), and per-server lottery channel, log channel and Nightlife switch.
 
-Server admins: transfer tax, house cut, perk prices, personal roles on/off with their prices and anchor role, rain limits, shoutout channel and price, paid pin channels, price and duration, auctions on/off and longest auction, and bounty lifetime.
+Server admins: transfer tax, house cut, perk prices, personal roles on/off with their prices and anchor role, longest role rental, rain limits (Rain), shoutout channel, price and length plus paid pin channels, price and duration (Shoutouts & pins), auctions on/off, longest auction, bounty lifetime and how many auctions/bounties can be open at once (Auctions & bounties), and each casino game on/off in this server (Casino in this server).
+
+All defaults match the previous built-in values, so nothing changes until a setting is edited.
 
 ## `[p]ecoadmin`
 
@@ -94,7 +96,7 @@ Use `stock -1` for unlimited stock and `limit -1` for unlimited purchases per me
 
 Casino games use the same global LWD$ balance as the rest of the economy. They use secure random draws, settle each wager atomically, and record the net result in the transaction ledger. The defaults allow bets from 10 to 50,000 LWD$, with a short per-game anti-spam cooldown. Players cannot shorten or remove their own self-exclusion; a server administrator can lift either a self-exclusion or an administrator-imposed exclusion with `/casino unexclude <member>`.
 
-Payouts include the original wager: coin flip returns 1.95x on a win, and an exact dice guess returns 5.7x. High Card returns 2x when your card outranks the dealer and pushes on equal ranks. Animated slots use the machine's printed exact-triple payouts: lemon 4x, cherry 5x, bell 10x, coin 25x, diamond 40x, and seven 80x. Exactly one cherry on an otherwise unmatched spin returns half the wager.
+Payouts include the original wager: by default coin flip returns 1.95x on a win, and an exact dice guess returns 5.7x (both adjustable in `/control`). High Card returns 2x when your card outranks the dealer and pushes on equal ranks. Animated slots use the machine's printed exact-triple payouts: lemon 4x, cherry 5x, bell 10x, coin 25x, diamond 40x, and seven 80x. Exactly one cherry on an otherwise unmatched spin returns half the wager.
 
 European Roulette uses a single-zero wheel. Straight-up numbers from 0 to 36 return 36x; red/black, odd/even, and low/high return 2x; first, second, and third dozen bets return 3x. Choices can be written as `17`, `red`, `odd`, `low`, `1st12`, `2nd12`, or `3rd12`.
 

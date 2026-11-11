@@ -8,6 +8,7 @@ from typing import Any
 import discord
 from discord import ui
 
+from .pages import COMMANDS_PAGE, OWNER_PAGE, PagesMixin
 from .schema import (
     INPUT_TYPES,
     LIST_ID_TYPES,
@@ -131,7 +132,7 @@ class ValueModal(ui.Modal):
         await self.panel.report_error(interaction, error)
 
 
-class ControlPanel(ui.LayoutView):
+class ControlPanel(PagesMixin, ui.LayoutView):
     """One admin's session in the panel. Rebuilt from live settings after every action."""
 
     def __init__(self, bot, member: discord.Member):
@@ -144,6 +145,7 @@ class ControlPanel(ui.LayoutView):
         self.section: str | None = None
         self.editing: str | None = None
         self.notice = ""
+        self._reset_pages()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.member.id:
@@ -220,6 +222,12 @@ class ControlPanel(ui.LayoutView):
 
     async def render(self):
         self.clear_items()
+        if self.page == COMMANDS_PAGE:
+            await self._render_commands()
+            return
+        if self.page == OWNER_PAGE:
+            await self._render_owner()
+            return
         schemas = await self._visible_schemas()
         schema = schemas.get(self.cog_name) if self.cog_name else None
         cog = self.bot.get_cog(self.cog_name) if self.cog_name else None
@@ -227,7 +235,7 @@ class ControlPanel(ui.LayoutView):
             if self.cog_name:
                 self.notice = "⚠️ That cog is no longer available."
             self.cog_name = self.editing = self.section = None
-            self._render_home(schemas)
+            await self._render_home(schemas)
             return
 
         if self.section not in schema.sections:
@@ -239,26 +247,36 @@ class ControlPanel(ui.LayoutView):
             self.editing = None
             await self._render_cog(cog, schema)
 
-    def _render_home(self, schemas: dict[str, Schema]):
+    async def _render_home(self, schemas: dict[str, Schema]):
         items: list[ui.Item] = [ui.TextDisplay("## Control Panel\nEvery setting for this server, in one place."), *self._take_notice()]
-        if not schemas:
-            items.append(ui.TextDisplay("No loaded cog has settings to show."))
-            self.add_item(ui.Container(*items, accent_color=ACCENT))
-            return
+        extras = [
+            discord.SelectOption(label="Commands", value=COMMANDS_PAGE, description="Turn commands on or off in this server", emoji="🎛️")
+        ]
+        if await self.bot.is_owner(self.member):
+            extras.append(
+                discord.SelectOption(label="Owner tools", value=OWNER_PAGE, description="Cogs, repo updates, slash sync, last error", emoji="🛠️")
+            )
 
-        names = list(schemas)[:MAX_SELECT_OPTIONS]
+        names = list(schemas)[: MAX_SELECT_OPTIONS - len(extras)]
         items.append(ui.Separator())
-        items.append(ui.TextDisplay("\n".join(f"**{schemas[n].title}**: {schemas[n].description}" for n in names)[:MAX_TEXT_LENGTH]))
+        lines = [f"**{schemas[n].title}**: {schemas[n].description}" for n in names] or ["No loaded cog has settings to show."]
+        items.append(ui.TextDisplay("\n".join(lines)[:MAX_TEXT_LENGTH]))
         select = ui.Select(
             placeholder="Choose what to manage",
-            options=[
+            options=extras
+            + [
                 discord.SelectOption(label=_clip_option(schemas[n].title), value=n, description=_clip_option(schemas[n].description) or None)
                 for n in names
             ],
         )
 
         async def pick(interaction: discord.Interaction):
-            self.cog_name, self.section, self.editing = select.values[0], None, None
+            value = select.values[0]
+            if value in (COMMANDS_PAGE, OWNER_PAGE):
+                self._reset_pages()
+                self.page = value
+            else:
+                self.cog_name, self.section, self.editing = value, None, None
             await self.update(interaction)
 
         select.callback = pick

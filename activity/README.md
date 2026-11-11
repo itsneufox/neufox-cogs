@@ -47,10 +47,12 @@ Everything else is in the `/control` panel from the Control cog, under **Activit
 
 - **Tracking** - on/off, ignored channels and ignored roles.
 - **XP** - level curve, chat cooldown, chat and voice XP ranges, level-up messages, how often they
-  are posted and where.
-- **Stats** - roles for 1st, 2nd and 3rd place on the message leaderboard.
+  are posted and where, DM delivery, pinging, the message text (placeholders `{member}` `{name}`
+  `{kind}` `{level}` `{old_level}` `{cash}` `{server}`), keeping or replacing lower level roles,
+  voice XP while muted, and bonus XP channels and roles with their multipliers.
+- **Stats** - roles for 1st, 2nd and 3rd place on the message leaderboard and how often they refresh.
 - **Rewards** - level cash (every 10 levels pays `level x 100` LWD$ by default), automatic leaderboard
   payouts, their cooldown, log channel and the amounts for the top three of each board.
 
-Level-up messages never ping. By default they are posted every 5 levels and on levels that pay cash
-or give a role.
+Level-up messages do not ping unless that is turned on. By default they are posted every 5 levels and
+on levels that pay cash or give a role.

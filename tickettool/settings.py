@@ -1,10 +1,26 @@
 import discord
 import typing
+from copy import deepcopy
 from redbot.core import commands
 
 from .layouts import NO_PINGS, info_layout
 from .locales import get_text, LANGUAGE_NAMES
 from .utils import Emoji, EmojiLabelDescriptionValueConverter, CustomModalConverter
+
+
+TEMPLATE_VARIABLES = (
+    "ticket_id", "owner_display_name", "owner_name", "owner_id", "guild_name", "guild_id",
+    "bot_display_name", "bot_name", "bot_id", "shortdate", "longdate", "time", "emoji",
+)
+
+
+def _parse_color(value: typing.Optional[str]) -> int:
+    text = str(value or "").strip().lstrip("#")
+    if text.lower().startswith("0x"):
+        text = text[2:]
+    if not 1 <= len(text) <= 6:
+        raise ValueError(value)
+    return int(text, 16)
 
 
 class ProfileConverter(commands.Converter):
@@ -30,10 +46,115 @@ class MyMessageConverter(commands.MessageConverter):
 
 
 class settings(commands.Cog):
+    # ── Control panel ───────────────────────────────────────────────────────
+
+    async def _panel_profile(self, guild: discord.Guild) -> typing.Optional[str]:
+        """The profile the control panel edits: the chosen one, else "main", else the first."""
+        data = await self.config.guild(guild).all()
+        profiles = data.get("profiles") or {}
+        chosen = data.get("panel_profile")
+        if chosen in profiles:
+            return chosen
+        if "main" in profiles:
+            return "main"
+        return sorted(profiles)[0] if profiles else None
+
+    def _profile_default(self, path: typing.Tuple[str, ...]) -> typing.Any:
+        value = self.config._defaults[self.config.GUILD]["default_profile_settings"]
+        for part in path:
+            value = value[part]
+        return deepcopy(value)
+
+    def _profile_getter(self, path, read=None):
+        async def getter(guild: discord.Guild):
+            profile = await self._panel_profile(guild)
+            default = self._profile_default(path)
+            if profile is None:
+                value = default
+            else:
+                try:
+                    value = await self.config.guild(guild).profiles.get_raw(profile, *path)
+                except KeyError:
+                    value = default
+            return read(value) if read else value
+
+        return getter
+
+    def _profile_setter(self, path, write=None):
+        async def setter(guild: discord.Guild, value):
+            profile = await self._panel_profile(guild)
+            if profile is None:
+                return
+            await self.config.guild(guild).profiles.set_raw(profile, *path, value=write(value) if write else value)
+
+        return setter
+
+    def _profile_validator(self, check=None):
+        async def validate(guild: discord.Guild, value):
+            if await self._panel_profile(guild) is None:
+                return "Create a ticket profile first with /settickettool profile create."
+            return check(value) if check else None
+
+        return validate
+
+    async def _get_panel_profile(self, guild: discord.Guild) -> typing.Optional[str]:
+        return await self._panel_profile(guild)
+
+    async def _set_panel_profile(self, guild: discord.Guild, value: typing.Optional[str]) -> None:
+        await self.config.guild(guild).panel_profile.set(value.strip().lower() if value else None)
+
+    async def _validate_panel_profile(self, guild: discord.Guild, value: typing.Optional[str]) -> typing.Optional[str]:
+        if not value:
+            return None
+        profiles = await self.config.guild(guild).profiles()
+        if value.strip().lower() not in profiles:
+            names = ", ".join(sorted(profiles)) or "none yet"
+            return f"No profile named {value.strip()!r}. Profiles: {names}"[:300]
+        return None
+
+    @staticmethod
+    def _template_error(template: typing.Optional[str]) -> typing.Optional[str]:
+        if not template:
+            return None
+        sample = {key: "x" for key in TEMPLATE_VARIABLES}
+        try:
+            template.format(**sample)
+        except (KeyError, IndexError, ValueError, AttributeError):
+            return "Unknown {variable}. Use: " + ", ".join("{" + key + "}" for key in TEMPLATE_VARIABLES)
+        return None
+
+    @staticmethod
+    def _url_error(url: typing.Optional[str]) -> typing.Optional[str]:
+        if url and not url.startswith(("https://", "http://")):
+            return "The link must start with https:// or http://."
+        return None
+
+    @staticmethod
+    def _color_error(value: typing.Optional[str]) -> typing.Optional[str]:
+        try:
+            _parse_color(value)
+        except ValueError:
+            return "Enter a hex colour such as #01D758."
+        return None
+
     def control_panel_schema(self):
+        def profile(key, label, kind, section, help, path=None, check=None, read=None, write=None, **extra):
+            path = tuple(path or (key,))
+            return {
+                "key": "profile." + ".".join(path),
+                "label": label,
+                "type": kind,
+                "section": section,
+                "help": help,
+                "get": self._profile_getter(path, read),
+                "set": self._profile_setter(path, write),
+                "validate": self._profile_validator(check),
+                **extra,
+            }
+
         return {
             "title": "TicketTool",
-            "description": "Ticket system language. Profiles are managed with settickettool.",
+            "description": "Ticket system. Profile settings apply to the profile chosen under General.",
             "access": "admin",
             "settings": [
                 {
@@ -43,6 +164,103 @@ class settings(commands.Cog):
                     "choices": [{"value": code, "label": LANGUAGE_NAMES.get(code, code)} for code in ("en", "pt-br")],
                     "help": "Language used by this server's ticket system.",
                 },
+                {
+                    "key": "panel_profile",
+                    "label": "Profile being edited",
+                    "type": "text",
+                    "max": 20,
+                    "clearable": True,
+                    "empty": "No profiles yet",
+                    "help": "Name of the profile the other sections change. Create profiles with settickettool.",
+                    "get": self._get_panel_profile,
+                    "set": self._set_panel_profile,
+                    "validate": self._validate_panel_profile,
+                },
+                profile("enable", "Tickets enabled", "bool", "General", "Let members open tickets with this profile."),
+                # Channels
+                profile(
+                    "logschannel", "Log channel", "channel", "Channels",
+                    "Where ticket events and transcripts are sent.", channel_types=["text", "news"],
+                ),
+                profile(
+                    "forum_channel", "Forum or thread channel", "channel", "Channels",
+                    "Open tickets as forum posts or private threads here instead of channels.",
+                    channel_types=["forum", "text"],
+                ),
+                profile(
+                    "category_open", "Open ticket category", "channel", "Channels",
+                    "Category new ticket channels are created in.", channel_types=["category"],
+                ),
+                profile(
+                    "category_close", "Closed ticket category", "channel", "Channels",
+                    "Category closed ticket channels are moved to.", channel_types=["category"],
+                ),
+                # Roles
+                profile("admin_roles", "Admin roles", "roles", "Roles", "Full control over every ticket of this profile."),
+                profile("support_roles", "Support roles", "roles", "Roles", "Can see, answer and claim tickets."),
+                profile("view_roles", "View-only roles", "roles", "Roles", "Can read tickets but not write in them."),
+                profile("ping_roles", "Ping roles", "roles", "Roles", "Mentioned when a ticket is opened."),
+                profile("ticket_role", "Ticket owner role", "role", "Roles", "Given to members while they have an open ticket."),
+                # Behaviour
+                profile(
+                    "nb_max", "Max open tickets per member", "int", "Behaviour",
+                    "How many tickets one member may have open at once.", min=1, max=100, unit="tickets",
+                ),
+                profile("user_can_close", "Owners can close", "bool", "Behaviour", "Let ticket owners close their own tickets."),
+                profile("close_confirmation", "Confirm before closing", "bool", "Behaviour", "Ask for confirmation before a ticket is closed."),
+                profile("delete_on_close", "Delete on close", "bool", "Behaviour", "Delete the ticket instead of moving it to closed."),
+                profile("close_on_leave", "Close when owner leaves", "bool", "Behaviour", "Close a member's open tickets when they leave the server."),
+                profile(
+                    "auto_close_hours", "Auto-close after inactivity", "int", "Behaviour",
+                    "Close open tickets with no messages for this long. 0 turns it off.", min=0, max=8760, unit="h",
+                ),
+                profile("transcript", "Save transcripts", "bool", "Behaviour", "Attach an HTML transcript to the log when a ticket is deleted."),
+                profile("create_on_react", "Open with 🎟️ reaction", "bool", "Behaviour", "Open a ticket when someone reacts 🎟️ to any message."),
+                profile(
+                    "rename_channel_dropdown", "Rename to dropdown reason", "bool", "Behaviour",
+                    "Rename the ticket after the reason picked from a dropdown.", path=("embed_button", "rename_channel_dropdown"),
+                ),
+                profile("create_modlog", "Modlog case on open", "bool", "Behaviour", "Create a modlog case for every new ticket."),
+                profile("audit_logs", "Name staff in audit log", "bool", "Behaviour", "Put the acting member in Discord audit log reasons."),
+                # Appearance
+                profile(
+                    "dynamic_channel_name", "Ticket name format", "text", "Appearance",
+                    "Name of new tickets. Variables include {ticket_id}, {owner_name}, {emoji}.",
+                    check=self._template_error, min=1, max=100,
+                ),
+                profile(
+                    "custom_message", "Welcome message", "text", "Appearance",
+                    "Sent inside each new ticket. Same variables as the name format. Empty sends none.",
+                    check=self._template_error, max=2000, clearable=True, empty="None",
+                ),
+                profile("emoji_open", "Open emoji", "text", "Appearance", "Emoji used for {emoji} while a ticket is open.", min=1, max=50),
+                profile("emoji_close", "Closed emoji", "text", "Appearance", "Emoji put in the name of closed tickets.", min=1, max=50),
+                profile(
+                    "color", "Embed colour", "text", "Appearance", "Hex colour of ticket embeds, e.g. #01D758.",
+                    check=self._color_error, read=lambda value: f"#{int(value):06X}", write=_parse_color, min=1, max=7,
+                ),
+                profile(
+                    "thumbnail", "Embed thumbnail", "text", "Appearance", "Image link shown in the corner of ticket embeds.",
+                    check=self._url_error, max=500, clearable=True, empty="None",
+                ),
+                profile(
+                    "title", "Open-ticket message title", "text", "Appearance", "Title of the open-a-ticket message posted with settickettool message.",
+                    path=("embed_button", "title"), min=1, max=256,
+                ),
+                profile(
+                    "description", "Open-ticket message text", "text", "Appearance",
+                    "Text of the open-a-ticket message. {prefix} is the bot prefix.",
+                    path=("embed_button", "description"), min=1, max=2000,
+                ),
+                profile(
+                    "image", "Open-ticket message image", "text", "Appearance", "Image link shown on the open-a-ticket message.",
+                    path=("embed_button", "image"), check=self._url_error, max=500, clearable=True, empty="None",
+                ),
+                profile(
+                    "placeholder_dropdown", "Dropdown placeholder", "text", "Appearance",
+                    "Hint shown in the reason dropdown of the open-a-ticket message.",
+                    path=("embed_button", "placeholder_dropdown"), min=1, max=100,
+                ),
             ],
         }
 
@@ -493,8 +711,19 @@ class settings(commands.Cog):
         actual_color = config["color"]
         actual_thumbnail = config["thumbnail"]
         embed: discord.Embed = discord.Embed()
-        embed.title = get_text(lang, "modal_create_ticket")
-        embed.description = get_text(lang, "default_embed_description", prefix=ctx.prefix)
+        default_button = self.config._defaults[self.config.GUILD]["default_profile_settings"]["embed_button"]
+        custom_title = config["embed_button"].get("title")
+        custom_description = config["embed_button"].get("description")
+        embed.title = (
+            custom_title
+            if custom_title and custom_title != default_button["title"]
+            else get_text(lang, "modal_create_ticket")
+        )
+        embed.description = (
+            custom_description.replace("{prefix}", ctx.prefix)
+            if custom_description and custom_description != default_button["description"]
+            else get_text(lang, "default_embed_description", prefix=ctx.prefix)
+        )
         embed.set_image(url=config["embed_button"]["image"])
         embed.set_thumbnail(url=actual_thumbnail)
         embed.color = actual_color

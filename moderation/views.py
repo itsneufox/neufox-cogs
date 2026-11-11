@@ -20,8 +20,9 @@ class ConfirmActionView(discord.ui.LayoutView):
         moderator_name: str,
         thumbnail_url: str,
         language: str = "en",
+        timeout: float = 30,
     ):
-        super().__init__(timeout=30)
+        super().__init__(timeout=timeout)
         self.author_id = author_id
         self.action_text = action_text
         self.reason = reason or DEFAULT_REASON

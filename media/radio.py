@@ -13,6 +13,8 @@ import discord
 from discord.http import Route
 from redbot.core import Config, commands
 
+from .layouts import config_field
+
 log = logging.getLogger("red.neufox.media.radio")
 
 RADIO_ID = 938475610
@@ -24,6 +26,29 @@ STATUS_POLL_SECONDS = 30
 AUTO_SYNC_DELAY_SECONDS = 3
 AUTO_LEAVE_GRACE_SECONDS = 10
 RECONNECT_DELAY_SECONDS = 5
+DEFAULT_STATION_NAME = "LongWayFM"
+DEFAULT_STATUS_TITLE = "**LongWayFM Status**"
+DEFAULT_VOICE_STATUS = "{show}: {title}"
+DEFAULT_VOICE_STATUS_OFFLINE = "{show}: offline"
+RADIO_GUILD_DEFAULTS = {
+    "enabled": True,
+    "stream_url": None,
+    "voice_channel_id": None,
+    "reconnect": True,
+    "status_channel_id": None,
+    "status_message_id": None,
+    "status_api_url": None,
+    "voice_status_enabled": True,
+    "auto_play": True,
+    "volume": 100,
+    "leave_delay_seconds": AUTO_LEAVE_GRACE_SECONDS,
+    "reconnect_delay_seconds": RECONNECT_DELAY_SECONDS,
+    "show_schedule": True,
+    "station_name": DEFAULT_STATION_NAME,
+    "status_title": DEFAULT_STATUS_TITLE,
+    "voice_status_format": DEFAULT_VOICE_STATUS,
+    "voice_status_offline": DEFAULT_VOICE_STATUS_OFFLINE,
+}
 RADIO_SHOWS = (
     ("Early Haul", 6, 12),
     ("Midday Cruise", 12, 16),
@@ -47,6 +72,40 @@ def current_show_name(hour: int | None = None) -> str:
         if start > end and (hour >= start or hour < end):
             return name
     return "LongWayFM"
+
+
+def show_name(data: dict, hour: int | None = None) -> str:
+    """The show for this hour, or the station name when the show schedule is off."""
+    if data.get("show_schedule", True):
+        return current_show_name(hour)
+    return data.get("station_name") or DEFAULT_STATION_NAME
+
+
+def voice_status_text(data: dict, status: dict, hour: int | None = None) -> str:
+    """The voice channel status line from the configured formats."""
+    show = show_name(data, hour)
+    title = (status.get("title") or "").strip() if status.get("online") else ""
+    if status.get("online") and title:
+        template = data.get("voice_status_format") or DEFAULT_VOICE_STATUS
+    elif status.get("online"):
+        return show[:500]
+    else:
+        template = data.get("voice_status_offline") or DEFAULT_VOICE_STATUS_OFFLINE
+    try:
+        text = template.format(show=show, title=title, listeners=status.get("listeners", 0))
+    except (KeyError, IndexError, ValueError):
+        text = f"{show}: {title or 'offline'}"
+    return text[:500]
+
+
+def validate_status_format(guild, value) -> str | None:
+    if not value:
+        return None
+    try:
+        value.format(show="s", title="t", listeners=0)
+    except (KeyError, IndexError, ValueError):
+        return "Only {show}, {title} and {listeners} can go in braces."
+    return None
 
 
 def status_api_url(data: dict) -> str | None:
@@ -88,17 +147,8 @@ class RadioMixin:
     def _radio_init(self):
         # Same identifier and cog name as the old standalone cog, so its data is reused.
         self.radio_config = Config.get_conf(None, identifier=RADIO_ID, cog_name="Radio", force_registration=True)
-        self.radio_config.register_guild(
-            enabled=True,
-            stream_url=None,
-            voice_channel_id=None,
-            reconnect=True,
-            status_channel_id=None,
-            status_message_id=None,
-            status_api_url=None,
-            voice_status_enabled=True,
-            auto_play=True,
-        )
+        self.radio_config.register_guild(**RADIO_GUILD_DEFAULTS)
+        self.radio_config.register_global(status_poll_seconds=STATUS_POLL_SECONDS)
         self._radio_stopping: set[int] = set()  # guilds where the next stream end is intentional
         self._radio_sync_tasks: dict[int, asyncio.Task] = {}
         self._radio_reconnect_tasks: dict[int, asyncio.Task] = {}
@@ -122,6 +172,50 @@ class RadioMixin:
     @staticmethod
     def _radio_optional_url_error(guild, url) -> str | None:
         return None if not url or valid_http_url(url) else "That does not look like a valid HTTP/HTTPS URL."
+
+    def _radio_settings(self) -> list[dict]:
+        """Panel settings added on top of the basic Radio ones."""
+        config = self.radio_config
+
+        def field(name, set_hook=None, **extra):
+            return {**config_field(config, name, set_hook=set_hook), "section": "Radio", **extra}
+
+        async def get_poll(guild):
+            return await config.status_poll_seconds()
+
+        async def set_poll(guild, value):
+            await config.status_poll_seconds.set(int(value))
+
+        return [
+            field("volume", key="radio.volume", label="Volume", type="int", min=1, max=200, unit="%",
+                  help="Playback volume. Changes apply to the stream right away.", set_hook=self._radio_apply_volume),
+            field("leave_delay_seconds", key="radio.leave_delay", label="Leave delay", type="int", min=0, max=3600,
+                  unit="seconds", help="How long auto play waits after the channel empties before leaving."),
+            field("reconnect_delay_seconds", key="radio.reconnect_delay", label="Reconnect delay", type="int",
+                  min=1, max=300, unit="seconds", help="Wait before restarting a dropped stream."),
+            field("show_schedule", key="radio.show_schedule", label="Show schedule", type="bool",
+                  help="Name the current show by UTC hour. Off uses the station name instead."),
+            field("station_name", key="radio.station_name", label="Station name", type="text", min=1, max=80,
+                  help="Shown instead of the show when the show schedule is off."),
+            field("status_title", key="radio.status_title", label="Status message title", type="text", min=1,
+                  max=200, help="Text above the now-playing embed in the status channel."),
+            field("voice_status_format", key="radio.voice_status_format", label="Voice status format",
+                  type="text", min=1, max=200, validate=validate_status_format,
+                  help="Voice channel status while a track plays. Use {show}, {title}, {listeners}."),
+            field("voice_status_offline", key="radio.voice_status_offline", label="Voice status when offline",
+                  type="text", min=1, max=200, validate=validate_status_format,
+                  help="Voice channel status while the stream is offline. Use {show}."),
+            {"key": "radio.status_poll_seconds", "label": "Status refresh interval", "type": "int",
+             "section": "Radio", "min": 10, "max": 600, "unit": "seconds", "scope": "global",
+             "help": "How often every server's status message and voice status refresh.",
+             "get": get_poll, "set": set_poll},
+        ]
+
+    async def _radio_apply_volume(self, guild: discord.Guild):
+        voice_client = guild.voice_client
+        source = getattr(voice_client, "source", None) if voice_client is not None else None
+        if isinstance(source, discord.PCMVolumeTransformer):
+            source.volume = await self.radio_config.guild(guild).volume() / 100
 
     async def _radio_settings_changed(self, guild: discord.Guild):
         """Bring voice in line with new settings without blocking the panel interaction."""
@@ -188,7 +282,7 @@ class RadioMixin:
         except discord.ClientException as error:
             return f"Could not connect to voice: {error}"
 
-        if not self._radio_stream(guild, voice_client, data["stream_url"]):
+        if not self._radio_stream(guild, voice_client, data["stream_url"], data.get("volume", 100)):
             return "I could not start the stream. Check that ffmpeg is installed and the URL is reachable."
         await self.radio_config.guild(guild).voice_channel_id.set(channel.id)
         await self._radio_refresh_voice_status(guild)
@@ -225,12 +319,17 @@ class RadioMixin:
             await voice_client.move_to(channel)
         return voice_client
 
-    def _radio_stream(self, guild: discord.Guild, voice_client: discord.VoiceClient, stream_url: str) -> bool:
+    def _radio_stream(
+        self, guild: discord.Guild, voice_client: discord.VoiceClient, stream_url: str, volume: int = 100
+    ) -> bool:
         def after(error: Exception | None):
             self.bot.loop.call_soon_threadsafe(self._radio_stream_ended, guild.id)
 
         try:
-            voice_client.play(discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS), after=after)
+            source = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS), volume=max(1, int(volume)) / 100
+            )
+            voice_client.play(source, after=after)
         except (discord.ClientException, OSError):
             log.exception("Could not start FFmpeg playback for guild %s", guild.id)
             return False
@@ -245,10 +344,11 @@ class RadioMixin:
 
     async def _radio_reconnect_later(self, guild_id: int):
         try:
-            await asyncio.sleep(RECONNECT_DELAY_SECONDS)
             guild = self.bot.get_guild(guild_id)
             if guild is None:
                 return
+            delay = await self.radio_config.guild(guild).reconnect_delay_seconds()
+            await asyncio.sleep(max(1, int(delay)))
             data = await self.radio_config.guild(guild).all()
             if not data["enabled"] or not data["reconnect"] or not data["stream_url"]:
                 return
@@ -262,7 +362,7 @@ class RadioMixin:
                     return
                 voice_client = await channel.connect()
             if not voice_client.is_playing() and not voice_client.is_paused():
-                self._radio_stream(guild, voice_client, data["stream_url"])
+                self._radio_stream(guild, voice_client, data["stream_url"], data.get("volume", 100))
         except (discord.HTTPException, discord.ClientException, asyncio.TimeoutError):
             log.warning("Radio reconnect failed for guild %s", guild_id, exc_info=True)
         finally:
@@ -317,7 +417,8 @@ class RadioMixin:
         if channel is None:
             return
         if not _has_human(channel):
-            await asyncio.sleep(AUTO_LEAVE_GRACE_SECONDS)
+            delay = await self.radio_config.guild(guild).leave_delay_seconds()
+            await asyncio.sleep(max(0, int(delay)))
             channel = await self._radio_auto_channel(guild)
             voice_client = guild.voice_client
             if channel is None or _has_human(channel):
@@ -337,8 +438,8 @@ class RadioMixin:
             voice_client = await self._radio_connect(guild, channel)
             if voice_client.is_playing() or voice_client.is_paused():
                 return
-            stream_url = await self.radio_config.guild(guild).stream_url()
-            if self._radio_stream(guild, voice_client, stream_url):
+            data = await self.radio_config.guild(guild).all()
+            if self._radio_stream(guild, voice_client, data["stream_url"], data.get("volume", 100)):
                 await self._radio_refresh_voice_status(guild)
             else:
                 await voice_client.disconnect(force=True)
@@ -363,14 +464,22 @@ class RadioMixin:
                 raise
             except Exception:
                 log.exception("Radio status update failed")
-            await asyncio.sleep(STATUS_POLL_SECONDS)
+            await asyncio.sleep(await self._radio_poll_seconds())
+
+    async def _radio_poll_seconds(self) -> int:
+        try:
+            return max(10, int(await self.radio_config.status_poll_seconds()))
+        except Exception:
+            return STATUS_POLL_SECONDS
 
     async def _radio_refresh_status_message(self, guild: discord.Guild, data: dict) -> bool:
         channel = guild.get_channel(int(data["status_channel_id"]))
         if not isinstance(channel, discord.TextChannel):
             return False
-        embed = self._radio_status_embed(guild, data, await self._radio_fetch_status(data))
-        content = "**LongWayFM Status**"
+        embed = self._radio_status_embed(
+            guild, data, await self._radio_fetch_status(data), await self._radio_poll_seconds()
+        )
+        content = data.get("status_title") or DEFAULT_STATUS_TITLE
         if data.get("status_message_id"):
             try:
                 message = await channel.fetch_message(int(data["status_message_id"]))
@@ -395,12 +504,7 @@ class RadioMixin:
         if channel is None:
             return False
         status = await self._radio_fetch_status(data)
-        if status.get("online"):
-            title = (status.get("title") or "").strip()
-            text = f"{current_show_name()}: {title}" if title else current_show_name()
-        else:
-            text = f"{current_show_name()}: offline"
-        return await self._radio_set_voice_status(channel, text[:500])
+        return await self._radio_set_voice_status(channel, voice_status_text(data, status))
 
     async def _radio_clear_voice_status(self, guild: discord.Guild) -> bool:
         channel = self._radio_status_channel(guild, await self.radio_config.guild(guild).all())
@@ -456,19 +560,21 @@ class RadioMixin:
         }
 
     @staticmethod
-    def _radio_status_embed(guild: discord.Guild, data: dict, status: dict) -> discord.Embed:
+    def _radio_status_embed(
+        guild: discord.Guild, data: dict, status: dict, poll_seconds: int = STATUS_POLL_SECONDS
+    ) -> discord.Embed:
         # Kept as an embed: the status message already exists in servers and cannot switch to components.
         voice_client = guild.voice_client
         if status.get("online"):
             embed = discord.Embed(
-                title=current_show_name(), description=f"Now playing: **{status['title']}**", color=discord.Color.green()
+                title=show_name(data), description=f"Now playing: **{status['title']}**", color=discord.Color.green()
             )
             embed.add_field(name="Listeners", value=str(status.get("listeners", 0)), inline=True)
             if status.get("bitrate"):
                 embed.add_field(name="Bitrate", value=f"{status['bitrate']} kbps", inline=True)
         else:
             embed = discord.Embed(
-                title=current_show_name(),
+                title=show_name(data),
                 description="The stream is currently offline or metadata is unavailable.",
                 color=discord.Color.dark_grey(),
             )
@@ -478,5 +584,5 @@ class RadioMixin:
         embed.add_field(name="Discord Playback", value="Playing" if playing else "Stopped", inline=True)
         if data.get("stream_url"):
             embed.add_field(name="Stream", value=f"[Open stream]({data['stream_url']})", inline=False)
-        embed.set_footer(text=f"Updates every {STATUS_POLL_SECONDS} seconds")
+        embed.set_footer(text=f"Updates every {poll_seconds} seconds")
         return embed

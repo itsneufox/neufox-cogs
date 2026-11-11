@@ -38,11 +38,12 @@ class ActionsMixin:
     @commands.guild_only()
     async def purge_messages(self, ctx: commands.Context, amount: int, member: discord.Member | None = None):
         """Delete recent messages from this channel. Optionally limit cleanup to one member."""
-        if amount < 1 or amount > 200:
+        purge_max = int(await self.config.guild(ctx.guild).purge_max())
+        if amount < 1 or amount > purge_max:
             await self._send_moderation_response(
                 ctx,
-                "Purge amount must be between 1 and 200.",
-                "A quantidade deve estar entre 1 e 200.",
+                f"Purge amount must be between 1 and {purge_max}.",
+                f"A quantidade deve estar entre 1 e {purge_max}.",
             )
             return
 
@@ -308,6 +309,8 @@ class ActionsMixin:
             )
             return
 
+        if await self._reason_missing(ctx, reason):
+            return
         until = datetime.now(timezone.utc) + duration
         audit_text = audit_reason(ctx.author, reason)
         try:
@@ -387,6 +390,8 @@ class ActionsMixin:
                 f"Não foi possível expulsar {member.mention}: {self._natural_failure(failure)}",
             )
             return
+        if await self._reason_missing(ctx, reason):
+            return
         if not await self._confirm_action(ctx, f"kick {member.mention}", reason=reason, target=member):
             return
 
@@ -433,6 +438,8 @@ class ActionsMixin:
             )
             return
         delete_days, reason = parsed
+        if await self._reason_missing(ctx, reason):
+            return
         if not await self._confirm_action(
             ctx,
             f"ban {member.mention} and delete {delete_days} day(s) of messages",
@@ -493,6 +500,8 @@ class ActionsMixin:
             )
             return
         delete_days, reason = parsed
+        if await self._reason_missing(ctx, reason):
+            return
         if not await self._confirm_action(
             ctx,
             f"ban {user} and delete {delete_days} day(s) of messages",
@@ -563,6 +572,8 @@ class ActionsMixin:
             )
             return
 
+        if await self._reason_missing(ctx, reason):
+            return
         delete_days = await self.config.guild(ctx.guild).softban_delete_message_days()
         if not await self._confirm_action(
             ctx,
@@ -615,6 +626,8 @@ class ActionsMixin:
             )
             return
 
+        if await self._reason_missing(ctx, reason):
+            return
         current_warnings = await self.config.member(member).warnings()
         next_warning_count = len(current_warnings) + 1
         triggered_punishments = await self._warning_punishments_for_count(ctx.guild, next_warning_count)
@@ -1073,6 +1086,9 @@ class ActionsMixin:
         target: discord.abc.User | None = None,
     ) -> bool:
         await self._maybe_set_natural_context(ctx)
+        guild_cfg = self.config.guild(ctx.guild)
+        if not await guild_cfg.confirm_actions():
+            return True
         thumbnail_url = avatar_url(target) if target is not None else avatar_url(ctx.author)
         language = self._natural_language(ctx)
         if language == "pt":
@@ -1084,10 +1100,24 @@ class ActionsMixin:
             str(ctx.author),
             thumbnail_url,
             language=language,
+            timeout=await guild_cfg.confirm_timeout_seconds(),
         )
         view.message = await ctx.send(view=view, allowed_mentions=NO_PINGS)
         await view.wait()
         return view.value is True
+
+    async def _reason_missing(self, ctx: commands.Context, reason: str | None) -> bool:
+        """When the server requires reasons, refuse actions that were given none."""
+        if reason and reason.strip() and reason != DEFAULT_REASON:
+            return False
+        if not await self.config.guild(ctx.guild).require_reason():
+            return False
+        await self._send_moderation_response(
+            ctx,
+            "This server requires a reason for moderation actions.",
+            "Este servidor exige um motivo para ações de moderação.",
+        )
+        return True
 
     @staticmethod
     def _normalize_warning_punishment_action(action: str) -> str | None:

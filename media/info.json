@@ -7,5 +7,5 @@
     "install_msg": "Media loaded. If you used Radio, MusicBoard or EmbedFixer, unload them first; their settings carry over. Configure everything in `/control` (Media). Members use `/media play`, `/media stop` and `/media fixlinks`. Radio needs ffmpeg and PyNaCl on the host.",
     "requirements": [],
     "tags": ["radio", "music", "voice", "stream", "youtube", "embed", "social", "webhook", "utility"],
-    "end_user_data_statement": "This cog stores per server: radio stream, status API and channel settings and the radio status message ID; the MusicBoard channel, reaction timeout and IDs of nominated messages; whether EmbedFixer is enabled; and per member, whether that member opted out of EmbedFixer. It does not store message content or voice audio."
+    "end_user_data_statement": "This cog stores per server: radio stream, status API and channel settings and the radio status message ID; MusicBoard settings and IDs of nominated messages; EmbedFixer settings (sites, services, ignored channels and roles); and per member, whether that member opted out of EmbedFixer. It does not store message content or voice audio."
 }
