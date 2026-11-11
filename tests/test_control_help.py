@@ -93,6 +93,10 @@ class HelpTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(view.previous.disabled and view.next.disabled)
         view.show("")
         self.assertEqual(view.embed().title, "Help")
+        for option in view.picker.options:  # Discord requires 1-100 character option values
+            self.assertTrue(1 <= len(option.value) <= 100, option)
+        view.show(self.help.OVERVIEW_VALUE)
+        self.assertEqual(view.embed().title, "Help")
 
     async def test_whole_repo_fits_embed_limits(self):
         if importlib.util.find_spec("redbot") is None:

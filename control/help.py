@@ -14,6 +14,7 @@ MAX_CATEGORIES = 25
 NO_PINGS = discord.AllowedMentions.none()
 ACCENT = discord.Color.blurple()
 OTHER = "Other"
+OVERVIEW_VALUE = "__overview__"  # Discord rejects empty select option values
 
 
 @dataclass(frozen=True)
@@ -128,7 +129,7 @@ class HelpView(ui.View):
 
         self.picker = ui.Select(
             placeholder="Choose a category",
-            options=[discord.SelectOption(label="Overview", value="")]
+            options=[discord.SelectOption(label="Overview", value=OVERVIEW_VALUE)]
             + [
                 discord.SelectOption(label=c.name[:100], value=c.name[:100], description=f"{len(c.entries)} commands")
                 for c in self.categories[: MAX_CATEGORIES - 1]
@@ -172,7 +173,7 @@ class HelpView(ui.View):
         return False
 
     async def _pick(self, interaction: discord.Interaction) -> None:
-        self.show(self.picker.values[0] if self.picker.values else "")
+        self.show(self.picker.values[0] if self.picker.values else OVERVIEW_VALUE)
         await interaction.response.edit_message(embed=self.embed(), view=self)
 
     async def _previous(self, interaction: discord.Interaction) -> None:
