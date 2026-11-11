@@ -4,7 +4,7 @@ Global LWD$ economy: claims with a daily streak, a server shop, perks and rental
 
 Slash commands come first. Everything starts from **`/eco`**, a button panel with Balance, Claim, Shop, Perks, Market, Casino, Lottery, Nightlife and Leaderboard.
 
-On Red installations where third-party slash commands are disabled, the bot owner must run `[p]slash enablecog Economy` and `[p]slash sync` after loading the cog.
+On Red installations where third-party slash commands are disabled, the bot owner must run `[p]slash enablecog economy` and `[p]slash sync` after loading the cog.
 
 ## Commands
 

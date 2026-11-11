@@ -33,10 +33,7 @@ Several cogs were merged. The merged cogs read the old cogs' saved data, so noth
 [p]cog update economy
 [p]load moderation activity utility media
 [p]reload economy
-[p]slash enablecog Moderation
-[p]slash enablecog Activity
-[p]slash enablecog Utility
-[p]slash enablecog Media
+[p]slash enablecog economy moderation activity utility media control
 [p]slash sync
 ```
 

@@ -6,7 +6,7 @@
         "itsneufox"
     ],
     "min_bot_version": "3.5.24",
-    "install_msg": "Economy loaded! Run `[p]slash enablecog Economy` and `[p]slash sync` if slash commands are not synced. Members start with `/eco`, `/claim`, `/pay`, `/shop`, `/casino` and `/nightlife`. Settings, taxes and sink prices are in `/control` (Control cog); `[p]ecoadmin` covers balance adjustments, shop items, rentable roles, API tokens and forced lottery draws.",
+    "install_msg": "Economy loaded! Run `[p]slash enablecog economy` and `[p]slash sync` if slash commands are not synced. Members start with `/eco`, `/claim`, `/pay`, `/shop`, `/casino` and `/nightlife`. Settings, taxes and sink prices are in `/control` (Control cog); `[p]ecoadmin` covers balance adjustments, shop items, rentable roles, API tokens and forced lottery draws.",
     "requirements": [
         "aiohttp>=3.8.0",
         "Pillow>=10.0.0",

@@ -13,7 +13,7 @@ One cog for server moderation. It replaces three older cogs and keeps all of the
 ```text
 [p]unload adminhelper antiabuse honeypot
 [p]load moderation
-[p]slash enablecog Moderation
+[p]slash enablecog moderation
 [p]slash sync
 ```
 

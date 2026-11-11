@@ -54,7 +54,7 @@ Turning a feature off stops its listener in that server. Disabling the whole cog
 [p]repo update <repo>
 [p]cog install <repo> media
 [p]load media
-[p]slash enablecog Media
+[p]slash enablecog media
 [p]slash sync
 [p]cog uninstall radio musicboard embedfixer
 ```
