@@ -9,7 +9,9 @@ from urllib.parse import quote
 
 import aiohttp
 import discord
-from redbot.core import Config, commands
+from redbot.core import Config, app_commands, commands
+
+from .layouts import run_slash, send_embed
 
 
 DEFAULT_COLOR = discord.Color.red()
@@ -124,6 +126,51 @@ class BanAppeals(commands.Cog):
         self._view = AppealActionsView(self)
         self.bot.add_view(self._view)
 
+    def control_panel_schema(self) -> dict[str, typing.Any]:
+        return {
+            "title": "Ban Appeals",
+            "description": "Moderates ban appeals posted in a forum or text channel.",
+            "settings": [
+                {"key": "enabled", "label": "Appeal moderation", "type": "bool", "help": "Check and manage new appeals."},
+                {
+                    "key": "appeal_channel_id",
+                    "label": "Appeal channel",
+                    "type": "channel",
+                    "channel_types": ["forum", "text"],
+                    "help": "Where appeals are posted.",
+                },
+                {
+                    "key": "log_channel_id",
+                    "label": "Staff log channel",
+                    "type": "channel",
+                    "channel_types": ["text"],
+                    "help": "Where staff actions are logged.",
+                },
+                {
+                    "key": "staff_role_ids",
+                    "label": "Staff roles",
+                    "type": "roles",
+                    "help": "Roles allowed to use the appeal staff buttons.",
+                },
+                {
+                    "key": "cooldown_days",
+                    "label": "Denied appeal cooldown",
+                    "type": "int",
+                    "min": 0,
+                    "unit": "days",
+                    "help": "How long a denied member must wait before appealing again.",
+                },
+                {
+                    "key": "base_challenge_count",
+                    "label": "Final-chance sentences",
+                    "type": "int",
+                    "min": 1,
+                    "unit": "sentences",
+                    "help": "Base number of handwritten sentences for a final chance.",
+                },
+            ],
+        }
+
     async def red_delete_data_for_user(self, requester, user_id: int) -> None:
         all_guilds = await self.config.all_guilds()
         for guild_id, data in all_guilds.items():
@@ -140,6 +187,22 @@ class BanAppeals(commands.Cog):
             await guild_group.appeals.set(appeals)
             await guild_group.denied_users.set(denied_users)
 
+    appeals_slash = app_commands.Group(
+        name="appeals",
+        description="Ban appeal tools.",
+        guild_only=True,
+        default_permissions=discord.Permissions(manage_guild=True),
+    )
+
+    @appeals_slash.command(name="settings", description="Show ban appeal settings.")
+    async def slash_settings(self, interaction: discord.Interaction):
+        await run_slash(self.bot, interaction, self.appealset, ephemeral=True)
+
+    @appeals_slash.command(name="testapi", description="Test the configured ban lookup.")
+    @app_commands.describe(ban_id="Ban ID to look up")
+    async def slash_testapi(self, interaction: discord.Interaction, ban_id: str):
+        await run_slash(self.bot, interaction, self.appealset_testapi, ban_id, ephemeral=True)
+
     @commands.group(name="appealset", aliases=["banappealset"], invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
@@ -147,7 +210,7 @@ class BanAppeals(commands.Cog):
         """Show BanAppeals settings."""
         await self._send_settings(ctx)
 
-    @appealset.command(name="toggle")
+    @appealset.command(name="toggle", hidden=True)
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def appealset_toggle(self, ctx: commands.Context, value: bool | None = None):
@@ -157,7 +220,7 @@ class BanAppeals(commands.Cog):
         await self.config.guild(ctx.guild).enabled.set(new_value)
         await ctx.send(f"Ban appeal moderation is now {'enabled' if new_value else 'disabled'}.")
 
-    @appealset.command(name="channel")
+    @appealset.command(name="channel", hidden=True)
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def appealset_channel(
@@ -172,7 +235,7 @@ class BanAppeals(commands.Cog):
             return
         await ctx.send(f"Ban appeals will be monitored in {channel.mention}.")
 
-    @appealset.command(name="log")
+    @appealset.command(name="log", hidden=True)
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def appealset_log(self, ctx: commands.Context, channel: discord.TextChannel | None = None):
@@ -183,7 +246,7 @@ class BanAppeals(commands.Cog):
             return
         await ctx.send(f"Ban appeal actions will be logged in {channel.mention}.")
 
-    @appealset.command(name="cooldown")
+    @appealset.command(name="cooldown", hidden=True)
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def appealset_cooldown(self, ctx: commands.Context, days: int):
@@ -194,7 +257,7 @@ class BanAppeals(commands.Cog):
         await self.config.guild(ctx.guild).cooldown_days.set(days)
         await ctx.send(f"Denied appeal cooldown set to {days} day(s).")
 
-    @appealset.command(name="challenge")
+    @appealset.command(name="challenge", hidden=True)
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def appealset_challenge(self, ctx: commands.Context, count: int):
@@ -205,7 +268,7 @@ class BanAppeals(commands.Cog):
         await self.config.guild(ctx.guild).base_challenge_count.set(count)
         await ctx.send(f"Base final-chance challenge count set to {count}.")
 
-    @appealset.group(name="staffrole", invoke_without_command=True)
+    @appealset.group(name="staffrole", invoke_without_command=True, hidden=True)
     @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def appealset_staffrole(self, ctx: commands.Context):
@@ -287,7 +350,7 @@ class BanAppeals(commands.Cog):
         result = await self._lookup_ban(ctx.guild, ban_id, settings)
         embed = discord.Embed(title=f"Ban API Test: {ban_id}", color=DEFAULT_COLOR)
         self._add_api_fields(embed, result)
-        await ctx.send(embed=embed)
+        await send_embed(ctx, embed)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -995,16 +1058,13 @@ class BanAppeals(commands.Cog):
         embed.add_field(
             name="Commands",
             value=(
-                f"`{ctx.clean_prefix}appealset channel #forum-or-channel`\n"
-                f"`{ctx.clean_prefix}appealset log #staff-logs`\n"
-                f"`{ctx.clean_prefix}appealset cooldown 7`\n"
-                f"`{ctx.clean_prefix}appealset challenge 50`\n"
+                "Channels, cooldown and staff roles: `/control`\n"
                 f"`{ctx.clean_prefix}appealset apiurl https://example.com/api/bans/{{ban_id}}`\n"
                 f"`{ctx.clean_prefix}appealset testapi <ban id>`"
             ),
             inline=False,
         )
-        await ctx.send(embed=embed)
+        await send_embed(ctx, embed)
 
     def _validation_embed(self, record: dict[str, typing.Any]) -> discord.Embed:
         warnings = self._display_warnings(record)

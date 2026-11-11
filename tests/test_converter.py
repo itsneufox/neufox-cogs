@@ -4,7 +4,7 @@ import unittest
 
 
 SPEC = importlib.util.spec_from_file_location(
-    "conversions", Path(__file__).parents[1] / "converter" / "conversions.py"
+    "conversions", Path(__file__).parents[1] / "utility" / "conversions.py"
 )
 conversions = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(conversions)

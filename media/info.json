@@ -1,0 +1,11 @@
+{
+    "name": "Media",
+    "short": "Radio streaming, music link nominations and social embed fixing in one cog.",
+    "description": "Streams a radio URL into voice with automatic join and leave and now-playing status (Radio), lets members nominate music links to a channel by reacting (MusicBoard), and reposts social media links through a webhook with working embeds (EmbedFixer). Each feature can be turned on or off per server in /control. Replaces the separate Radio, MusicBoard and EmbedFixer cogs and keeps their saved settings.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.24",
+    "install_msg": "Media loaded. If you used Radio, MusicBoard or EmbedFixer, unload them first; their settings carry over. Configure everything in `/control` (Media). Members use `/media play`, `/media stop` and `/media fixlinks`. Radio needs ffmpeg and PyNaCl on the host.",
+    "requirements": [],
+    "tags": ["radio", "music", "voice", "stream", "youtube", "embed", "social", "webhook", "utility"],
+    "end_user_data_statement": "This cog stores per server: radio stream, status API and channel settings and the radio status message ID; the MusicBoard channel, reaction timeout and IDs of nominated messages; whether EmbedFixer is enabled; and per member, whether that member opted out of EmbedFixer. It does not store message content or voice audio."
+}

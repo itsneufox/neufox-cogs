@@ -1,0 +1,11 @@
+{
+    "name": "Utility",
+    "short": "Unit conversion, Urban Dictionary, open.mp docs, reminders, and a six seven auto-reply.",
+    "description": "One cog for everyday tools: /convert for units and fuel economy, /urban for Urban Dictionary, /wiki for the open.mp documentation, /remind for reminders delivered by DM, and an annoyed auto-reply to six seven jokes. Server settings live in the /control panel. Replaces the Converter, UrbanDictionary, Wiki, Reminders, and SixSeven cogs and keeps their saved data.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.24",
+    "install_msg": "Utility loaded! Unload the old converter, urbandictionary, wiki, reminders, and sixseven cogs first. Run `[p]slash enablecog utility` and `[p]slash sync` for /convert, /urban, /wiki, and /remind. Settings are in `[p]control`.",
+    "requirements": ["beautifulsoup4>=4.11.0"],
+    "tags": ["utility", "converter", "units", "urban dictionary", "dictionary", "wiki", "openmp", "documentation", "reminders", "fun"],
+    "end_user_data_statement": "This cog stores reminders (creator and target user IDs, server and channel IDs, timestamps, and reminder text) until they are delivered, cancelled, or deleted, plus per-server settings. Search terms are sent to Urban Dictionary and the open.mp documentation search only when a lookup command is used."
+}

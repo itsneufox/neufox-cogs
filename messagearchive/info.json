@@ -3,7 +3,7 @@
     "short": "Save all guild messages to local archive files.",
     "description": "Stores each guild message in a local SQLite database for retention and recovery workflows.",
     "author": ["itsneufox"],
-    "min_bot_version": "3.5.0",
+    "min_bot_version": "3.5.24",
     "install_msg": "MessageArchive loaded. Use [p]messagearchive on/off and [p]messagearchive status. Use [p]messagearchive backfill to import existing channel history.",
     "requirements": [],
     "tags": ["archive", "messages", "utility"],

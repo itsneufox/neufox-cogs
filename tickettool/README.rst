@@ -18,6 +18,8 @@ About this cog:
 
 A cog to manage a Tickets system!
 
+The ticket language is managed in the ``/control`` panel from the Control cog. Profiles are still managed with ``[p]settickettool``.
+
 ---------
 Commands:
 ---------

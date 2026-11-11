@@ -1,0 +1,18 @@
+{
+    "name": "Control",
+    "short": "One panel for every cog's settings, plus a slash /help.",
+    "description": "Adds a single /control panel where server admins can view and change the settings of every cog that supports it, and a /help menu that lists every loaded cog's slash commands by category, showing each member only the commands they can use.",
+    "author": [
+        "itsneufox"
+    ],
+    "min_bot_version": "3.5.24",
+    "install_msg": "Control loaded! Open the panel with `[p]control`, or use `/help` to browse slash commands. For the slash versions, run `[p]slash enablecog control` and then `[p]slash sync`.",
+    "requirements": [],
+    "tags": [
+        "admin",
+        "help",
+        "settings",
+        "utility"
+    ],
+    "end_user_data_statement": "This cog does not store any data."
+}

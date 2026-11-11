@@ -825,9 +825,14 @@ class BlackjackView(discord.ui.View):
                 payout,
                 guild_id=self.guild_id,
                 reason=f"blackjack payout; wager {self.total_wager}; returned {payout}",
+                wager=self.total_wager,
             )
         else:
             account = await self.cog.get_balance(self.player.id)
+        rake = int(account.get("rake", 0) or 0)
+        if rake:
+            payout -= rake
+            lines.append(f"House rake: {rake:,} {self.currency_name}")
         net = payout - self.total_wager
         if net > 0:
             lines.append(f"Net result: +{net:,} {self.currency_name}")

@@ -3,7 +3,7 @@
     "short": "On-demand temporary voice channels.",
     "description": "Creates a dashboard that lets members create and manage temporary voice channels on demand.",
     "author": ["itsneufox"],
-    "min_bot_version": "3.5.0",
+    "min_bot_version": "3.5.24",
     "install_msg": "VoiceChannels loaded! Use `[p]voicechannels setup <dashboard_channel> [category]` to post the creation dashboard. Members can use dashboard buttons to create and manage their temporary voice channel.",
     "requirements": [],
     "tags": ["voice", "channels", "temporary", "utility"],

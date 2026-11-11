@@ -3,7 +3,7 @@
     "short": "Weekly community voting for forum projects.",
     "description": "Adds 👍 and 👎 voting to forum project posts, tracks community votes, and promotes each week's most-liked project to a Best Creations channel with a permanent Community Favorite forum tag.",
     "author": ["itsneufox"],
-    "min_bot_version": "3.5.0",
+    "min_bot_version": "3.5.24",
     "install_msg": "ProjectRanking loaded! Configure it with `[p]projectrank setup <forum-id> <best-creations-channel-id> [tag name or ID]`.",
     "requirements": [],
     "tags": ["projects", "ranking", "voting", "forum"],

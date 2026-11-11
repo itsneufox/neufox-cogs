@@ -12,6 +12,25 @@ from redbot.core import Config, commands
 
 
 DEFAULT_COLOR = discord.Color.blue()
+MAX_LAYOUT_TEXT = 3800
+NO_PINGS = discord.AllowedMentions.none()
+
+
+def _layout(*blocks: str, accent: discord.Color = DEFAULT_COLOR) -> discord.ui.LayoutView:
+    """Build a read-only message, trimmed to Discord's total text limit."""
+    view = discord.ui.LayoutView(timeout=None)
+    items: list[discord.ui.Item] = []
+    remaining = MAX_LAYOUT_TEXT
+    for block in blocks:
+        text = block[:remaining]
+        if not text:
+            break
+        remaining -= len(text)
+        if items:
+            items.append(discord.ui.Separator())
+        items.append(discord.ui.TextDisplay(text))
+    view.add_item(discord.ui.Container(*items, accent_color=accent))
+    return view
 
 
 class MessageArchive(commands.Cog):
@@ -225,7 +244,21 @@ class MessageArchive(commands.Cog):
         async with lock:
             await asyncio.to_thread(self._insert_message, path, data)
 
-    @commands.group(name="messagearchive", aliases=["msgarchive"], invoke_without_command=True)
+    def control_panel_schema(self) -> dict:
+        return {
+            "title": "Message Archive",
+            "description": "Save this server's messages to local archive files.",
+            "settings": [
+                {
+                    "key": "message_archive_enabled",
+                    "label": "Archive messages",
+                    "type": "bool",
+                    "help": "Save new messages to this server's archive file.",
+                },
+            ],
+        }
+
+    @commands.hybrid_group(name="messagearchive", aliases=["msgarchive"], invoke_without_command=True)
     @commands.guild_only()
     async def messagearchive(self, ctx: commands.Context):
         """Save every guild message to local archive files."""
@@ -233,7 +266,7 @@ class MessageArchive(commands.Cog):
 
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    @messagearchive.command(name="on")
+    @messagearchive.command(name="on", hidden=True, with_app_command=False)
     async def messagearchive_on(self, ctx: commands.Context):
         """Enable message archiving in this server."""
         await self.config.guild(ctx.guild).message_archive_enabled.set(True)
@@ -241,7 +274,7 @@ class MessageArchive(commands.Cog):
 
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)
-    @messagearchive.command(name="off")
+    @messagearchive.command(name="off", hidden=True, with_app_command=False)
     async def messagearchive_off(self, ctx: commands.Context):
         """Disable message archiving in this server."""
         await self.config.guild(ctx.guild).message_archive_enabled.set(False)
@@ -256,7 +289,8 @@ class MessageArchive(commands.Cog):
         channel: discord.TextChannel | discord.Thread | None = None,
         limit: int = 0,
     ):
-        """Backfill existing messages into the archive (0 = no limit / all history)."""
+        """Backfill existing messages into the archive (0 = all history)."""
+        await ctx.defer()
         channels = [channel] if channel is not None else list(ctx.guild.text_channels) + list(ctx.guild.threads)
         if not channels:
             await ctx.send("No text channels found in this server.")
@@ -302,7 +336,14 @@ class MessageArchive(commands.Cog):
         message_parts = [f"Backfill complete. Scanned {total_scanned} messages, inserted {total_added} new messages."]
         if unavailable_channels:
             message_parts.append("Skipped channels: " + ", ".join(unavailable_channels))
-        await ctx.send(" ".join(message_parts))
+        summary = " ".join(message_parts)
+        try:
+            await ctx.send(summary)
+        except discord.HTTPException:
+            # A slash response stops working 15 minutes after the command started.
+            if ctx.interaction is None:
+                raise
+            await ctx.channel.send(summary, allowed_mentions=NO_PINGS)
 
     @commands.guild_only()
     @messagearchive.command(name="status")
@@ -316,12 +357,15 @@ class MessageArchive(commands.Cog):
         else:
             size_label = "0 bytes"
 
-        embed = discord.Embed(title="Message Archive", color=DEFAULT_COLOR)
-        embed.add_field(name="Status", value="Enabled" if enabled else "Disabled", inline=True)
-        embed.add_field(name="Archive File", value=f"`{path.name}`", inline=True)
-        embed.add_field(name="Messages", value=f"{rows:,}", inline=True)
-        embed.add_field(name="Size", value=size_label, inline=True)
-        await ctx.send(embed=embed)
+        details = "\n".join(
+            [
+                f"**Status:** {'Enabled' if enabled else 'Disabled'}",
+                f"**Archive file:** `{path.name}`",
+                f"**Messages:** {rows:,}",
+                f"**Size:** {size_label}",
+            ]
+        )
+        await ctx.send(view=_layout("## Message Archive", details), allowed_mentions=NO_PINGS)
 
     @commands.guild_only()
     @commands.admin_or_permissions(manage_guild=True)

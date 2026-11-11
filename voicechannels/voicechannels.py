@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import discord
-from redbot.core import Config, commands
+from redbot.core import Config, app_commands, commands
 
 
 BADWORDS_DIR = Path(__file__).with_name("badwords")
@@ -102,6 +102,44 @@ ACTION_MEMBER_PROMPTS = {
 }
 ACCESS_ACTIONS = ("invite", "trust", "untrust")
 MODERATION_ACTIONS = ("kick", "block", "unblock")
+DASHBOARD_BUTTONS = (
+    ("Create Channel", discord.ButtonStyle.primary, DASHBOARD_CUSTOM_ID, "create"),
+    ("Manage Channel", discord.ButtonStyle.secondary, "voicechannels:control", "control"),
+    ("Admin Controls", discord.ButtonStyle.secondary, "voicechannels:admin_control", "admin"),
+)
+MAX_LAYOUT_TEXT = 3800
+NO_PINGS = discord.AllowedMentions.none()
+
+
+def _layout(*blocks: str, accent: discord.Color = DEFAULT_COLOR) -> discord.ui.LayoutView:
+    """Build a read-only message, trimmed to Discord's total text limit."""
+    view = discord.ui.LayoutView(timeout=None)
+    items: list[discord.ui.Item] = []
+    remaining = MAX_LAYOUT_TEXT
+    for block in blocks:
+        text = block[:remaining]
+        if not text:
+            break
+        remaining -= len(text)
+        if items:
+            items.append(discord.ui.Separator())
+        items.append(discord.ui.TextDisplay(text))
+    view.add_item(discord.ui.Container(*items, accent_color=accent))
+    return view
+
+
+async def _run_dashboard_action(cog: "VoiceChannels", interaction: discord.Interaction, action: str):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
+        return
+    if action == "create":
+        await cog.create_member_channel(interaction)
+    elif action == "control":
+        await cog.send_owner_dashboard(interaction)
+    elif not cog._can_admin_manage(interaction.user):
+        await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
+    else:
+        await cog.send_admin_channel_picker(interaction)
 
 
 class VoiceDashboardView(discord.ui.View):
@@ -119,10 +157,7 @@ class VoiceDashboardView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
-            return
-        await self.cog.create_member_channel(interaction)
+        await _run_dashboard_action(self.cog, interaction, "create")
 
     @discord.ui.button(
         label="Manage Channel",
@@ -134,10 +169,7 @@ class VoiceDashboardView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
-            return
-        await self.cog.send_owner_dashboard(interaction)
+        await _run_dashboard_action(self.cog, interaction, "control")
 
     @discord.ui.button(
         label="Admin Controls",
@@ -149,13 +181,27 @@ class VoiceDashboardView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ):
-        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("This can only be used in a server.", ephemeral=True)
-            return
-        if not self.cog._can_admin_manage(interaction.user):
-            await interaction.response.send_message("Only server managers can use this.", ephemeral=True)
-            return
-        await self.cog.send_admin_channel_picker(interaction)
+        await _run_dashboard_action(self.cog, interaction, "admin")
+
+
+class VoiceDashboardLayout(discord.ui.LayoutView):
+    """New dashboard posts. Button IDs match VoiceDashboardView, which handles them after a restart."""
+
+    def __init__(self, cog: "VoiceChannels", body: str):
+        super().__init__(timeout=None)
+        row = discord.ui.ActionRow()
+        for label, style, custom_id, action in DASHBOARD_BUTTONS:
+            button = discord.ui.Button(label=label, style=style, custom_id=custom_id)
+            button.callback = self._callback(cog, action)
+            row.add_item(button)
+        self.add_item(discord.ui.Container(discord.ui.TextDisplay(body), row, accent_color=DEFAULT_COLOR))
+
+    @staticmethod
+    def _callback(cog: "VoiceChannels", action: str):
+        async def callback(interaction: discord.Interaction):
+            await _run_dashboard_action(cog, interaction, action)
+
+        return callback
 
 
 class AdminChannelPickerView(discord.ui.View):
@@ -330,12 +376,13 @@ class MemberActionSelect(discord.ui.UserSelect):
         )
 
 
-class VoiceOwnerDashboardView(discord.ui.View):
+class VoiceOwnerDashboardView(discord.ui.LayoutView):
     def __init__(
         self,
         cog: "VoiceChannels",
         owner_id: int,
         channel_id: int,
+        body: str,
         controller_id: int | None = None,
         admin_mode: bool = False,
     ):
@@ -345,6 +392,37 @@ class VoiceOwnerDashboardView(discord.ui.View):
         self.controller_id = controller_id or owner_id
         self.channel_id = channel_id
         self.admin_mode = admin_mode
+        secondary, primary, danger = (
+            discord.ButtonStyle.secondary,
+            discord.ButtonStyle.primary,
+            discord.ButtonStyle.danger,
+        )
+        self.add_item(
+            discord.ui.Container(
+                discord.ui.TextDisplay(body),
+                discord.ui.Separator(),
+                discord.ui.ActionRow(
+                    self._button("Settings", secondary, self.settings_button),
+                    self._button("Privacy", secondary, self.privacy_button),
+                    self._button("Access", primary, self.access_button),
+                ),
+                discord.ui.ActionRow(
+                    self._button("Moderation", danger, self.moderation_button),
+                    self._button("Transfer", primary, self.transfer_button),
+                ),
+                discord.ui.ActionRow(
+                    self._button("Refresh Panel", secondary, self.panel_button),
+                    self._button("Delete", danger, self.delete_button),
+                ),
+                accent_color=DEFAULT_COLOR,
+            )
+        )
+
+    @staticmethod
+    def _button(label: str, style: discord.ButtonStyle, callback) -> discord.ui.Button:
+        button = discord.ui.Button(label=label, style=style)
+        button.callback = callback
+        return button
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.controller_id:
@@ -352,8 +430,7 @@ class VoiceOwnerDashboardView(discord.ui.View):
         await interaction.response.send_message("This dashboard is not yours.", ephemeral=True)
         return False
 
-    @discord.ui.button(label="Settings", style=discord.ButtonStyle.secondary, row=0)
-    async def settings_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def settings_button(self, interaction: discord.Interaction):
         channel = await self.cog._validated_controlled_channel(
             interaction,
             self.channel_id,
@@ -373,12 +450,10 @@ class VoiceOwnerDashboardView(discord.ui.View):
             )
         )
 
-    @discord.ui.button(label="Privacy", style=discord.ButtonStyle.secondary, row=0)
-    async def privacy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def privacy_button(self, interaction: discord.Interaction):
         await self.cog.toggle_privacy(interaction, self.channel_id, admin_mode=self.admin_mode)
 
-    @discord.ui.button(label="Access", style=discord.ButtonStyle.primary, row=0)
-    async def access_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def access_button(self, interaction: discord.Interaction):
         await self.cog.send_member_picker(
             interaction,
             self.channel_id,
@@ -387,8 +462,7 @@ class VoiceOwnerDashboardView(discord.ui.View):
             admin_mode=self.admin_mode,
         )
 
-    @discord.ui.button(label="Moderation", style=discord.ButtonStyle.danger, row=1)
-    async def moderation_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def moderation_button(self, interaction: discord.Interaction):
         await self.cog.send_member_picker(
             interaction,
             self.channel_id,
@@ -397,8 +471,7 @@ class VoiceOwnerDashboardView(discord.ui.View):
             admin_mode=self.admin_mode,
         )
 
-    @discord.ui.button(label="Transfer", style=discord.ButtonStyle.primary, row=1)
-    async def transfer_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def transfer_button(self, interaction: discord.Interaction):
         await self.cog.send_member_picker(
             interaction,
             self.channel_id,
@@ -407,12 +480,10 @@ class VoiceOwnerDashboardView(discord.ui.View):
             admin_mode=self.admin_mode,
         )
 
-    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.secondary, row=2)
-    async def panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def panel_button(self, interaction: discord.Interaction):
         await self.cog.post_voice_channel_dashboard(interaction, self.channel_id, admin_mode=self.admin_mode)
 
-    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=2)
-    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def delete_button(self, interaction: discord.Interaction):
         await self.cog.delete_owned_channel(interaction, self.channel_id, admin_mode=self.admin_mode)
 
 
@@ -433,8 +504,62 @@ class VoiceChannels(commands.Cog):
         )
         self.bot.add_view(VoiceDashboardView(self))
 
-    @commands.group(name="voicechannels", invoke_without_command=True)
+    def control_panel_schema(self):
+        return {
+            "title": "Voice Channels",
+            "description": "Temporary voice channels created from a dashboard.",
+            "settings": [
+                {
+                    "key": "category_id",
+                    "label": "Category",
+                    "type": "channel",
+                    "channel_types": ["category"],
+                    "empty": "Default placement",
+                    "help": "Where new voice channels are created.",
+                },
+                {
+                    "key": "channel_name_template",
+                    "label": "Channel name",
+                    "type": "text",
+                    "help": "Use {member} for the creator's name.",
+                    "validate": lambda guild, value: self._name_template_error(value),
+                    "set": self._set_name_template,
+                },
+                {
+                    "key": "user_limit",
+                    "label": "User limit",
+                    "type": "int",
+                    "min": 0,
+                    "max": 99,
+                    "help": "Maximum members in a new channel. 0 means no limit.",
+                },
+                {
+                    "key": "log_channel_id",
+                    "label": "Log channel",
+                    "type": "channel",
+                    "channel_types": ["text", "news"],
+                    "help": "Where voice channel audit logs are sent.",
+                },
+            ],
+        }
+
+    def _normalized_name_template(self, template: str) -> str:
+        return self._clean_channel_name(template, fallback=DEFAULT_NAME_TEMPLATE, allow_member_placeholder=True)
+
+    def _name_template_error(self, template: str) -> str | None:
+        if len(self._normalized_name_template(template)) > CHANNEL_NAME_MAX_LENGTH:
+            return f"Channel name template must be {CHANNEL_NAME_MAX_LENGTH} characters or less."
+        return None
+
+    async def _set_name_template(self, guild: discord.Guild, template: str) -> str:
+        template = self._normalized_name_template(template)
+        await self.config.guild(guild).channel_name_template.set(template)
+        return template
+
+    @commands.hybrid_group(name="voicechannels", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
     async def voicechannels(self, ctx: commands.Context):
         """Manage on-demand voice channels."""
         await ctx.invoke(self.voicechannels_show)
@@ -444,34 +569,22 @@ class VoiceChannels(commands.Cog):
     async def voicechannels_help(self, ctx: commands.Context):
         """Show VoiceChannels help."""
         prefix = ctx.clean_prefix
-        embed = discord.Embed(
-            title="VoiceChannels Help",
-            description="Create and manage temporary voice channels from a dashboard.",
-            color=DEFAULT_COLOR,
-        )
-        embed.add_field(
-            name="Setup Commands",
-            value="\n".join(
-                [
-                    f"`{prefix}voicechannels setup <dashboard_channel> [category]` - configure and post dashboard",
-                    f"`{prefix}voicechannels dashboard` - repost the dashboard",
-                    f"`{prefix}voicechannels category [category]` - set or clear created-channel category",
-                    f"`{prefix}voicechannels name <template>` - set channel name template",
-                    f"`{prefix}voicechannels limit [0-99]` - set created-channel user limit",
-                    f"`{prefix}voicechannels logs <channel>` - set audit log channel",
-                    f"`{prefix}voicechannels show` - show current settings",
-                    f"`{prefix}voicechannels cleanup` - delete empty tracked channels and forget missing ones",
-                    f"`{prefix}voicechannels history [channel]` - show temporary channel history",
-                ]
+        await ctx.send(
+            view=_layout(
+                "## VoiceChannels Help\nCreate and manage temporary voice channels from a dashboard.",
+                "### Commands\n"
+                f"`{prefix}voicechannels setup <dashboard_channel> [category]` - configure and post dashboard\n"
+                f"`{prefix}voicechannels dashboard` - repost the dashboard\n"
+                f"`{prefix}voicechannels show` - show current settings\n"
+                f"`{prefix}voicechannels cleanup` - delete empty tracked channels and forget missing ones\n"
+                f"`{prefix}voicechannels history [channel]` - show temporary channel history\n"
+                "The category, name template, user limit and log channel are in `/control`.",
+                "### Member Controls\n"
+                "Members use dashboard buttons to create a channel, change settings/privacy, invite or block members, "
+                "transfer ownership, refresh the panel, and delete their channel.",
             ),
-            inline=False,
+            allowed_mentions=NO_PINGS,
         )
-        embed.add_field(
-            name="Member Controls",
-            value="Members use dashboard buttons to create a channel, change settings/privacy, invite or block members, transfer ownership, refresh the panel, and delete their channel.",
-            inline=False,
-        )
-        await ctx.send(embed=embed)
 
     @voicechannels.command(name="setup")
     @commands.admin_or_permissions(manage_guild=True)
@@ -483,13 +596,14 @@ class VoiceChannels(commands.Cog):
         category: discord.CategoryChannel | None = None,
     ):
         """Configure and post the voice channel dashboard."""
+        await ctx.defer()
         category = category or dashboard_channel.category
         await self.config.guild(ctx.guild).dashboard_channel_id.set(dashboard_channel.id)
         await self.config.guild(ctx.guild).category_id.set(category.id if category else None)
 
         message = await dashboard_channel.send(
-            embed=self._dashboard_embed(ctx.guild, category),
-            view=VoiceDashboardView(self),
+            view=VoiceDashboardLayout(self, self._dashboard_text()),
+            allowed_mentions=NO_PINGS,
         )
         await self.config.guild(ctx.guild).dashboard_message_id.set(message.id)
         warnings = self._setup_warnings(ctx.guild, dashboard_channel, category)
@@ -506,21 +620,21 @@ class VoiceChannels(commands.Cog):
     @commands.bot_has_permissions(send_messages=True, embed_links=True)
     async def voicechannels_dashboard(self, ctx: commands.Context):
         """Repost the dashboard using the current configuration."""
+        await ctx.defer()
         data = await self.config.guild(ctx.guild).all()
         dashboard_channel = self._text_channel(ctx.guild, data["dashboard_channel_id"])
-        category = self._category(ctx.guild, data["category_id"])
         if dashboard_channel is None:
             await ctx.send("Set a dashboard channel first with `voicechannels setup <channel> [category]`.")
             return
 
         message = await dashboard_channel.send(
-            embed=self._dashboard_embed(ctx.guild, category),
-            view=VoiceDashboardView(self),
+            view=VoiceDashboardLayout(self, self._dashboard_text()),
+            allowed_mentions=NO_PINGS,
         )
         await self.config.guild(ctx.guild).dashboard_message_id.set(message.id)
         await ctx.send(f"Voice channel dashboard posted in {dashboard_channel.mention}.")
 
-    @voicechannels.command(name="category")
+    @voicechannels.command(name="category", hidden=True, with_app_command=False)
     @commands.admin_or_permissions(manage_guild=True)
     async def voicechannels_category(
         self,
@@ -534,18 +648,18 @@ class VoiceChannels(commands.Cog):
         else:
             await ctx.send("New voice channels will use Discord's default placement.")
 
-    @voicechannels.command(name="name")
+    @voicechannels.command(name="name", hidden=True, with_app_command=False)
     @commands.admin_or_permissions(manage_guild=True)
     async def voicechannels_name(self, ctx: commands.Context, *, template: str):
         """Set the created channel name. Use {member} for the creator name."""
-        template = self._clean_channel_name(template, fallback=DEFAULT_NAME_TEMPLATE, allow_member_placeholder=True)
-        if len(template) > CHANNEL_NAME_MAX_LENGTH:
-            await ctx.send(f"Channel name template must be {CHANNEL_NAME_MAX_LENGTH} characters or less.")
+        error = self._name_template_error(template)
+        if error:
+            await ctx.send(error)
             return
-        await self.config.guild(ctx.guild).channel_name_template.set(template)
+        template = await self._set_name_template(ctx.guild, template)
         await ctx.send(f"Voice channel name template set to `{template}`.")
 
-    @voicechannels.command(name="limit")
+    @voicechannels.command(name="limit", hidden=True, with_app_command=False)
     @commands.admin_or_permissions(manage_guild=True)
     async def voicechannels_limit(self, ctx: commands.Context, limit: int = 0):
         """Set the user limit for created channels. Use 0 for no limit."""
@@ -555,7 +669,7 @@ class VoiceChannels(commands.Cog):
         await self.config.guild(ctx.guild).user_limit.set(limit)
         await ctx.send("Created voice channels will have no user limit." if limit == 0 else f"Created voice channels will have a user limit of {limit}.")
 
-    @voicechannels.command(name="logs")
+    @voicechannels.command(name="logs", hidden=True, with_app_command=False)
     @commands.admin_or_permissions(manage_guild=True)
     async def voicechannels_logs(
         self,
@@ -576,60 +690,40 @@ class VoiceChannels(commands.Cog):
         category = self._category(ctx.guild, data["category_id"])
         active_count = len(data["created_channels"])
 
-        embed = discord.Embed(title="VoiceChannels Configuration", color=DEFAULT_COLOR)
-        embed.add_field(
-            name="Dashboard Channel",
-            value=dashboard_channel.mention if dashboard_channel else "Not set",
-            inline=True,
+        details = "\n".join(
+            [
+                f"**Dashboard channel:** {dashboard_channel.mention if dashboard_channel else 'Not set'}",
+                f"**Category:** {category.name if category else 'Default placement'}",
+                f"**User limit:** {data['user_limit'] if data['user_limit'] else 'None'}",
+                f"**Log channel:** {log_channel.mention if log_channel else 'Not set'}",
+                f"**Name template:** `{data['channel_name_template']}`",
+                f"**Tracked channels:** {active_count}",
+            ]
         )
-        embed.add_field(
-            name="Category",
-            value=category.name if category else "Default placement",
-            inline=True,
-        )
-        embed.add_field(
-            name="User Limit",
-            value=str(data["user_limit"]) if data["user_limit"] else "None",
-            inline=True,
-        )
-        embed.add_field(
-            name="Log Channel",
-            value=log_channel.mention if log_channel else "Not set",
-            inline=True,
-        )
-        embed.add_field(name="Name Template", value=f"`{data['channel_name_template']}`", inline=False)
-        embed.add_field(name="Tracked Channels", value=str(active_count), inline=True)
-
         prefix = ctx.clean_prefix
-        embed.add_field(
-            name="Commands",
-            value=(
+        await ctx.send(
+            view=_layout(
+                "## VoiceChannels Configuration",
+                details,
+                "### Commands\n"
                 f"`{prefix}voicechannels setup <dashboard_channel> [category]`\n"
                 f"`{prefix}voicechannels dashboard`\n"
-                f"`{prefix}voicechannels category [category]`\n"
-                f"`{prefix}voicechannels name <template>`\n"
-                f"`{prefix}voicechannels limit [0-99]`\n"
-                f"`{prefix}voicechannels logs [channel]`\n"
                 f"`{prefix}voicechannels history [channel]`\n"
-                f"`{prefix}voicechannels cleanup`"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Member Dashboard",
-            value=(
+                f"`{prefix}voicechannels cleanup`\n"
+                "Other settings are in `/control`.",
+                "### Member Dashboard\n"
                 "Members use the dashboard buttons to create and control their own temporary channels: "
-                "settings, privacy, invite, allow, remove allow, kick, block, unblock, transfer, refresh panel, and delete."
+                "settings, privacy, invite, allow, remove allow, kick, block, unblock, transfer, refresh panel, and delete.",
             ),
-            inline=False,
+            allowed_mentions=NO_PINGS,
         )
-        await ctx.send(embed=embed)
 
     @voicechannels.command(name="cleanup")
     @commands.admin_or_permissions(manage_guild=True)
     @commands.bot_has_permissions(manage_channels=True)
     async def voicechannels_cleanup(self, ctx: commands.Context):
         """Delete empty tracked channels and forget missing ones."""
+        await ctx.defer()
         deleted, forgotten = await self.cleanup_guild_channels(ctx.guild)
         await ctx.send(f"Cleanup complete: deleted {deleted}, forgot {forgotten}.")
 
@@ -658,10 +752,12 @@ class VoiceChannels(commands.Cog):
             return
         record = self._normalize_record(raw_record)
         history = record.get("history", [])
-        embed = discord.Embed(title=f"Voice Channel History: {channel.name}", color=DEFAULT_COLOR)
-        embed.add_field(name="Current Owner", value=self._member_label(ctx.guild, int(record["owner_id"])), inline=False)
+        blocks = [
+            f"## Voice Channel History: {channel.name}\n"
+            f"**Current owner:** {self._member_label(ctx.guild, int(record['owner_id']))}"
+        ]
         if not history:
-            embed.description = "No recorded events yet."
+            blocks.append("No recorded events yet.")
         else:
             lines = []
             for event in history[-10:]:
@@ -672,9 +768,9 @@ class VoiceChannels(commands.Cog):
                 target = f" -> {self._member_label(ctx.guild, int(target_id))}" if target_id else ""
                 detail = str(event.get("detail", ""))
                 lines.append(f"<t:{timestamp}:R> **{action}** by {actor}{target}{f' - {detail}' if detail else ''}")
-            embed.description = "\n".join(lines)
-            embed.set_footer(text=f"Showing last {min(len(history), 10)} of {len(history)} recorded events.")
-        await ctx.send(embed=embed)
+            blocks.append("\n".join(lines))
+            blocks.append(f"-# Showing last {min(len(history), 10)} of {len(history)} recorded events.")
+        await ctx.send(view=_layout(*blocks), allowed_mentions=NO_PINGS)
 
     async def create_member_channel(self, interaction: discord.Interaction):
         guild = interaction.guild
@@ -754,9 +850,9 @@ class VoiceChannels(commands.Cog):
             await interaction.response.send_message("You do not have an active voice channel.", ephemeral=True)
             return
         await interaction.response.send_message(
-            embed=self._owner_dashboard_embed(channel, record),
-            view=VoiceOwnerDashboardView(self, interaction.user.id, channel.id),
+            view=self._owner_dashboard_view(channel, record, interaction.user.id),
             ephemeral=True,
+            allowed_mentions=NO_PINGS,
         )
 
     async def send_admin_channel_picker(self, interaction: discord.Interaction):
@@ -792,15 +888,16 @@ class VoiceChannels(commands.Cog):
             return
 
         await interaction.response.send_message(
-            embed=self._owner_dashboard_embed(channel, record, admin_viewer=interaction.user),
-            view=VoiceOwnerDashboardView(
-                self,
+            view=self._owner_dashboard_view(
+                channel,
+                record,
                 int(record["owner_id"]),
-                channel.id,
                 controller_id=interaction.user.id,
                 admin_mode=True,
+                admin_viewer=interaction.user,
             ),
             ephemeral=True,
+            allowed_mentions=NO_PINGS,
         )
 
     async def post_voice_channel_dashboard(
@@ -1222,9 +1319,8 @@ class VoiceChannels(commands.Cog):
             return False
         try:
             message = await channel.send(
-                embed=self._owner_dashboard_embed(channel, record),
-                view=VoiceOwnerDashboardView(self, owner_id, channel.id),
-                allowed_mentions=discord.AllowedMentions.none(),
+                view=self._owner_dashboard_view(channel, record, owner_id),
+                allowed_mentions=NO_PINGS,
             )
             await self._set_panel_message_id(channel.guild, channel.id, message.id)
             return True
@@ -1260,10 +1356,18 @@ class VoiceChannels(commands.Cog):
         owner_id = int(owner_id or record["owner_id"])
         try:
             message = await channel.fetch_message(int(message_id))
+            if not message.flags.components_v2:
+                # Panels posted before the new layout cannot be edited into it, so replace them.
+                if not await self._send_voice_channel_dashboard_message(channel, owner_id):
+                    return False
+                try:
+                    await message.delete()
+                except discord.HTTPException:
+                    pass
+                return True
             await message.edit(
-                embed=self._owner_dashboard_embed(channel, record),
-                view=VoiceOwnerDashboardView(self, owner_id, channel.id),
-                allowed_mentions=discord.AllowedMentions.none(),
+                view=self._owner_dashboard_view(channel, record, owner_id),
+                allowed_mentions=NO_PINGS,
             )
             return True
         except (AttributeError, discord.Forbidden, discord.NotFound, discord.HTTPException):
@@ -1386,21 +1490,14 @@ class VoiceChannels(commands.Cog):
     def _actions_for(actions: tuple[str, ...]) -> dict[str, str]:
         return {action: ACTION_LABELS[action] for action in actions}
 
-    def _dashboard_embed(
-        self,
-        guild: discord.Guild,
-        category: discord.CategoryChannel | None,
-    ) -> discord.Embed:
-        embed = discord.Embed(
-            title="Temporary Voice Channels",
-            description=(
-                "Create a temporary voice channel when you need one.\n"
-                "Your controls will appear in the text chat attached to the voice channel."
-            ),
-            color=DEFAULT_COLOR,
+    @staticmethod
+    def _dashboard_text() -> str:
+        return (
+            "## Temporary Voice Channels\n"
+            "Create a temporary voice channel when you need one.\n"
+            "Your controls will appear in the text chat attached to the voice channel.\n"
+            "-# Empty temporary channels are deleted after 2 minutes."
         )
-        embed.set_footer(text="Empty temporary channels are deleted after 2 minutes.")
-        return embed
 
     def _creation_notice(
         self,
@@ -1427,34 +1524,51 @@ class VoiceChannels(commands.Cog):
             "Use **Manage Channel** on the main dashboard to open your controls."
         )
 
-    def _owner_dashboard_embed(
+    def _owner_dashboard_view(
         self,
         channel: discord.VoiceChannel,
         record: dict,
+        owner_id: int,
+        *,
+        controller_id: int | None = None,
+        admin_mode: bool = False,
         admin_viewer: discord.Member | None = None,
-    ) -> discord.Embed:
-        owner = channel.guild.get_member(int(record["owner_id"]))
-        allowed = len(record.get("trusted_ids", []))
-        blocked = len(record.get("blocked_ids", []))
-        embed = discord.Embed(
-            title="Admin Voice Channel Controls" if admin_viewer else "Voice Channel Controls",
-            description=(
-                f"Managing {channel.mention}\n"
-                f"Owner: {owner.mention if owner else 'Unknown'}\n"
-                + (f"Admin viewer: {admin_viewer.mention}\n" if admin_viewer else "")
-                +
-                "**Access** is for invite and allow-list changes.\n"
-                "**Moderation** is for kick, block, and unblock actions.\n"
-                "**Transfer** changes the temporary channel owner."
-            ),
-            color=DEFAULT_COLOR,
+    ) -> VoiceOwnerDashboardView:
+        return VoiceOwnerDashboardView(
+            self,
+            owner_id,
+            channel.id,
+            self._owner_dashboard_text(channel, record, admin_viewer),
+            controller_id=controller_id,
+            admin_mode=admin_mode,
         )
-        embed.add_field(name="Privacy", value="Private" if record.get("private") else "Public", inline=True)
-        embed.add_field(name="User Limit", value=str(channel.user_limit) if channel.user_limit else "None", inline=True)
-        embed.add_field(name="Allowed", value=str(allowed), inline=True)
-        embed.add_field(name="Blocked", value=str(blocked), inline=True)
-        embed.set_footer(text="This panel is also posted in the voice channel chat.")
-        return embed
+
+    @staticmethod
+    def _owner_dashboard_text(
+        channel: discord.VoiceChannel,
+        record: dict,
+        admin_viewer: discord.Member | None = None,
+    ) -> str:
+        owner = channel.guild.get_member(int(record["owner_id"]))
+        lines = [
+            f"## {'Admin Voice Channel Controls' if admin_viewer else 'Voice Channel Controls'}",
+            f"Managing {channel.mention}",
+            f"**Owner:** {owner.mention if owner else 'Unknown'}",
+        ]
+        if admin_viewer:
+            lines.append(f"**Admin viewer:** {admin_viewer.mention}")
+        lines += [
+            f"**Privacy:** {'Private' if record.get('private') else 'Public'}",
+            f"**User limit:** {channel.user_limit if channel.user_limit else 'None'}",
+            f"**Allowed:** {len(record.get('trusted_ids', []))}",
+            f"**Blocked:** {len(record.get('blocked_ids', []))}",
+            "",
+            "**Access** is for invite and allow-list changes.",
+            "**Moderation** is for kick, block, and unblock actions.",
+            "**Transfer** changes the temporary channel owner.",
+            "-# This panel is also posted in the voice channel chat.",
+        ]
+        return "\n".join(lines)
 
     async def _notify_invited_member(
         self,

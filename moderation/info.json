@@ -1,0 +1,11 @@
+{
+    "name": "Moderation",
+    "short": "Moderation actions, cases, AutoMod and a honeypot in one cog.",
+    "description": "One moderation cog: ban, kick, softban, hackban, unban, timeout, warn and purge with confirmations, DM notices and a shared case log; warning punishments; user info with name history; bilingual (English/Portuguese) mention-based moderation; AutoMod spam detection (message rate, command spam, mentions, caps, links) with strike escalation and server lockdowns; and a honeypot trap channel. Replaces the AdminHelper, AntiAbuse and Honeypot cogs and keeps their saved data.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.24",
+    "install_msg": "Moderation loaded. If you used AdminHelper, AntiAbuse or Honeypot, unload them: their settings, cases and warnings carry over automatically. Use `/mod` or `[p]mod help` for commands and `/control` for settings. For slash commands run `[p]slash enablecog Moderation` and `[p]slash sync`.",
+    "requirements": [],
+    "tags": ["moderation", "admin", "security", "automod", "abuse", "automation"],
+    "end_user_data_statement": "This cog stores guild moderation settings; moderation cases containing action types, target IDs/names, moderator IDs/names, reasons, timestamps, durations and details; configured warning punishments with creator IDs; per-member manual warnings (moderator ID, reason, timestamp, case ID); per-member AutoMod strike counts and timestamps; lockdown state; the honeypot channel and role settings; and, while name tracking is enabled, previous usernames, global display names and server nicknames."
+}

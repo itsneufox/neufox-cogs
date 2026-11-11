@@ -492,9 +492,14 @@ class MinesView(discord.ui.View):
                 reason=(
                     f"{reason}; wager {self.wager}; returned {payout}"
                 ),
+                wager=self.wager,
             )
         else:
             account = await self.cog.get_balance(self.player.id)
+        rake = int(account.get("rake", 0) or 0)
+        if rake:
+            payout -= rake
+            lines.append(f"House rake: {rake:,} {self.currency_name}")
 
         net = payout - self.wager
         if net > 0:

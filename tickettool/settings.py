@@ -2,6 +2,7 @@ import discord
 import typing
 from redbot.core import commands
 
+from .layouts import NO_PINGS, info_layout
 from .locales import get_text, LANGUAGE_NAMES
 from .utils import Emoji, EmojiLabelDescriptionValueConverter, CustomModalConverter
 
@@ -29,6 +30,22 @@ class MyMessageConverter(commands.MessageConverter):
 
 
 class settings(commands.Cog):
+    def control_panel_schema(self):
+        return {
+            "title": "TicketTool",
+            "description": "Ticket system language. Profiles are managed with settickettool.",
+            "access": "admin",
+            "settings": [
+                {
+                    "key": "language",
+                    "label": "Language",
+                    "type": "choice",
+                    "choices": [{"value": code, "label": LANGUAGE_NAMES.get(code, code)} for code in ("en", "pt-br")],
+                    "help": "Language used by this server's ticket system.",
+                },
+            ],
+        }
+
     @commands.guild_only()
     @commands.admin_or_permissions(administrator=True)
     @commands.hybrid_group(name="settickettool", aliases=["tickettoolset"])
@@ -40,14 +57,10 @@ class settings(commands.Cog):
     async def configuration_help(self, ctx: commands.Context) -> None:
         """Show TicketTool setup help."""
         prefix = ctx.clean_prefix
-        embed = discord.Embed(
-            title="TicketTool Setup Help",
-            description="Admin commands for ticket profiles and settings.",
-            color=discord.Color.blue(),
-        )
-        embed.add_field(
-            name="Profiles",
-            value="\n".join(
+        sections = [
+            (
+                "Profiles",
+                "\n".join(
                 [
                     f"`{prefix}settickettool profile` - list profiles",
                     f"`{prefix}settickettool profile create <name>` - create a profile",
@@ -55,11 +68,10 @@ class settings(commands.Cog):
                     f"`{prefix}settickettool enable <profile> <true|false>` - enable or disable a profile",
                 ]
             ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Channels",
-            value="\n".join(
+            ),
+            (
+                "Channels",
+                "\n".join(
                 [
                     f"`{prefix}settickettool logschannel <profile> [channel]`",
                     f"`{prefix}settickettool forumchannel <profile> [channel]`",
@@ -67,11 +79,10 @@ class settings(commands.Cog):
                     f"`{prefix}settickettool categoryclose <profile> [category]`",
                 ]
             ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Roles",
-            value="\n".join(
+            ),
+            (
+                "Roles",
+                "\n".join(
                 [
                     f"`{prefix}settickettool adminroles <profile> [roles...]`",
                     f"`{prefix}settickettool supportroles <profile> [roles...]`",
@@ -80,11 +91,10 @@ class settings(commands.Cog):
                     f"`{prefix}settickettool ticketrole <profile> [role]`",
                 ]
             ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Behavior And Panel",
-            value="\n".join(
+            ),
+            (
+                "Behavior And Panel",
+                "\n".join(
                 [
                     f"`{prefix}settickettool nbmax <profile> <number>`",
                     f"`{prefix}settickettool usercanclose <profile> <true|false>`",
@@ -95,24 +105,35 @@ class settings(commands.Cog):
                     f"`{prefix}settickettool language <language>`",
                 ]
             ),
-            inline=False,
+            ),
+        ]
+        await ctx.send(
+            view=info_layout(
+                "TicketTool Setup Help",
+                "Admin commands for ticket profiles and settings.",
+                sections,
+                discord.Color.blue(),
+            ),
+            allowed_mentions=NO_PINGS,
         )
-        await ctx.send(embed=embed)
 
     # ── Profile management ──────────────────────────────────────────────────
 
-    @configuration.group(name="profile", invoke_without_command=True)
+    @configuration.group(name="profile", invoke_without_command=True, fallback="list")
     async def profile_group(self, ctx: commands.Context) -> None:
         """Manage ticket profiles."""
         profiles = await self.config.guild(ctx.guild).profiles()
         if not profiles:
             await ctx.send("No profiles configured. Use `settickettool profile create <name>`.")
             return
-        embed = discord.Embed(title="Ticket Profiles", color=discord.Color.blue())
-        for name, data in profiles.items():
-            status = "✅ Enabled" if data.get("enable") else "❌ Disabled"
-            embed.add_field(name=name, value=status, inline=True)
-        await ctx.send(embed=embed)
+        lines = [
+            f"**{discord.utils.escape_markdown(name)}**: {'✅ Enabled' if data.get('enable') else '❌ Disabled'}"
+            for name, data in profiles.items()
+        ]
+        await ctx.send(
+            view=info_layout("Ticket Profiles", "\n".join(lines)[:3800], color=discord.Color.blue()),
+            allowed_mentions=NO_PINGS,
+        )
 
     @profile_group.command(name="create")
     async def profile_create(self, ctx: commands.Context, name: str) -> None:
@@ -452,6 +473,8 @@ class settings(commands.Cog):
         - `[p]settickettool message <profile> #general`
         - `[p]settickettool message <profile> #general "🐛|Bug Report|Report a bug|bug" "⚠️|User Report|Report a user|user"`
         """
+        if ctx.interaction is not None and not ctx.interaction.response.is_done():
+            await ctx.defer(ephemeral=True)
         if channel is None:
             channel = message.channel if message is not None else ctx.channel
         channel_permissions = channel.permissions_for(ctx.me)
@@ -539,10 +562,12 @@ class settings(commands.Cog):
                 for emoji, label, description, value in reason_options
             ]
             await self.config.guild(ctx.guild).dropdowns.set(dropdowns_config)
+        if ctx.interaction is not None:
+            await ctx.send(get_text(lang, "slash_done"), ephemeral=True)
 
     # ── Language ─────────────────────────────────────────────────────────────
 
-    @configuration.command(name="language", aliases=["lang", "idioma"])
+    @configuration.command(name="language", aliases=["lang", "idioma"], hidden=True, with_app_command=False)
     async def language(
         self,
         ctx: commands.Context,

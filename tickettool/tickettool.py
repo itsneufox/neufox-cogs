@@ -13,6 +13,7 @@ from redbot.core.bot import Red
 from redbot.core.utils.chat_formatting import pagify
 
 from .dashboard_integration import DashboardIntegration
+from .layouts import ConfirmLayout, NO_PINGS, PagesLayout, info_layout
 from .locales import get_text, LANGUAGE_NAMES
 from .settings import settings
 from .ticket import Ticket
@@ -21,40 +22,14 @@ from .utils import CustomModalConverter
 log = logging.getLogger("red.neufox.tickettool")
 
 
-class ConfirmView(discord.ui.View):
-    def __init__(self, author_id: int):
-        super().__init__(timeout=60)
-        self.result: typing.Optional[bool] = None
-        self.author_id = author_id
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "This confirmation isn't for you.", ephemeral=True
-            )
-            return False
-        return True
-
-    @discord.ui.button(label="Yes", style=discord.ButtonStyle.success)
-    async def yes(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.result = True
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(view=self)
-        self.stop()
-
-    @discord.ui.button(label="No", style=discord.ButtonStyle.danger)
-    async def no(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.result = False
-        for item in self.children:
-            item.disabled = True
-        await interaction.response.edit_message(view=self)
-        self.stop()
-
-
-async def _confirm(ctx: commands.Context, embed: discord.Embed) -> bool:
-    view = ConfirmView(ctx.author.id)
-    msg = await ctx.send(embed=embed, view=view)
+async def _confirm(
+    ctx: commands.Context,
+    title: str,
+    color,
+    description: typing.Optional[str] = None,
+) -> bool:
+    view = ConfirmLayout(ctx.author.id, title, description, color, ctx.author.name)
+    msg = await ctx.send(view=view, allowed_mentions=NO_PINGS)
     await view.wait()
     try:
         await msg.delete()
@@ -63,43 +38,20 @@ async def _confirm(ctx: commands.Context, embed: discord.Embed) -> bool:
     return view.result is True
 
 
-async def _paginate(ctx: commands.Context, embeds: typing.List[discord.Embed]) -> None:
-    if not embeds:
+async def _defer_slash(ctx: commands.Context, *, ephemeral: bool = True) -> None:
+    """Hold a slash response open for slow work. Prefix commands are unaffected."""
+    if ctx.interaction is not None and not ctx.interaction.response.is_done():
+        await ctx.defer(ephemeral=ephemeral)
+
+
+async def _ack_slash(ctx: commands.Context, lang: str) -> None:
+    """Finish a slash command that posts its result in the ticket instead of replying."""
+    if ctx.interaction is None:
         return
-    if len(embeds) == 1:
-        await ctx.send(embed=embeds[0])
-        return
-
-    current = 0
-    total = len(embeds)
-
-    class PaginatorView(discord.ui.View):
-        def __init__(self):
-            super().__init__(timeout=120)
-
-        async def _check(self, interaction: discord.Interaction) -> bool:
-            if interaction.user.id != ctx.author.id:
-                await interaction.response.send_message("Not for you.", ephemeral=True)
-                return False
-            return True
-
-        @discord.ui.button(emoji="◀", style=discord.ButtonStyle.secondary)
-        async def prev_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-            nonlocal current
-            if not await self._check(interaction):
-                return
-            current = (current - 1) % total
-            await interaction.response.edit_message(embed=embeds[current])
-
-        @discord.ui.button(emoji="▶", style=discord.ButtonStyle.secondary)
-        async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
-            nonlocal current
-            if not await self._check(interaction):
-                return
-            current = (current + 1) % total
-            await interaction.response.edit_message(embed=embeds[current])
-
-    await ctx.send(embed=embeds[0], view=PaginatorView())
+    try:
+        await ctx.send(get_text(lang, "slash_done"), ephemeral=True)
+    except discord.HTTPException:  # The ticket channel may have just been deleted.
+        pass
 
 
 class TicketTool(settings, DashboardIntegration, commands.Cog):
@@ -853,25 +805,20 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
     async def command_help(self, ctx: commands.Context) -> None:
         """Show TicketTool help."""
         prefix = ctx.clean_prefix
-        embed = discord.Embed(
-            title="Ticket Help",
-            description="Create and manage support tickets.",
-            color=await ctx.embed_color(),
-        )
-        embed.add_field(
-            name="Create Tickets",
-            value="\n".join(
+        sections = [
+            (
+                "Create Tickets",
+                "\n".join(
                 [
                     f"`{prefix}ticket create [profile] [reason]` - create a ticket",
                     f"`{prefix}ticket + [profile] [reason]` - short create alias",
                     f"`{prefix}ticket createfor [profile] <member> [reason]` - create for a member",
                 ]
             ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Ticket Actions",
-            value="\n".join(
+            ),
+            (
+                "Ticket Actions",
+                "\n".join(
                 [
                     f"`{prefix}ticket export` - export ticket transcript",
                     f"`{prefix}ticket close [reason]` - close a ticket",
@@ -882,11 +829,10 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
                     f"`{prefix}ticket delete [reason]` - delete a ticket",
                 ]
             ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Members And Staff",
-            value="\n".join(
+            ),
+            (
+                "Members And Staff",
+                "\n".join(
                 [
                     f"`{prefix}ticket claim [member] [reason]` - claim a ticket",
                     f"`{prefix}ticket unclaim [reason]` - unclaim a ticket",
@@ -896,14 +842,21 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
                     f"`{prefix}ticket list <profile> [open|close|all] [owner]` - list tickets",
                 ]
             ),
-            inline=False,
+            ),
+            (
+                "Admin Setup",
+                f"`{prefix}settickettool help` - show ticket setup commands",
+            ),
+        ]
+        await ctx.send(
+            view=info_layout(
+                "Ticket Help",
+                "Create and manage support tickets.",
+                sections,
+                await ctx.embed_color(),
+            ),
+            allowed_mentions=NO_PINGS,
         )
-        embed.add_field(
-            name="Admin Setup",
-            value=f"`{prefix}settickettool help` - show ticket setup commands",
-            inline=False,
-        )
-        await ctx.send(embed=embed)
 
     @ticket.command(name="create", aliases=["+"])
     async def command_create(
@@ -917,6 +870,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
 
         If only one profile exists on this server you don't need to specify its name.
         """
+        await _defer_slash(ctx)
         lang = await self.get_lang(ctx.guild)
         if profile is None:
             profiles = await self.config.guild(ctx.guild).profiles()
@@ -947,7 +901,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
                 inputs.append(text_input)
                 modal.add_item(text_input)
 
-            view = discord.ui.View()
+            view = discord.ui.LayoutView()
 
             async def _interaction_check(interaction: discord.Interaction) -> bool:
                 if interaction.user.id not in [ctx.author.id] + list(ctx.bot.owner_ids):
@@ -969,8 +923,14 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
                 view.stop()
 
             button.callback = _send_modal
-            view.add_item(button)
-            msg = await ctx.send(get_text(lang, "provide_info"), view=view)
+            view.add_item(
+                discord.ui.Container(
+                    discord.ui.TextDisplay(get_text(lang, "provide_info")),
+                    discord.ui.ActionRow(button),
+                    accent_color=config["color"],
+                )
+            )
+            msg = await ctx.send(view=view, allowed_mentions=NO_PINGS)
             timeout = await view.wait()
             try:
                 await msg.delete()
@@ -989,6 +949,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
             ctx.guild, ctx.author, profile, reason,
             modal_answers=modal_answers, prefix=ctx.prefix,
         )
+        await _ack_slash(ctx, lang)
 
     @commands.mod_or_permissions(manage_channels=True)
     @ticket.command(name="createfor")
@@ -1001,6 +962,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         reason: typing.Optional[str] = None,
     ):
         """Create a Ticket for a member."""
+        await _defer_slash(ctx)
         lang = await self.get_lang(ctx.guild)
         if profile is None:
             profiles = await self.config.guild(ctx.guild).profiles()
@@ -1018,6 +980,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         await self._create_ticket_core(
             ctx.guild, ctx.author, profile, reason, member=member, prefix=ctx.prefix
         )
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1036,6 +999,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
     @ticket.command(name="export")
     async def command_export(self, ctx: commands.Context) -> None:
         """Export all messages of a Ticket as an HTML file."""
+        await _defer_slash(ctx, ephemeral=False)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         transcript = await chat_exporter.export(
             channel=ticket.channel,
@@ -1082,6 +1046,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         self, ctx: commands.Context, *, reason: typing.Optional[str] = None
     ) -> None:
         """Open an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         config = await self.get_config(ticket.guild, ticket.profile)
         lang = await self.get_lang(ctx.guild)
@@ -1090,6 +1055,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.open(ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1114,6 +1080,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         reason: typing.Optional[str] = None,
     ) -> None:
         """Close an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         config = await self.get_config(ticket.guild, ticket.profile)
         lang = await self.get_lang(ctx.guild)
@@ -1123,19 +1090,12 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         if confirmation is None:
             confirmation = not config["close_confirmation"]
         if not confirmation and not ctx.assume_yes:
-            embed = discord.Embed()
-            embed.title = get_text(lang, "confirm_close", id=ticket.id)
-            embed.color = config["color"]
-            embed.set_author(
-                name=ctx.author.name,
-                url=ctx.author.display_avatar,
-                icon_url=ctx.author.display_avatar,
-            )
-            if not await _confirm(ctx, embed):
+            if not await _confirm(ctx, get_text(lang, "confirm_close", id=ticket.id), config["color"]):
                 return
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.close(ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1160,25 +1120,19 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         reason: typing.Optional[str] = None,
     ) -> None:
         """Lock an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         lang = await self.get_lang(ctx.guild)
         if isinstance(ticket.channel, discord.TextChannel):
             raise commands.UserFeedbackCheckFailure(get_text(lang, "cannot_execute_text"))
         config = await self.get_config(ticket.guild, ticket.profile)
         if not confirmation and not ctx.assume_yes:
-            embed = discord.Embed()
-            embed.title = get_text(lang, "confirm_lock", id=ticket.id)
-            embed.color = config["color"]
-            embed.set_author(
-                name=ctx.author.name,
-                url=ctx.author.display_avatar,
-                icon_url=ctx.author.display_avatar,
-            )
-            if not await _confirm(ctx, embed):
+            if not await _confirm(ctx, get_text(lang, "confirm_lock", id=ticket.id), config["color"]):
                 return
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.lock(ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1199,6 +1153,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         self, ctx: commands.Context, *, reason: typing.Optional[str] = None
     ) -> None:
         """Unlock an existing locked Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         lang = await self.get_lang(ctx.guild)
         if isinstance(ticket.channel, discord.TextChannel):
@@ -1206,6 +1161,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.unlock(ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1230,11 +1186,13 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         reason: typing.Optional[str] = None,
     ) -> None:
         """Rename an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         lang = await self.get_lang(ctx.guild)
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.rename(new_name, ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1262,25 +1220,18 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
 
         If a logs channel is defined, an HTML transcript is saved first.
         """
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         config = await self.get_config(ticket.guild, ticket.profile)
         lang = await self.get_lang(ctx.guild)
         if not confirmation and not ctx.assume_yes:
-            embed = discord.Embed()
-            embed.title = get_text(lang, "confirm_delete", id=ticket.id)
-            if config["logschannel"] is not None:
-                embed.description = get_text(lang, "logs_note")
-            embed.color = config["color"]
-            embed.set_author(
-                name=ctx.author.name,
-                url=ctx.author.display_avatar,
-                icon_url=ctx.author.display_avatar,
-            )
-            if not await _confirm(ctx, embed):
+            description = get_text(lang, "logs_note") if config["logschannel"] is not None else None
+            if not await _confirm(ctx, get_text(lang, "confirm_delete", id=ticket.id), config["color"], description):
                 return
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.delete(ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1305,6 +1256,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         reason: typing.Optional[str] = None,
     ) -> None:
         """Claim an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         if member is None:
             member = ctx.author
@@ -1312,6 +1264,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.claim_ticket(member, ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1332,11 +1285,13 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         self, ctx: commands.Context, *, reason: typing.Optional[str] = None
     ) -> None:
         """Unclaim an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         lang = await self.get_lang(ctx.guild)
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.unclaim_ticket(ticket.claim, ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1361,6 +1316,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         reason: typing.Optional[str] = None,
     ) -> None:
         """Change the owner of an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         if new_owner is None:
             new_owner = ctx.author
@@ -1368,6 +1324,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         if reason is None:
             reason = get_text(lang, "no_reason_provided")
         await ticket.change_owner(new_owner, ctx.author, reason=reason)
+        await _ack_slash(ctx, lang)
 
     @decorator(
         ticket_check=True,
@@ -1390,8 +1347,10 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         members: commands.Greedy[discord.Member],
     ) -> None:
         """Add a member to an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         await ticket.add_member(list(members), ctx.author)
+        await _ack_slash(ctx, await self.get_lang(ctx.guild))
 
     @decorator(
         ticket_check=True,
@@ -1414,8 +1373,10 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         members: commands.Greedy[discord.Member],
     ) -> None:
         """Remove a member from an existing Ticket."""
+        await _defer_slash(ctx)
         ticket: Ticket = await self.get_ticket(ctx.channel)
         await ticket.remove_member(list(members), ctx.author)
+        await _ack_slash(ctx, await self.get_lang(ctx.guild))
 
     @commands.admin_or_permissions(administrator=True)
     @ticket.command(name="list")
@@ -1427,6 +1388,7 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
         owner: typing.Optional[discord.Member] = None,
     ) -> None:
         """List tickets for a profile. Optionally filter by status and/or owner."""
+        await _defer_slash(ctx, ephemeral=False)
         if status is None:
             status = "open"
         tickets = await self.config.guild(ctx.guild).tickets.all()
@@ -1454,15 +1416,10 @@ class TicketTool(settings, DashboardIntegration, commands.Cog):
             f"• **#{t.id}** - {t.status} - {t.channel.mention} - {t.reason.split(BREAK_LINE)[0][:30]}"
             for t in sorted(tickets_to_show, key=lambda x: x.id)
         )
-        pages = list(pagify(description, page_length=6000))
-        embeds = []
-        for page in pages:
-            embed = discord.Embed(
-                title=get_text(lang, "tickets_list_title", profile=profile)
-            )
-            embed.description = page
-            embeds.append(embed)
-        await _paginate(ctx, embeds)
+        pages = list(pagify(description, page_length=3500))
+        title = get_text(lang, "tickets_list_title", profile=profile)
+        color = await ctx.embed_color()
+        await ctx.send(view=PagesLayout(ctx.author.id, title, pages, color), allowed_mentions=NO_PINGS)
 
     # ── Button / dropdown interaction handlers ──────────────────────────────
 

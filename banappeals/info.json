@@ -5,7 +5,7 @@
     "author": [
         "itsneufox"
     ],
-    "min_bot_version": "3.5.0",
+    "min_bot_version": "3.5.24",
     "install_msg": "BanAppeals loaded. Use `[p]appealset` to configure the appeal forum/text channel, logs, cooldown, challenge count, and optional Ban ID API lookup.",
     "requirements": [
         "aiohttp>=3.8.0"

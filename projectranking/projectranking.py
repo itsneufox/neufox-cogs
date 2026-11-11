@@ -12,6 +12,26 @@ UPVOTE = "\U0001f44d"
 DOWNVOTE = "\U0001f44e"
 VOTE_EMOJIS = {UPVOTE, DOWNVOTE}
 SCHEDULER_INTERVAL = 15 * 60
+DEFAULT_COLOR = discord.Color.blurple()
+MAX_LAYOUT_TEXT = 3800
+NO_PINGS = discord.AllowedMentions.none()
+
+
+def _layout(*blocks: str, accent: discord.Color = DEFAULT_COLOR) -> discord.ui.LayoutView:
+    """Build a read-only message, trimmed to Discord's total text limit."""
+    view = discord.ui.LayoutView(timeout=None)
+    items: list[discord.ui.Item] = []
+    remaining = MAX_LAYOUT_TEXT
+    for block in blocks:
+        text = block[:remaining]
+        if not text:
+            break
+        remaining -= len(text)
+        if items:
+            items.append(discord.ui.Separator())
+        items.append(discord.ui.TextDisplay(text))
+    view.add_item(discord.ui.Container(*items, accent_color=accent))
+    return view
 
 log = logging.getLogger("red.neufox.projectranking")
 
@@ -71,7 +91,46 @@ class ProjectRanking(commands.Cog):
             lock = self._guild_locks[guild_id] = asyncio.Lock()
         return lock
 
-    @commands.group(name="projectrank", aliases=["projectranking"], invoke_without_command=True)
+    def control_panel_schema(self) -> dict:
+        return {
+            "title": "Project Ranking",
+            "description": "Weekly voting and promotion for forum projects.",
+            "settings": [
+                {
+                    "key": "paused",
+                    "label": "Promotions paused",
+                    "type": "bool",
+                    "help": "Voting continues. Weeks that end while paused are skipped.",
+                    "set": self._set_paused,
+                },
+                {
+                    "key": "best_creations_channel_id",
+                    "label": "Best Creations channel",
+                    "type": "channel",
+                    "channel_types": ["text"],
+                    "clearable": False,
+                    "help": "Where winners are posted. Use the setup command to change the forum.",
+                },
+            ],
+        }
+
+    async def _set_paused(self, guild: discord.Guild, paused: bool) -> bool:
+        """Pause or resume promotions. Returns False if resuming when already active."""
+        async with self._lock_for(guild.id):
+            guild_config = self.config.guild(guild)
+            if paused:
+                await guild_config.paused.set(True)
+                return True
+            data = await guild_config.all()
+            if not data["paused"]:
+                return False
+            # Close completed weeks as skipped before unpausing so a restart or
+            # delayed scheduler cannot publish a backlog of old winners.
+            await self._mark_closed_weeks_skipped(guild, data)
+            await guild_config.paused.set(False)
+            return True
+
+    @commands.hybrid_group(name="projectrank", aliases=["projectranking"], invoke_without_command=True)
     @commands.guild_only()
     async def projectrank(self, ctx: commands.Context):
         """Show the project voting commands."""
@@ -82,30 +141,13 @@ class ProjectRanking(commands.Cog):
     async def projectrank_setup(
         self,
         ctx: commands.Context,
-        forum_id: int,
-        best_creations_id: int,
+        forum: discord.ForumChannel,
+        best_creations: discord.TextChannel,
         *,
         tag_name: str = "Community Favorite",
     ):
-        """Set the forum and promotion channel by ID, plus the favorite tag."""
-        try:
-            forum = ctx.guild.get_channel(forum_id) or await ctx.guild.fetch_channel(forum_id)
-            best_creations = ctx.guild.get_channel(best_creations_id) or await ctx.guild.fetch_channel(
-                best_creations_id
-            )
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            await ctx.send("I couldn't find one of those channel IDs in this server.")
-            return
-        if not isinstance(forum, discord.ForumChannel):
-            await ctx.send(f"Channel ID `{forum_id}` is not a forum channel.")
-            return
-        if not isinstance(best_creations, discord.TextChannel):
-            await ctx.send(f"Channel ID `{best_creations_id}` is not a text channel.")
-            return
-        if forum.guild.id != ctx.guild.id or best_creations.guild.id != ctx.guild.id:
-            await ctx.send("Both channel IDs must belong to this server.")
-            return
-
+        """Set the forum, the promotion channel and the favorite tag."""
+        await ctx.defer()
         tag = None
         if tag_name.isdecimal():
             tag_id = int(tag_name)
@@ -147,6 +189,7 @@ class ProjectRanking(commands.Cog):
     @commands.admin_or_permissions(manage_guild=True)
     async def projectrank_sync(self, ctx: commands.Context):
         """Add the two voting reactions to this week's existing forum posts."""
+        await ctx.defer()
         data = await self.config.guild(ctx.guild).all()
         forum = ctx.guild.get_channel(data["forum_channel_id"]) if data["forum_channel_id"] else None
         if not isinstance(forum, discord.ForumChannel):
@@ -158,29 +201,20 @@ class ProjectRanking(commands.Cog):
             f"and couldn't update {failed}."
         )
 
-    @projectrank.command(name="pause")
+    @projectrank.command(name="pause", hidden=True, with_app_command=False)
     @commands.admin_or_permissions(manage_guild=True)
     async def projectrank_pause(self, ctx: commands.Context):
         """Pause weekly promotions while leaving voting active."""
-        async with self._lock_for(ctx.guild.id):
-            await self.config.guild(ctx.guild).paused.set(True)
+        await self._set_paused(ctx.guild, True)
         await ctx.send("Weekly Best Creations promotions are paused. Voting and vote tracking remain active.")
 
-    @projectrank.command(name="resume")
+    @projectrank.command(name="resume", hidden=True, with_app_command=False)
     @commands.admin_or_permissions(manage_guild=True)
     async def projectrank_resume(self, ctx: commands.Context):
         """Resume weekly promotions; weeks skipped while paused stay skipped."""
-        lock = self._lock_for(ctx.guild.id)
-        async with lock:
-            guild_config = self.config.guild(ctx.guild)
-            data = await guild_config.all()
-            if not data["paused"]:
-                await ctx.send("Weekly Best Creations promotions are already active.")
-                return
-            # Close completed weeks as skipped before unpausing so a restart or
-            # delayed scheduler cannot publish a backlog of old winners.
-            await self._mark_closed_weeks_skipped(ctx.guild, data)
-            await guild_config.paused.set(False)
+        if not await self._set_paused(ctx.guild, False):
+            await ctx.send("Weekly Best Creations promotions are already active.")
+            return
         await ctx.send("Weekly Best Creations promotions resumed. The current week's winner will be promoted at its end.")
 
     @projectrank.command(name="status")
@@ -208,14 +242,16 @@ class ProjectRanking(commands.Cog):
             if isinstance(forum, discord.ForumChannel)
             else None
         )
-        await ctx.send(
-            f"Forum: {forum.mention if forum else 'not set'} `ID: {data['forum_channel_id'] or '—'}`\n"
-            f"Best Creations: {destination.mention if destination else 'not set'} `ID: {data['best_creations_channel_id'] or '—'}`\n"
-            f"Favorite tag: {tag.name if tag else 'not available'} `ID: {data['favorite_tag_id'] or '—'}`\n"
-            f"Weekly promotions: {'paused' if data['paused'] else 'active'}\n"
-            f"Current week ({_week_key()}): {len(posts)} tracked project(s)\n"
-            f"Leader: {leader_text}"
+        setup = "\n".join(
+            [
+                f"**Forum:** {forum.mention if forum else 'not set'} `ID: {data['forum_channel_id'] or '—'}`",
+                f"**Best Creations:** {destination.mention if destination else 'not set'} `ID: {data['best_creations_channel_id'] or '—'}`",
+                f"**Favorite tag:** {discord.utils.escape_markdown(tag.name) if tag else 'not available'} `ID: {data['favorite_tag_id'] or '—'}`",
+                f"**Weekly promotions:** {'paused' if data['paused'] else 'active'}",
+            ]
         )
+        week = f"**Current week ({_week_key()}):** {len(posts)} tracked project(s)\n**Leader:** {leader_text}"
+        await ctx.send(view=_layout("## Project Ranking", setup, week), allowed_mentions=NO_PINGS)
 
     @projectrank.command(name="ranking", aliases=["rank", "top"])
     @commands.guild_only()
@@ -234,13 +270,14 @@ class ProjectRanking(commands.Cog):
                 f"**{index}.** [{title}]({post['jump_url']}) — "
                 f"👍 {post['upvotes']} · 👎 {post['downvotes']} · net {score:+d}"
             )
-        embed = discord.Embed(
-            title=f"Project ranking · {_week_range(_week_key())}",
-            description="\n".join(lines),
-            color=discord.Color.blurple(),
+        await ctx.send(
+            view=_layout(
+                f"## Project ranking · {_week_range(_week_key())}",
+                "\n".join(lines),
+                "-# Project authors and bot accounts do not count as voters. Only 👍 decides the weekly winner.",
+            ),
+            allowed_mentions=NO_PINGS,
         )
-        embed.set_footer(text="Project authors and bot accounts do not count as voters. Only 👍 decides the weekly winner.")
-        await ctx.send(embed=embed)
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread):

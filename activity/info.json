@@ -1,0 +1,11 @@
+{
+    "name": "Activity",
+    "short": "Chat and voice XP, activity stats, leaderboards and LWD$ rewards.",
+    "description": "One cog for server activity: chat and voice XP with levels and level roles, message, reaction and voice-time stats, a single leaderboard with a type picker, a combined rank card, top-message roles, and Economy LWD$ rewards for level milestones and leaderboard places. XP boosters bought in the Economy cog multiply XP. Replaces the Leveling and ActivityStats cogs and keeps their data.",
+    "author": ["itsneufox"],
+    "min_bot_version": "3.5.24",
+    "install_msg": "Activity loaded! It reuses existing Leveling and ActivityStats data. Unload those cogs first. Use `/rank`, `/leaderboard` and `/activity` after syncing slash commands; settings are in the `/control` panel.",
+    "requirements": [],
+    "tags": ["leveling", "xp", "levels", "stats", "messages", "reactions", "voice", "leaderboard", "utility"],
+    "end_user_data_statement": "This cog stores Discord user IDs, display names, per-server chat and voice XP, per-user level-up announcement preferences, message IDs mapped to author and channel IDs, per-user and per-channel message counts, per-message reaction counts, per-user received reaction counts, per-user voice time and active voice session start times, plus server settings such as ignored channels and roles, level roles, top-message roles and reward settings. It does not store message content or voice audio. Administrators can clear stats with `[p]activity reset` or turn tracking off in the control panel."
+}
